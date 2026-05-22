@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>randomx bonanza</title>
+
+<meta name="theme-color" content="#ffcfde" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1a1815" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffcfde">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="randomx bonanza">
+
+<meta name="description" content="in browser monero miner">
+<style>
+  @font-face {
+    font-family: 'IBM Plex Mono';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('fonts/ibm-plex-mono-regular.woff2') format('woff2');
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; border-radius: 0; }
+
+  ::selection      { background: rgba(255, 109, 166, 0.32); color: inherit; }
+  ::-moz-selection { background: rgba(255, 109, 166, 0.32); color: inherit; }
+
+  :root {
+    --w-bg:           #fefefc;
+    --w-bg-elev:      #f1f1f0;
+    --w-rule:         #a8a59c;
+    --w-ink:          #1a1815;
+    --w-ink-dim:      #4a4640;
+    --w-ink-faint:    #888579;
+    --w-amber:        #ff3b8a;
+    --w-amber-bright: #ff6da6;
+    --w-stone-border: #6e6b62;
+    --w-log-bg:       #f4f4f2;
+    --w-log-ink:      #1a1815;
+  }
+
+  body {
+    font-family: 'IBM Plex Mono', 'SF Mono', Menlo, 'Cascadia Mono', 'Roboto Mono', monospace;
+    color: var(--w-ink);
+    min-height: 100vh;
+    background: linear-gradient(to bottom, #ffcfde 0%, #ffffff 65%) fixed;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 1.5rem;
+    overflow-x: hidden;
+  }
+
+  .widget {
+    width: 100%;
+    max-width: 600px;
+    color: var(--w-ink);
+    background-color: var(--w-bg);
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.4' numOctaves='1' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.18'/></svg>");
+    background-size: 220px 220px;
+    background-repeat: repeat;
+    background-blend-mode: multiply;
+    border: 1px solid #000000;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .widget-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 0.7rem 1.1rem 0.6rem;
+    border-bottom: 1px solid var(--w-rule);
+    cursor: move;
+    user-select: none;
+  }
+  .widget-title {
+    font-size: 0.7rem;
+    letter-spacing: 0.42em;
+    text-transform: uppercase;
+    color: var(--w-ink);
+    padding-right: 0.4em;
+  }
+  .widget-title::after {
+    content: "· v0.0.1";
+    color: var(--w-ink-faint);
+    letter-spacing: 0.12em;
+    margin-left: 0.5em;
+  }
+  button.widget-toggle,
+  button.widget-toggle:hover {
+    background: transparent;
+    border: 0;
+    color: var(--w-ink-dim);
+    font: inherit;
+    font-size: 0.72rem;
+    letter-spacing: 0.18em;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+    line-height: 1;
+    appearance: none;
+    -webkit-appearance: none;
+    transition: none;
+  }
+  button.widget-toggle:hover { color: var(--w-amber); }
+
+  .widget-body { padding: 1.05rem 1.1rem 1.15rem; }
+
+  .widget.dragging { cursor: grabbing; }
+  .widget-mini { display: none; }
+  .widget.collapsed .widget-body { display: none; }
+  .widget.collapsed .widget-mini {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.9rem;
+    padding: 0.65rem 1.1rem;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .mini-line {
+    color: var(--w-ink);
+    font-size: 0.76rem;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    letter-spacing: 0.03em;
+  }
+  .mini-label {
+    color: var(--w-ink-dim);
+    font-size: 0.58rem;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    margin-right: 0.35rem;
+  }
+  .mini-sep { color: var(--w-ink-faint); margin: 0 0.55rem; }
+  .mini-controls { display: flex; gap: 0.6rem; flex-shrink: 0; align-items: center; }
+
+  .section-rule {
+    height: 0;
+    border: 0;
+    border-top: 1px solid var(--w-rule);
+    margin: 0.95rem 0;
+  }
+
+  .stat-row {
+    display: grid;
+    grid-template-columns: 8rem 1fr;
+    align-items: baseline;
+    column-gap: 0.6rem;
+    padding: 0.22rem 0;
+    margin: 0;
+  }
+  .stat-row .bar-label {
+    font-size: 0.62rem;
+    color: var(--w-ink-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin: 0;
+  }
+  .stat-row .bar-line {
+    font-size: 0.92rem;
+    color: var(--w-ink);
+    font-variant-numeric: tabular-nums;
+    text-align: left;
+    letter-spacing: 0.02em;
+  }
+  .stat-row .bar-meta { display: none; }
+
+  .bars { width: 100%; }
+  .bar-row { margin-bottom: 0.75rem; }
+  .bar-row[hidden] { display: none; }
+  .bar-label {
+    font-size: 0.62rem;
+    color: var(--w-ink-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 0.22rem;
+  }
+  .bar-line {
+    font-family: inherit;
+    font-variant-numeric: tabular-nums;
+    color: var(--w-ink);
+    font-size: 0.88rem;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .bar-line .blink-cell {
+    display: inline-block;
+    animation: bar-cell-blink 1s ease-in-out infinite;
+    color: var(--w-amber);
+  }
+  @keyframes bar-cell-blink {
+    0%, 100% { color: var(--w-amber); opacity: 1; }
+    50%      { color: var(--w-ink);   opacity: 0.4; }
+  }
+  .bar-meta {
+    font-size: 0.58rem;
+    color: var(--w-ink-dim);
+    letter-spacing: 0.1em;
+    margin-top: 0.2rem;
+    min-height: 1em;
+  }
+
+  .rebuild-row { margin: 0; }
+  .rebuild-row > .bar-label,
+  .rebuild-row > .bar-meta { display: none; }
+  .rebuild-row .bar-line {
+    display: flex;
+    gap: 1.6rem;
+    align-items: baseline;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+  .rebuild-row button,
+  .mini-controls button {
+    background: transparent;
+    color: var(--w-ink);
+    border: 0;
+    padding: 0;
+    font-family: inherit;
+    font-size: 0.82rem;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    margin: 0;
+    line-height: 1.2;
+    appearance: none;
+    -webkit-appearance: none;
+    cursor: pointer;
+    transition: none;
+  }
+  .rebuild-row button::before,
+  .mini-controls button::before {
+    content: "[";
+    color: var(--w-ink-faint);
+    margin-right: 0.55em;
+  }
+  .rebuild-row button::after,
+  .mini-controls button::after {
+    content: "]";
+    color: var(--w-ink-faint);
+    margin-left: 0.55em;
+  }
+  .rebuild-row button:hover,
+  .mini-controls button:hover { color: var(--w-amber-bright); }
+  .rebuild-row button:hover::before,
+  .rebuild-row button:hover::after,
+  .mini-controls button:hover::before,
+  .mini-controls button:hover::after { color: var(--w-amber); }
+  .rebuild-row button.active,
+  .mini-controls button.active { color: var(--w-amber); }
+  .rebuild-row button.active::before,
+  .rebuild-row button.active::after,
+  .mini-controls button.active::before,
+  .mini-controls button.active::after { color: var(--w-amber); }
+
+  .threads-control {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.55rem;
+    margin-left: auto;
+  }
+  .threads-label {
+    font-size: 0.58rem;
+    color: var(--w-ink-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.22em;
+  }
+  .rebuild-row input,
+  .mini-controls input {
+    width: 2.6rem;
+    text-align: center;
+    background: transparent;
+    color: var(--w-amber);
+    border: 0;
+    border-bottom: 1px solid var(--w-ink-faint);
+    padding: 0 0.1rem 0.15rem;
+    font-family: inherit;
+    font-size: 0.82rem;
+    letter-spacing: 0.04em;
+    margin: 0;
+    line-height: 1.2;
+    -moz-appearance: textfield;
+  }
+  .rebuild-row input::-webkit-outer-spin-button,
+  .rebuild-row input::-webkit-inner-spin-button,
+  .mini-controls input::-webkit-outer-spin-button,
+  .mini-controls input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .rebuild-row input:focus,
+  .mini-controls input:focus {
+    outline: 0;
+    border-bottom-color: var(--w-amber);
+  }
+
+  .setup-header-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.62rem;
+    color: var(--w-ink-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin: 0;
+  }
+  .setup-header-row::before {
+    content: "▸";
+    color: var(--w-ink-faint);
+    font-size: 0.7rem;
+    letter-spacing: 0;
+    line-height: 1;
+  }
+  .wallet-section.expanded .setup-header-row::before {
+    content: "▾";
+    color: var(--w-amber);
+  }
+  button.setup-toggle,
+  button.setup-toggle:hover {
+    background: transparent;
+    border: 0;
+    color: var(--w-ink-dim);
+    font: inherit;
+    letter-spacing: inherit;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+    line-height: 1;
+    appearance: none;
+    -webkit-appearance: none;
+    transition: none;
+  }
+  button.setup-toggle:hover,
+  .wallet-section.expanded .setup-toggle { color: var(--w-amber); }
+
+  .wallet-section { position: relative; margin: 0; }
+  .wallet-body { display: none; }
+
+  .wallet-section.expanded .wallet-body {
+    display: block;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    margin-top: 0.6rem;
+    background:
+      repeating-linear-gradient(
+        45deg,
+        rgba(26, 24, 21, 0.07) 0,
+        rgba(26, 24, 21, 0.07) 2px,
+        transparent 2px,
+        transparent 10px
+      ),
+      var(--w-bg-elev);
+    border: 1px solid var(--w-ink-faint);
+    padding: 0.95rem 1rem;
+    z-index: 10;
+  }
+  .wallet-body .bar-row { margin-bottom: 0.7rem; }
+  .wallet-body .bar-row:last-child { margin-bottom: 0; }
+
+  .input-row .bar-line {
+    display: flex;
+    gap: 0.55rem;
+    align-items: center;
+  }
+  .input-row input,
+  .input-row button {
+    background: var(--w-bg);
+    color: var(--w-ink);
+    border: 1px solid var(--w-ink-faint);
+    padding: 0.4rem 0.65rem;
+    font-family: inherit;
+    font-size: 0.78rem;
+    margin: 0;
+    line-height: 1.2;
+    letter-spacing: 0.04em;
+  }
+  .input-row input { text-align: left; }
+  .input-row input[type="text"] { flex: 1; min-width: 0; }
+  .input-row input:focus { outline: 0; border-color: var(--w-amber); }
+  .input-row .pool-port { width: 5.5rem; flex: 0 0 auto; text-align: center; }
+  .donate-wrap {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.2rem;
+    flex: 0 0 auto;
+  }
+  .donate-hint {
+    font-size: 0.52rem;
+    color: var(--w-ink-faint);
+    text-align: center;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    line-height: 1.1;
+  }
+  .input-row button {
+    cursor: pointer;
+    transition: none;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: 0.68rem;
+    flex: 0 0 auto;
+  }
+  .input-row button:hover {
+    background: var(--w-ink);
+    color: var(--w-bg);
+    border-color: var(--w-ink);
+  }
+
+  #log {
+    background-color: var(--w-log-bg);
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.4' numOctaves='1' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.18'/></svg>");
+    background-size: 220px 220px;
+    background-repeat: repeat;
+    background-blend-mode: multiply;
+    background-attachment: local;
+    border: 1px solid var(--w-stone-border);
+    padding: 0.75rem 0.9rem;
+    height: 220px;
+    overflow-y: auto;
+    font-size: 0.7rem;
+    color: var(--w-log-ink);
+    line-height: 1.42;
+    margin-top: 0;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(26, 24, 21, 0.4) transparent;
+  }
+  #log::-webkit-scrollbar { width: 6px; }
+  #log::-webkit-scrollbar-track { background: transparent; }
+  #log::-webkit-scrollbar-thumb { background: rgba(26, 24, 21, 0.4); }
+  #log div { margin-bottom: 1px; word-break: break-all; overflow-wrap: anywhere; }
+  .log-banner {
+    font-family: inherit;
+    white-space: pre;
+    margin: 0 0 0.6rem;
+    font-size: 0.7rem;
+    line-height: 1.3;
+    user-select: none;
+    color: var(--w-ink-dim);
+  }
+
+  /* Compact widget at narrow viewports or short heights: shrink padding,
+     font sizes, and log slab proportionally so the panel actually fits
+     in the viewport without scrolling. */
+  @media (max-width: 1280px), (max-height: 820px) {
+    .widget-header { padding: 0.55rem 0.9rem 0.5rem; }
+    .widget-title { font-size: 0.6rem; letter-spacing: 0.36em; }
+    .widget-title::after { letter-spacing: 0.1em; margin-left: 0.4em; }
+    button.widget-toggle { font-size: 0.62rem; letter-spacing: 0.15em; }
+    .widget-body { padding: 0.8rem 0.9rem 0.9rem; }
+    .section-rule { margin: 0.65rem 0; }
+    .stat-row { grid-template-columns: 6rem 1fr; padding: 0.16rem 0; column-gap: 0.5rem; }
+    .stat-row .bar-label { font-size: 0.54rem; }
+    .stat-row .bar-line { font-size: 0.8rem; }
+    .bar-row { margin-bottom: 0.55rem; }
+    .bar-label { font-size: 0.54rem; margin-bottom: 0.16rem; letter-spacing: 0.13em; }
+    .bar-line { font-size: 0.76rem; letter-spacing: 0.04em; }
+    .bar-meta { font-size: 0.52rem; margin-top: 0.14rem; letter-spacing: 0.08em; }
+    .rebuild-row .bar-line { gap: 1.2rem; }
+    .rebuild-row button,
+    .mini-controls button { font-size: 0.72rem; letter-spacing: 0.2em; }
+    .rebuild-row input,
+    .mini-controls input { font-size: 0.72rem; width: 2.3rem; }
+    .threads-label { font-size: 0.52rem; letter-spacing: 0.18em; }
+    .setup-header-row { font-size: 0.54rem; letter-spacing: 0.13em; }
+    .input-row input,
+    .input-row button { font-size: 0.7rem; padding: 0.32rem 0.55rem; }
+    .input-row button { font-size: 0.6rem; letter-spacing: 0.14em; }
+    .donate-hint { font-size: 0.45rem; letter-spacing: 0.12em; }
+    .widget.collapsed .widget-mini { padding: 0.5rem 0.9rem; gap: 0.7rem; }
+    .mini-line { font-size: 0.7rem; }
+    .mini-label { font-size: 0.5rem; letter-spacing: 0.13em; }
+    #log {
+      height: 140px;
+      padding: 0.6rem 0.75rem;
+      font-size: 0.62rem;
+      line-height: 1.38;
+    }
+    .log-banner { font-size: 0.62rem; margin: 0 0 0.4rem; }
+  }
+
+  @media (max-height: 680px) {
+    .widget-body { padding: 0.65rem 0.85rem 0.75rem; }
+    .section-rule { margin: 0.5rem 0; }
+    .bar-row { margin-bottom: 0.4rem; }
+    #log { height: 90px; }
+  }
+</style>
+</head>
+<body>
+  <div class="widget" id="widget">
+    <div class="widget-header" id="widgetHeader">
+      <span class="widget-title">randomx bonanza</span>
+      <button class="widget-toggle" id="widgetToggle" title="collapse / expand">[ − ]</button>
+    </div>
+    <div class="widget-mini" id="widgetMini">
+      <span class="mini-line">
+        <span class="mini-label">Next share ETA</span><span id="miniEta">--</span>
+        <span class="mini-sep">·</span>
+        <span class="mini-label">A/R</span><span id="miniShares">0/0</span>
+        <span class="mini-sep">·</span>
+        <span id="miniHashrate">   0</span><span class="mini-label" style="margin-left:0.25rem">H/s</span>
+      </span>
+      <span class="mini-controls">
+        <button id="miniToggle">Start</button>
+        <button id="miniRebuild">Rebuild</button>
+        <input type="number" id="miniThreads" min="1" max="32" value="32">
+      </span>
+    </div>
+
+    <div class="widget-body">
+      <div class="bars">
+        <div class="bar-row stat-row" id="shares-row">
+          <div class="bar-label">Shares</div>
+          <div class="bar-line"><span id="accepted">0</span> / <span id="rejected">0</span></div>
+          <div class="bar-meta">accepted / rejected</div>
+        </div>
+
+        <div class="bar-row stat-row" id="mode-row">
+          <div class="bar-label">Mode</div>
+          <div class="bar-line" id="mode">standby</div>
+        </div>
+
+        <div class="bar-row stat-row" id="jit-row">
+          <div class="bar-label">JIT</div>
+          <div class="bar-line" id="jit">--</div>
+        </div>
+
+        <div class="bar-row stat-row" id="status-row">
+          <div class="bar-label">Status</div>
+          <div class="bar-line" id="status">disconnected</div>
+        </div>
+
+        <div class="section-rule"></div>
+
+        <div class="bar-row" id="hashrate-row">
+          <div class="bar-label">Hashrate</div>
+          <div class="bar-line" id="hashrateBar">&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;    - H/s</div>
+          <div class="bar-meta" id="hashrateMeta">no samples yet</div>
+        </div>
+
+        <div class="bar-row" id="datasetBarRow">
+          <div class="bar-label">Dataset build</div>
+          <div class="bar-line" id="datasetBar">&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;   - %</div>
+          <div class="bar-meta" id="datasetBarMeta">not started</div>
+        </div>
+
+        <div class="bar-row" id="shareBarRow">
+          <div class="bar-label">Next share ETA</div>
+          <div class="bar-line" id="shareBar">&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;&#9649;    - s</div>
+          <div class="bar-meta" id="shareBarMeta">not mining</div>
+        </div>
+
+        <div class="section-rule"></div>
+
+        <div class="wallet-section" id="walletSection">
+          <div class="setup-header-row">
+            <span>Wallet setup</span>
+            <button type="button" class="setup-toggle" id="setupToggle" title="show / hide wallet setup">[+]</button>
+          </div>
+          <div class="wallet-body" id="walletBody">
+            <div class="bar-row input-row">
+              <div class="bar-label">Wallet</div>
+              <div class="bar-line">
+                <input type="text" id="walletInput" spellcheck="false" autocomplete="off" placeholder="monero address">
+                <button id="setAddressBtn" type="button">Set</button>
+              </div>
+              <div class="bar-meta">payout destination · Set tests pool handshake</div>
+            </div>
+
+            <div id="setupBody">
+          <div class="bar-row input-row">
+            <div class="bar-label">Worker</div>
+            <div class="bar-line">
+              <input type="text" id="workerInput" spellcheck="false" autocomplete="off" placeholder="worker name">
+            </div>
+            <div class="bar-meta">identifier for this miner (Stratum pass field)</div>
+          </div>
+
+          <div class="bar-row input-row">
+            <div class="bar-label">Preset</div>
+            <div class="bar-line">
+              <button id="presetSupportxmr" type="button">supportxmr</button>
+              <button id="presetMoneroocean" type="button">moneroocean</button>
+            </div>
+            <div class="bar-meta">fills host + port (wallet unchanged)</div>
+          </div>
+
+          <div class="bar-row input-row">
+            <div class="bar-label">Pool</div>
+            <div class="bar-line">
+              <input type="text" id="poolHostInput" spellcheck="false" autocomplete="off" placeholder="HOST">
+              <input type="number" id="poolPortInput" class="pool-port" min="1" max="65535" placeholder="PORT">
+              <span class="donate-wrap">
+                <button id="donateBtn" type="button">Donate</button>
+                <span class="donate-hint">set donate address macro</span>
+              </span>
+            </div>
+            <div class="bar-meta">apply on next Start (or Rebuild)</div>
+          </div>
+          </div>
+          </div>
+        </div>
+
+        <div class="section-rule"></div>
+
+        <div class="bar-row rebuild-row">
+          <div class="bar-label">Thread count</div>
+          <div class="bar-line">
+            <button id="toggle">Start</button>
+            <button id="rebuildBtn">Rebuild</button>
+            <span class="threads-control">
+              <span class="threads-label">Threads</span>
+              <input type="number" id="rebuildThreads" min="1" max="32" value="32">
+            </span>
+          </div>
+          <div class="bar-meta">rebuild to adjust thread count</div>
+        </div>
+
+        <div class="section-rule"></div>
+      </div>
+
+      <div id="log"><pre class="log-banner" id="logBanner">⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘ =^._.^= randomx_bonanza v0.0.1-alpha ⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘⫘</pre></div>
+    </div>
+  </div>
+
+  <!-- MINER_DEFAULTS is rewritten from config.js by the local proxy so the
+       client knows the project's default wallet + pool target without
+       hardcoding them in JS. -->
+  <script>
+    window.MINER_BUILD = 'demo';
+    window.MINER_DEFAULTS = {
+      wallet:   'DEFAULT_WALLET_PLACEHOLDER',
+      poolHost: 'DEFAULT_POOL_HOST_PLACEHOLDER',
+      poolPort: 'DEFAULT_POOL_PORT_PLACEHOLDER',
+    };
+  </script>
+  <script src="miner.js"></script>
+</body>
+</html>
