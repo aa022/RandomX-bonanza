@@ -23,6 +23,9 @@
 //              i8x16.swizzle (soft_aes.h), 0 = the T-table soft AES. Not a
 //              module-gen knob: rxjit_set_profile / rxjit_set_aes_simd update
 //              g_rx_aes_simd directly.
+//   aes_relaxed hashAndFillAes1Rx4 in a separate relaxed-SIMD side module
+//              (wasm/aes_relaxed, i8x16.relaxed_swizzle = one pshufb), only
+//              when the feature has relaxed SIMD; g_rx_aes_relaxed.
 //
 // K + fuse_n + triples_n > 255 switches the records to u16 kinds
 // (rxjit_kind16, wasm_jit_decode.h).
@@ -37,14 +40,16 @@ typedef struct {
 	int triples_n;
 	int shared_code;
 	int aes_simd;
+	int aes_relaxed;
 } rxjit_profile_t;
 
 static const rxjit_profile_t rxjit_profiles[RXJIT_PROFILE_COUNT] = {
-	{200, 0, 0, 0, 0}, // arm: RXJIT_FUSE_N_DEFAULT, u8 kinds, per-thread pointers baked
+	{200, 0, 0, 0, 0, 0}, // arm: RXJIT_FUSE_N_DEFAULT, u8 kinds, per-thread pointers baked
 	// x86: 800 pairs (u16 kinds). Zen 3 sweep (amd64_notes.md): 12T 525 -> 570-599
 	// H/s, 1T 82 -> 100; bigger tables / triples / unroll2 win at 1T and 6T but
 	// not at 12T (SMT siblings share the op cache and L1i). shared_code: one
 	// copy of the machine code for all threads. aes_simd: vpaes SIMD AES
 	// instead of the T-tables (13% of the mining thread).
-	{800, 0, 0, 1, 1},
+	// aes_relaxed: hashAndFill through the relaxed side module.
+	{800, 0, 0, 1, 1, 1},
 };

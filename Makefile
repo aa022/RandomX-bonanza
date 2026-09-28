@@ -20,7 +20,7 @@ UNAME_S      := $(shell uname -s 2>/dev/null)
 WASM_SRC_FILES := $(shell find $(SRC_DIR) -maxdepth 2 \
                     \( -name '*.c' -o -name '*.cpp' \
                        -o -name '*.h' -o -name '*.hpp' \) 2>/dev/null)
-WASM_DEPS      := $(WASM_DIR)/build.sh $(WASM_DIR)/wasm_softround.h $(WASM_SRC_FILES)
+WASM_DEPS      := $(WASM_DIR)/build.sh $(WASM_DIR)/wasm_softround.h $(WASM_DIR)/aes_relaxed/aes_relaxed.c $(WASM_SRC_FILES)
 WASM_WASM      := $(PUBLIC_DIR)/randomx.wasm
 WASM_JS        := $(PUBLIC_DIR)/randomx.js
 WASM_OUT       := $(WASM_WASM) $(WASM_JS)

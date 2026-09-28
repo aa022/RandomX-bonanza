@@ -404,8 +404,30 @@ void fillAes4Rx4(void *state, size_t outputSize, void *buffer) {
 template void fillAes4Rx4<true>(void *state, size_t outputSize, void *buffer);
 template void fillAes4Rx4<false>(void *state, size_t outputSize, void *buffer);
 
+#if defined(__wasm_simd128__)
+// Constants for the relaxed side module (soft_aes.h rx_aes_relaxed_k_t);
+// dynamically initialised at startup on the main thread (shared memory).
+static rx_aes_relaxed_k_t rx_aes_relaxed_make() {
+	rx_aes_relaxed_k_t r;
+	r.k = rx_aes_simd_tab;
+	r.c[0] = rx_set_int_vec_i128(AES_HASH_1R_STATE0);
+	r.c[1] = rx_set_int_vec_i128(AES_HASH_1R_STATE1);
+	r.c[2] = rx_set_int_vec_i128(AES_HASH_1R_STATE2);
+	r.c[3] = rx_set_int_vec_i128(AES_HASH_1R_STATE3);
+	r.c[4] = rx_set_int_vec_i128(AES_GEN_1R_KEY0);
+	r.c[5] = rx_set_int_vec_i128(AES_GEN_1R_KEY1);
+	r.c[6] = rx_set_int_vec_i128(AES_GEN_1R_KEY2);
+	r.c[7] = rx_set_int_vec_i128(AES_GEN_1R_KEY3);
+	r.c[8] = rx_set_int_vec_i128(AES_HASH_1R_XKEY0);
+	r.c[9] = rx_set_int_vec_i128(AES_HASH_1R_XKEY1);
+	return r;
+}
+extern "C" alignas(16) const rx_aes_relaxed_k_t rx_aes_relaxed_k = rx_aes_relaxed_make();
+#endif
+
 template<bool softAes>
 void hashAndFillAes1Rx4(void *scratchpad, size_t scratchpadSize, void *hash, void* fill_state) {
+	if (softAes && g_rx_aes_relaxed && rx_aes_relaxed_hf(scratchpad, scratchpadSize, hash, fill_state)) return;
 	if (softAes && g_rx_aes_simd) hashAndFillAes1Rx4_impl<true, true>(scratchpad, scratchpadSize, hash, fill_state);
 	else hashAndFillAes1Rx4_impl<softAes, false>(scratchpad, scratchpadSize, hash, fill_state);
 }

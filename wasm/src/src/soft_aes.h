@@ -66,6 +66,13 @@ inline rx_vec_i128 aesdec(rx_vec_i128 in, rx_vec_i128 key) {
 // NO relaxed SIMD here: randomx.wasm must stay valid in JSC.
 extern "C" int g_rx_aes_simd; // 0 = T-table, 1 = SIMD; set from the profile (wasm_jit_run.cpp)
 
+// Relaxed-SIMD side module (wasm/aes_relaxed, soft_aes.cpp): hashAndFillAes1Rx4
+// on i8x16.relaxed_swizzle. g_rx_aes_relaxed = profile aes_relaxed AND a
+// relaxed feature (wasm_jit_run.cpp). rx_aes_relaxed_hf returns 0 if the side
+// module could not be used (the caller falls back to the in-module paths).
+extern "C" int g_rx_aes_relaxed;
+extern "C" int rx_aes_relaxed_hf(void* scratchpad, size_t size, void* hash, void* fill_state);
+
 #if defined(__wasm_simd128__)
 struct rx_aes_simd_k {
 	v128_t m0f, c1b, c63, ipt_lo, ipt_hi, dipt_lo, dipt_hi, inv, inva, sbo_u, sbo_t, dsbo_u, dsbo_t;
@@ -80,6 +87,14 @@ struct rx_aes_simd_k {
 // a copy of itself xor'ed with that opaque zero (pxor + paddb; LLVM cannot
 // lower v128 inline asm, so no free barrier).
 extern "C" const rx_aes_simd_k rx_aes_simd_tab;
+
+// What the side module's hf loads from kptr: the 17 vpaes constants, then
+// AES_HASH_1R_STATE0..3, AES_GEN_1R_KEY0..3, AES_HASH_1R_XKEY0..1 (aes_hash.cpp).
+struct rx_aes_relaxed_k_t {
+	rx_aes_simd_k k;
+	v128_t c[10];
+};
+extern "C" const rx_aes_relaxed_k_t rx_aes_relaxed_k;
 
 static inline rx_aes_simd_k rx_aes_simd_load() {
 	const rx_aes_simd_k* volatile p = &rx_aes_simd_tab;

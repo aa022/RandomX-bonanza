@@ -675,10 +675,12 @@ EMSCRIPTEN_KEEPALIVE uint32_t rxjit_err_buf_size(void) {
 // Set from the main thread; read by every pthread worker — must be atomic
 // so the C++ memory model is satisfied. Initial value 0 (baseline emitter).
 static std::atomic<int> g_rxjit_feature{0};
+static void rxjit_sync_aes_relaxed(void);
 
 EMSCRIPTEN_KEEPALIVE
 void rxjit_set_feature(int feature) {
 	g_rxjit_feature.store(feature & RXJIT_FEATURE_MASK, std::memory_order_relaxed);
+	rxjit_sync_aes_relaxed();
 }
 
 // Threaded-module generator profile + knob overrides (wasm_jit_profile.h).
@@ -690,6 +692,19 @@ static std::atomic<int> g_rxjit_triples_n_override{-1}; // -1: the profile's tri
 static std::atomic<int> g_rxjit_unroll2_override{-1};   // -1: the profile's unroll2 | bit 128
 static std::atomic<int> g_rxjit_shared_code_override{-1}; // -1: the profile's shared_code
 static std::atomic<int> g_rxjit_aes_simd_override{-1};    // -1: the profile's aes_simd
+static std::atomic<int> g_rxjit_aes_relaxed_override{-1}; // -1: the profile's aes_relaxed
+
+extern "C" int g_rx_aes_relaxed; // soft_aes.cpp, read by aes_hash.cpp per call
+
+// aes_relaxed: the profile's (or the override) AND a relaxed feature (FMA
+// implies relaxed), so an engine without relaxed SIMD never compiles the side
+// module (it would fail and fall back anyway).
+static void rxjit_sync_aes_relaxed(void) {
+	int a = g_rxjit_aes_relaxed_override.load(std::memory_order_relaxed);
+	if (a < 0) a = rxjit_profiles[g_rxjit_profile.load(std::memory_order_relaxed)].aes_relaxed;
+	const int f = g_rxjit_feature.load(std::memory_order_relaxed);
+	g_rx_aes_relaxed = a != 0 && (f & (RXJIT_FEATURE_RELAXED_SIMD | RXJIT_FEATURE_FMA)) != 0;
+}
 
 extern "C" int g_rx_aes_simd; // soft_aes.cpp, read by aes_hash.cpp per call
 
@@ -706,6 +721,18 @@ EMSCRIPTEN_KEEPALIVE
 void rxjit_set_profile(int id) {
 	if (id >= 0 && id < RXJIT_PROFILE_COUNT) g_rxjit_profile.store(id, std::memory_order_relaxed);
 	rxjit_sync_aes_simd();
+	rxjit_sync_aes_relaxed();
+}
+
+EMSCRIPTEN_KEEPALIVE
+void rxjit_set_aes_relaxed(int on) {
+	g_rxjit_aes_relaxed_override.store(on < 0 ? -1 : on != 0, std::memory_order_relaxed);
+	rxjit_sync_aes_relaxed();
+}
+
+EMSCRIPTEN_KEEPALIVE
+int rxjit_effective_aes_relaxed(void) {
+	return g_rx_aes_relaxed;
 }
 
 EMSCRIPTEN_KEEPALIVE

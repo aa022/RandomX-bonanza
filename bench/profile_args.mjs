@@ -8,11 +8,13 @@
 //                            machine-code copy for all threads), overrides the profile's
 //   --aes-simd 0|1           main-module AES: 1 = vpaes SIMD rounds, 0 = T-tables
 //                            (x86 profile 1, arm 0), overrides the profile's
+//   --aes-relaxed 0|1        hashAndFill AES in the relaxed-SIMD side module (x86
+//                            profile 1, arm 0; needs a relaxed feature), overrides the profile's
 //
 //   const prof = parseProfileArgs(args);
 //   ... _rxjit_set_feature(...) ...
 //   applyProfile(Module, prof);  // after the last set_feature, before the first hash
-//   profileHeader(Module, prof)  // 'profile=x86 (auto) fuse_n=800 triples_n=0 unroll2=0 kind16=1 shared=1 aes=1'
+//   profileHeader(Module, prof)  // 'profile=x86 (auto) fuse_n=800 triples_n=0 unroll2=0 kind16=1 shared=1 aes=1 aesr=1'
 
 export const PROFILE_NAMES = ['arm', 'x86']; // index = RXJIT_PROFILE_*
 
@@ -33,6 +35,8 @@ export function parseProfileArgs(args) {
   if (sc !== '' && sc !== '0' && sc !== '1') bad(`--shared-code wants 0|1, got '${sc}'`);
   const as = arg('--aes-simd');
   if (as !== '' && as !== '0' && as !== '1') bad(`--aes-simd wants 0|1, got '${as}'`);
+  const ar = arg('--aes-relaxed');
+  if (ar !== '' && ar !== '0' && ar !== '1') bad(`--aes-relaxed wants 0|1, got '${ar}'`);
   return {
     name: req === 'auto' ? (process.arch === 'x64' ? 'x86' : 'arm') : req,
     mode: req === 'auto' ? 'auto' : 'forced',
@@ -41,6 +45,7 @@ export function parseProfileArgs(args) {
     unroll2: uv,
     sharedCode: sc === '' ? -1 : Number(sc),
     aesSimd: as === '' ? -1 : Number(as),
+    aesRelaxed: ar === '' ? -1 : Number(ar),
   };
 }
 
@@ -51,6 +56,7 @@ export function applyProfile(Module, prof) {
   Module._rxjit_set_unroll2(prof.unroll2);
   Module._rxjit_set_shared_code(prof.sharedCode);
   Module._rxjit_set_aes_simd(prof.aesSimd);
+  Module._rxjit_set_aes_relaxed(prof.aesRelaxed);
 }
 
 // Effective values read back from C (the feature's NO_FUSE bit included).
@@ -58,7 +64,8 @@ export function profileHeader(Module, prof) {
   return `profile=${PROFILE_NAMES[Module._rxjit_get_profile()]} (${prof.mode})` +
     ` fuse_n=${Module._rxjit_effective_fuse_n()} triples_n=${Module._rxjit_effective_triples_n()}` +
     ` unroll2=${Module._rxjit_effective_unroll2()} kind16=${Module._rxjit_effective_kind16()}` +
-    ` shared=${Module._rxjit_effective_shared_code()} aes=${Module._rxjit_effective_aes_simd()}`;
+    ` shared=${Module._rxjit_effective_shared_code()} aes=${Module._rxjit_effective_aes_simd()}` +
+    ` aesr=${Module._rxjit_effective_aes_relaxed()}`;
 }
 
 // Module-bytes identity: every generated threaded module is FNV-1a hashed; with

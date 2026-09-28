@@ -308,7 +308,8 @@ async function init(options = {}) {
         // with fine overrides in jit_exp: fuse_n=N, triples_n=N, unroll2 or
         // unroll2=0|1 (2x dispatch replication), shared_code=0|1 (no per-thread
         // pointer in the module bytes, so V8 compiles one copy for all
-        // workers), aes_simd=0|1 (SIMD vs T-table AES in randomx.wasm). 'auto' is isX86() ? x86 : arm;
+        // workers), aes_simd=0|1 (SIMD vs T-table AES in randomx.wasm),
+        // aes_relaxed=0|1 (hashAndFill AES in the relaxed-SIMD side module). 'auto' is isX86() ? x86 : arm;
         // JSC always gets arm (it refused to tier up the large functions).
         if (Module._rxjit_set_profile) {
           const PROFILE_NAMES = ['arm', 'x86']; // index = RXJIT_PROFILE_*
@@ -335,13 +336,16 @@ async function init(options = {}) {
           if (Module._rxjit_set_shared_code) Module._rxjit_set_shared_code(expNum('shared_code'));
           // aes_simd=0|1: main-module AES, vpaes SIMD rounds (x86 profile) or T-tables
           if (Module._rxjit_set_aes_simd) Module._rxjit_set_aes_simd(expNum('aes_simd'));
+          // aes_relaxed=0|1: hashAndFill via the relaxed side module (x86 profile, relaxed feature only)
+          if (Module._rxjit_set_aes_relaxed) Module._rxjit_set_aes_relaxed(expNum('aes_relaxed'));
           postMessage({
             type: 'status',
             message: `JIT profile: ${PROFILE_NAMES[Module._rxjit_get_profile()]} (${auto ? 'auto' : 'forced'})` +
               ` fuse_n=${Module._rxjit_effective_fuse_n()} triples_n=${Module._rxjit_effective_triples_n()}` +
               ` unroll2=${Module._rxjit_effective_unroll2()}` +
               (Module._rxjit_effective_shared_code ? ` shared_code=${Module._rxjit_effective_shared_code()}` : '') +
-              (Module._rxjit_effective_aes_simd ? ` aes_simd=${Module._rxjit_effective_aes_simd()}` : ''),
+              (Module._rxjit_effective_aes_simd ? ` aes_simd=${Module._rxjit_effective_aes_simd()}` : '') +
+              (Module._rxjit_effective_aes_relaxed ? ` aes_relaxed=${Module._rxjit_effective_aes_relaxed()}` : ''),
           });
         }
         postMessage({ type: 'status', message: 'JIT path: THREADED-INTERPRETER (resident module)' });

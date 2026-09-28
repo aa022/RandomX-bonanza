@@ -366,6 +366,7 @@ rx_vec_i128 soft_aesdec(rx_vec_i128 in, rx_vec_i128 key) {
 
 // ---- SIMD AES (vpaes-style, soft_aes.h) ----
 extern "C" int g_rx_aes_simd = 0;
+extern "C" int g_rx_aes_relaxed = 0;
 
 #if defined(__wasm_simd128__)
 #include <emscripten.h>
@@ -433,4 +434,52 @@ extern "C" EMSCRIPTEN_KEEPALIVE uint32_t rx_aes_bench(uint32_t n, int mode) {
 	}
 	return wasm_i32x4_extract_lane(wasm_v128_xor(wasm_v128_xor(a, b), wasm_v128_xor(c, d)), 0);
 }
+
+// ---- relaxed-SIMD side module bridge (wasm/aes_relaxed/aes_relaxed.c) ----
+// The side module's bytes are data here; each worker compiles + instantiates
+// it once against the shared memory (cache: globalThis.__rxAesR; null = gave
+// up, e.g. no relaxed SIMD in this engine) and calls hf directly.
+#include "rx_aes_relaxed_blob.h"
+#include <atomic>
+
+EM_JS(int, rx_js_aes_relaxed_hf, (int blob, int len, int sp, int size, int hash, int fill, int kptr), {
+	var g = globalThis;
+	var f = g.__rxAesR;
+	if (f === null) return 0;
+	try {
+		if (f === undefined) {
+			g.__rxAesR = null;
+			var mem = null;
+			if (Module && Module.wasmMemory instanceof WebAssembly.Memory) mem = Module.wasmMemory;
+			else if (typeof wasmMemory !== 'undefined' && wasmMemory instanceof WebAssembly.Memory) mem = wasmMemory;
+			else if (typeof self !== 'undefined' && self.wasmMemory instanceof WebAssembly.Memory) mem = self.wasmMemory;
+			if (!mem) throw new Error('wasmMemory unavailable');
+			var mod = new WebAssembly.Module(new Uint8Array(mem.buffer, blob >>> 0, len).slice());
+			f = new WebAssembly.Instance(mod, { env: { memory: mem } }).exports.hf;
+			g.__rxAesR = f;
+		}
+		f(sp, size, hash, fill, kptr);
+		return 1;
+	} catch (e) {
+		g.__rxAesR = null;
+		return 0;
+	}
+});
+
+static std::atomic<uint32_t> g_rx_aes_relaxed_calls{0};
+
+extern "C" int rx_aes_relaxed_hf(void* sp, size_t size, void* hash, void* fill) {
+	if (!rx_js_aes_relaxed_hf((int)(uintptr_t)rx_aes_relaxed_blob, (int)rx_aes_relaxed_blob_len,
+			(int)(uintptr_t)sp, (int)size, (int)(uintptr_t)hash, (int)(uintptr_t)fill,
+			(int)(uintptr_t)&rx_aes_relaxed_k))
+		return 0;
+	g_rx_aes_relaxed_calls.fetch_add(1, std::memory_order_relaxed);
+	return 1;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t rx_aes_relaxed_calls(void) {
+	return g_rx_aes_relaxed_calls.load(std::memory_order_relaxed);
+}
+#else
+extern "C" int rx_aes_relaxed_hf(void*, size_t, void*, void*) { return 0; }
 #endif
