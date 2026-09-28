@@ -672,6 +672,14 @@ struct MiningContext {
 	std::atomic<uint32_t> found;
 	uint8_t *result;
 #ifdef __EMSCRIPTEN_PTHREADS__
+	// Perf step 4: in-batch dynamic nonce claiming (no run-ahead). nextIdx
+	// is padded onto its own 128-B line; batchStart/batchCount are read-only
+	// while a batch runs.
+	char claimPad0[128];
+	std::atomic<uint32_t> nextIdx;
+	char claimPad1[124];
+	uint32_t batchStart;
+	uint32_t batchCount;
 	pthread_t threads[32];
 	PersistentMineThread *threadArgs;
 	pthread_mutex_t mutex;
@@ -689,6 +697,45 @@ struct PersistentMineThread {
 	MiningContext *ctx;
 	int index;
 };
+
+// Perf step 4: threads claim nonce indices of the current batch one at a
+// time, so fast (P) cores take more nonces than slow (E) cores instead of
+// idling at the batch barrier. No run-ahead: a thread only hashes indices
+// < batchCount, and the call returns after all of them are hashed. The
+// pipelined first/next/last API is kept: hash_next(n) returns the hash of
+// the previously claimed idx while preparing n.
+static void mineClaim(MiningContext *ctx, MineThreadJob *job) {
+	const uint32_t start = ctx->batchStart;
+	const uint32_t count = ctx->batchCount;
+	uint32_t idx = ctx->nextIdx.fetch_add(1, std::memory_order_relaxed);
+	if (idx >= count) {
+		return;
+	}
+	randomx_vm *vm = job->vm;
+	uint8_t input[256];
+	uint8_t hash[RANDOMX_HASH_SIZE];
+	memcpy(input, job->blob, job->blobLen);
+	setNonce(input, job->nonceOffset, start + idx);
+	randomx_calculate_hash_first(vm, input, job->blobLen);
+	for (;;) {
+		const uint32_t n = ctx->nextIdx.fetch_add(1, std::memory_order_relaxed);
+		const bool more = n < count;
+		if (more) {
+			setNonce(input, job->nonceOffset, start + n);
+			randomx_calculate_hash_next(vm, input, job->blobLen, hash);
+		} else {
+			randomx_calculate_hash_last(vm, hash);
+		}
+		// hash belongs to idx (the previously claimed nonce)
+		if (hashMeetsTarget(hash, job->target)) {
+			writeFoundResult(job, start + idx, hash);
+		}
+		if (!more) {
+			break;
+		}
+		idx = n;
+	}
+}
 
 static void *persistentMineThread(void *arg) {
 	PersistentMineThread *thread = static_cast<PersistentMineThread *>(arg);
@@ -711,7 +758,7 @@ static void *persistentMineThread(void *arg) {
 		pthread_mutex_unlock(&ctx->mutex);
 
 		if (index < ctx->activeCount) {
-			mineRange(&ctx->jobs[index]);
+			mineClaim(ctx, &ctx->jobs[index]);
 		}
 
 		pthread_mutex_lock(&ctx->mutex);
@@ -760,6 +807,9 @@ MiningContext *rxCreateMiningContext(int flags, randomx_cache *cache, randomx_da
 	ctx->jobSeq = 0;
 	ctx->activeCount = 0;
 	ctx->doneCount = 0;
+	ctx->nextIdx.store(0);
+	ctx->batchStart = 0;
+	ctx->batchCount = 0;
 	pthread_mutex_init(&ctx->mutex, nullptr);
 	pthread_cond_init(&ctx->startCond, nullptr);
 	pthread_cond_init(&ctx->doneCond, nullptr);
@@ -853,28 +903,28 @@ uint32_t rxMineBatchContext(MiningContext *ctx, const uint8_t *blob, uint32_t bl
 		return 0;
 	}
 
-	int threadCount = ctx->threadCount;
-	if ((uint32_t)threadCount > nonceCount) {
-		threadCount = (int)nonceCount;
-	}
-
 #ifdef __EMSCRIPTEN_PTHREADS__
+	// Every thread takes part in every batch (surplus threads claim nothing):
+	// doneCount then counts exactly the threads that were woken, so the call
+	// cannot return while a thread still hashes. (Before step 4, threads with
+	// index >= min(threads, nonceCount) also bumped doneCount, which could
+	// end the wait early when nonceCount < threads.)
+	const int threadCount = ctx->threadCount;
 	memset(result, 0, 40);
 	ctx->found.store(0);
 	ctx->result = result;
 
 	pthread_mutex_lock(&ctx->mutex);
-	const uint32_t base = nonceCount / (uint32_t)threadCount;
-	const uint32_t extra = nonceCount % (uint32_t)threadCount;
-	uint32_t cursor = startNonce;
-
+	// Nonces are claimed dynamically (mineClaim); jobs[] only carries the
+	// per-thread vm and the shared call parameters.
+	ctx->nextIdx.store(0, std::memory_order_relaxed);
+	ctx->batchStart = startNonce;
+	ctx->batchCount = nonceCount;
 	for (int i = 0; i < threadCount; ++i) {
-		const uint32_t count = base + ((uint32_t)i < extra ? 1 : 0);
 		ctx->jobs[i] = {
 		    ctx->flags, ctx->cache,  ctx->dataset, ctx->vms[i], blob,        blobLen,
-		    target,     nonceOffset, cursor,       count,       &ctx->found, result,
+		    target,     nonceOffset, startNonce,   nonceCount,  &ctx->found, result,
 		};
-		cursor += count;
 	}
 
 	ctx->activeCount = threadCount;
