@@ -21,6 +21,7 @@
 //     load-bearing cost, not per-Module.
 #include "wasm_jit_threaded.h"
 #include "wasm_jit_decode.h"
+#include "wasm_jit_fuse_table.h" // step 6: fused pair kinds
 #include "wasm_jit_macros.h"
 #include "wasm_jit_inst_locals.h" // R/F/E/A/LOC_* indices we mirror
 #include "wasm_jit_gen.h"         // rxjit_reciprocal (unused here, but for consistency)
@@ -188,6 +189,11 @@ static _Thread_local uint32_t g_slot = 0;
 // Record offset added to every in-arm record load (stays 0 until fused
 // superinstructions read the second record at +16).
 static _Thread_local uint32_t g_ro = 0;
+// Step 6 (fused pairs): g_no_exit suppresses emit_arm_exit while emitting the
+// first/second half of a fused arm; g_k_total = RXJIT_K_COUNT + fuse_n is the
+// number of br_table arms (branch depths are computed from it).
+static _Thread_local int g_no_exit = 0;
+static _Thread_local int g_k_total = RXJIT_K_COUNT;
 
 // ---------------- Small helpers (operate on `uint8_t *p`) ----------------
 
@@ -1436,13 +1442,16 @@ static uint32_t emit_main_loop_body(uint32_t vm_state_ptr, uint32_t scratchpad_p
 // $end_dispatch — that's (K_COUNT - k) blocks. $end_dispatch is the
 // outermost, at BR depth K_COUNT - k - 1. $inner sits one further out
 // (K_COUNT - k).
-#define ARM_BR_END(k)   ((uint32_t)(RXJIT_K_COUNT - (k) - 1))
-#define ARM_BR_INNER(k) ((uint32_t)(RXJIT_K_COUNT - (k)))
+// Step 6: the arm count is g_k_total (base kinds + fused pair kinds).
+#define ARM_BR_END(k)   ((uint32_t)(g_k_total - (k) - 1))
+#define ARM_BR_INNER(k) ((uint32_t)(g_k_total - (k)))
 
 // Arm tail: advance the walk pointer by nrec records and branch straight back
 // to the loop header $L (tail-duplicated back-edge). `extra` = number of
 // blocks the caller has open inside the arm.
 static uint32_t emit_arm_exit(int k, int nrec, int extra, uint8_t *buf) {
+	if (g_no_exit)
+		return 0; // inside a fused arm: the fused arm emits one exit (ip += 32)
 	THUNK_BEGIN;
 	LG(LOCT_inst_ptr);
 	WI32_CONST(16 * nrec);
@@ -2012,196 +2021,223 @@ static uint32_t emit_arm_istore_l3(uint32_t scratchpad_ptr, int k, uint8_t *buf)
 
 // ---------------- The dispatch itself ----------------
 
+// Body of one arm: `kind` selects the code, `k` is the arm position (used
+// for branch depths). k == kind for base kinds; for a fused pair arm k is the
+// fused kind and this is called once per half (step 6).
+static uint32_t emit_arm_kind(int kind, int k, uint32_t scratchpad_ptr, int jit_feature,
+                              uint8_t *buf) {
+	THUNK_BEGIN;
+	switch (kind) {
+	case RXJIT_K_NOP:
+		p += emit_arm_nop(k, p);
+		break;
+	case RXJIT_K_IADD_RS:
+		p += emit_arm_iadd_rs(k, p);
+		break;
+	case RXJIT_K_IADD_RS_DISPL:
+		p += emit_arm_iadd_rs_displ(k, p);
+		break;
+	case RXJIT_K_IADD_M_L1:
+		p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L1_MASK, 0x7c /*add*/, k, p);
+		break;
+	case RXJIT_K_IADD_M_L2:
+		p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L2_MASK, 0x7c /*add*/, k, p);
+		break;
+	case RXJIT_K_IADD_M_DIRECT:
+		p += emit_arm_alu_mem_l3(scratchpad_ptr, 0x7c, k, p);
+		break;
+	case RXJIT_K_ISUB_R:
+		p += emit_arm_alu_rr(0x7d /*sub*/, k, p);
+		break;
+	case RXJIT_K_ISUB_R_IMM:
+		p += emit_arm_alu_imm(0x7d, k, p);
+		break;
+	case RXJIT_K_ISUB_M_L1:
+		p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L1_MASK, 0x7d, k, p);
+		break;
+	case RXJIT_K_ISUB_M_L2:
+		p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L2_MASK, 0x7d, k, p);
+		break;
+	case RXJIT_K_ISUB_M_DIRECT:
+		p += emit_arm_alu_mem_l3(scratchpad_ptr, 0x7d, k, p);
+		break;
+	case RXJIT_K_IMUL_R:
+		p += emit_arm_alu_rr(0x7e /*mul*/, k, p);
+		break;
+	case RXJIT_K_IMUL_R_IMM:
+		p += emit_arm_alu_imm(0x7e, k, p);
+		break;
+	case RXJIT_K_IMUL_M_L1:
+		p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L1_MASK, 0x7e, k, p);
+		break;
+	case RXJIT_K_IMUL_M_L2:
+		p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L2_MASK, 0x7e, k, p);
+		break;
+	case RXJIT_K_IMUL_M_DIRECT:
+		p += emit_arm_alu_mem_l3(scratchpad_ptr, 0x7e, k, p);
+		break;
+	case RXJIT_K_IMULH_R:
+		p += emit_arm_mulh_r(TFN_MULH, k, p);
+		break;
+	case RXJIT_K_IMULH_M_L1:
+		p += emit_arm_mulh_m_rr(scratchpad_ptr, SCRATCHPAD_L1_MASK, TFN_MULH, k, p);
+		break;
+	case RXJIT_K_IMULH_M_L2:
+		p += emit_arm_mulh_m_rr(scratchpad_ptr, SCRATCHPAD_L2_MASK, TFN_MULH, k, p);
+		break;
+	case RXJIT_K_IMULH_M_DIRECT:
+		p += emit_arm_mulh_m_direct(scratchpad_ptr, TFN_MULH, k, p);
+		break;
+	case RXJIT_K_ISMULH_R:
+		p += emit_arm_mulh_r(TFN_IMULH, k, p);
+		break;
+	case RXJIT_K_ISMULH_M_L1:
+		p += emit_arm_mulh_m_rr(scratchpad_ptr, SCRATCHPAD_L1_MASK, TFN_IMULH, k, p);
+		break;
+	case RXJIT_K_ISMULH_M_L2:
+		p += emit_arm_mulh_m_rr(scratchpad_ptr, SCRATCHPAD_L2_MASK, TFN_IMULH, k, p);
+		break;
+	case RXJIT_K_ISMULH_M_DIRECT:
+		p += emit_arm_mulh_m_direct(scratchpad_ptr, TFN_IMULH, k, p);
+		break;
+	case RXJIT_K_IMUL_RCP:
+		p += emit_arm_imul_rcp(k, p);
+		break;
+	case RXJIT_K_INEG_R:
+		p += emit_arm_ineg_r(k, p);
+		break;
+	case RXJIT_K_IXOR_R:
+		p += emit_arm_alu_rr(0x85 /*xor*/, k, p);
+		break;
+	case RXJIT_K_IXOR_R_IMM:
+		p += emit_arm_alu_imm(0x85, k, p);
+		break;
+	case RXJIT_K_IXOR_M_L1:
+		p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L1_MASK, 0x85, k, p);
+		break;
+	case RXJIT_K_IXOR_M_L2:
+		p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L2_MASK, 0x85, k, p);
+		break;
+	case RXJIT_K_IXOR_M_DIRECT:
+		p += emit_arm_alu_mem_l3(scratchpad_ptr, 0x85, k, p);
+		break;
+	case RXJIT_K_IROR_R:
+		p += emit_arm_alu_rr(0x8a /*rotr*/, k, p);
+		break;
+	case RXJIT_K_IROR_R_IMM:
+		p += emit_arm_alu_imm(0x8a, k, p);
+		break;
+	case RXJIT_K_IROL_R:
+		p += emit_arm_alu_rr(0x89 /*rotl*/, k, p);
+		break;
+	case RXJIT_K_IROL_R_IMM:
+		p += emit_arm_alu_imm(0x89, k, p);
+		break;
+	case RXJIT_K_ISWAP_R:
+		p += emit_arm_iswap_r(k, p);
+		break;
+	case RXJIT_K_FSWAP_R_F:
+		p += emit_arm_fswap_r(k, jit_feature, p);
+		break;
+	case RXJIT_K_FSWAP_R_E:
+		p += emit_arm_fswap_r(k, jit_feature, p);
+		break;
+	case RXJIT_K_FADD_R:
+		p += emit_arm_fbin_r(TBL_FADD, 0xf0 /* f64x2.add */, k, jit_feature, p);
+		break;
+	case RXJIT_K_FADD_M_L1:
+		p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L1_MASK, TBL_FADD, 0xf0, 0, k, jit_feature, p);
+		break;
+	case RXJIT_K_FADD_M_L2:
+		p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L2_MASK, TBL_FADD, 0xf0, 0, k, jit_feature, p);
+		break;
+	case RXJIT_K_FSUB_R:
+		p += emit_arm_fbin_r(TBL_FSUB, 0xf1 /* f64x2.sub */, k, jit_feature, p);
+		break;
+	case RXJIT_K_FSUB_M_L1:
+		p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L1_MASK, TBL_FSUB, 0xf1, 0, k, jit_feature, p);
+		break;
+	case RXJIT_K_FSUB_M_L2:
+		p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L2_MASK, TBL_FSUB, 0xf1, 0, k, jit_feature, p);
+		break;
+	case RXJIT_K_FSCAL_R:
+		p += emit_arm_fscal_r(k, p);
+		break;
+	case RXJIT_K_FMUL_R:
+		p += emit_arm_fbin_r(TBL_FMUL, 0xf2 /* f64x2.mul */, k, jit_feature, p);
+		break;
+	case RXJIT_K_FDIV_M_L1:
+		p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L1_MASK, TBL_FDIV, 0xf3 /* f64x2.div */, 1, k, jit_feature, p);
+		break;
+	case RXJIT_K_FDIV_M_L2:
+		p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L2_MASK, TBL_FDIV, 0xf3 /* f64x2.div */, 1, k, jit_feature, p);
+		break;
+	case RXJIT_K_FSQRT_R:
+		p += emit_arm_fsqrt_r(k, jit_feature, p);
+		break;
+	case RXJIT_K_CBRANCH:
+		p += emit_arm_cbranch(k, p);
+		break;
+	case RXJIT_K_CFROUND:
+		p += emit_arm_cfround(k, jit_feature, p);
+		break;
+	case RXJIT_K_ISTORE_L1:
+		p += emit_arm_istore_l12(scratchpad_ptr, SCRATCHPAD_L1_MASK, k, p);
+		break;
+	case RXJIT_K_ISTORE_L2:
+		p += emit_arm_istore_l12(scratchpad_ptr, SCRATCHPAD_L2_MASK, k, p);
+		break;
+	case RXJIT_K_ISTORE_L3:
+		p += emit_arm_istore_l3(scratchpad_ptr, k, p);
+		break;
+	case RXJIT_K_EXIT:
+		BR(ARM_BR_INNER(k) + 1); // $exit (sentinel record #256)
+		break;
+	default:
+		p += emit_arm_nop(k, p);
+		break;
+	}
+	THUNK_END;
+}
+
 static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, uint8_t *buf) {
 	THUNK_BEGIN;
+	const int KT = g_k_total; // RXJIT_K_COUNT base kinds + fused pair kinds
 
-	// Open K_COUNT+1 blocks ($end_dispatch + arm_0..arm_{K_COUNT-1})
-	for (int i = 0; i < RXJIT_K_COUNT + 1; i++)
+	// Open KT+1 blocks ($end_dispatch + arm_0..arm_{KT-1})
+	for (int i = 0; i < KT + 1; i++)
 		BLOCK_VOID();
 
 	// load opcode_kind and dispatch
 	LG(LOCT_inst_ptr);
 	I32_LOAD8U_OFF(D_OP);
-	WASM_U8(0x0e);           // br_table opcode
-	WASM_U32(RXJIT_K_COUNT); // count of labels
-	for (int i = 0; i < RXJIT_K_COUNT; i++)
+	WASM_U8(0x0e);          // br_table opcode
+	WASM_U32((uint32_t)KT); // count of labels
+	for (int i = 0; i < KT; i++)
 		WASM_U32((uint32_t)i);
-	WASM_U32(RXJIT_K_COUNT); // default → $end_dispatch
+	WASM_U32((uint32_t)KT); // default → $end_dispatch
 
-	// arm_0..arm_{K_COUNT-1} bodies. After closing arm_k's block, we're at
+	// arm_0..arm_{KT-1} bodies. After closing arm_k's block, we're at
 	// the position where br_table label k landed.
-	for (int k = 0; k < RXJIT_K_COUNT; k++) {
+	for (int k = 0; k < KT; k++) {
 		END_BLK();
-		switch (k) {
-		case RXJIT_K_NOP:
-			p += emit_arm_nop(k, p);
-			break;
-		case RXJIT_K_IADD_RS:
-			p += emit_arm_iadd_rs(k, p);
-			break;
-		case RXJIT_K_IADD_RS_DISPL:
-			p += emit_arm_iadd_rs_displ(k, p);
-			break;
-		case RXJIT_K_IADD_M_L1:
-			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L1_MASK, 0x7c /*add*/, k, p);
-			break;
-		case RXJIT_K_IADD_M_L2:
-			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L2_MASK, 0x7c /*add*/, k, p);
-			break;
-		case RXJIT_K_IADD_M_DIRECT:
-			p += emit_arm_alu_mem_l3(scratchpad_ptr, 0x7c, k, p);
-			break;
-		case RXJIT_K_ISUB_R:
-			p += emit_arm_alu_rr(0x7d /*sub*/, k, p);
-			break;
-		case RXJIT_K_ISUB_R_IMM:
-			p += emit_arm_alu_imm(0x7d, k, p);
-			break;
-		case RXJIT_K_ISUB_M_L1:
-			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L1_MASK, 0x7d, k, p);
-			break;
-		case RXJIT_K_ISUB_M_L2:
-			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L2_MASK, 0x7d, k, p);
-			break;
-		case RXJIT_K_ISUB_M_DIRECT:
-			p += emit_arm_alu_mem_l3(scratchpad_ptr, 0x7d, k, p);
-			break;
-		case RXJIT_K_IMUL_R:
-			p += emit_arm_alu_rr(0x7e /*mul*/, k, p);
-			break;
-		case RXJIT_K_IMUL_R_IMM:
-			p += emit_arm_alu_imm(0x7e, k, p);
-			break;
-		case RXJIT_K_IMUL_M_L1:
-			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L1_MASK, 0x7e, k, p);
-			break;
-		case RXJIT_K_IMUL_M_L2:
-			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L2_MASK, 0x7e, k, p);
-			break;
-		case RXJIT_K_IMUL_M_DIRECT:
-			p += emit_arm_alu_mem_l3(scratchpad_ptr, 0x7e, k, p);
-			break;
-		case RXJIT_K_IMULH_R:
-			p += emit_arm_mulh_r(TFN_MULH, k, p);
-			break;
-		case RXJIT_K_IMULH_M_L1:
-			p += emit_arm_mulh_m_rr(scratchpad_ptr, SCRATCHPAD_L1_MASK, TFN_MULH, k, p);
-			break;
-		case RXJIT_K_IMULH_M_L2:
-			p += emit_arm_mulh_m_rr(scratchpad_ptr, SCRATCHPAD_L2_MASK, TFN_MULH, k, p);
-			break;
-		case RXJIT_K_IMULH_M_DIRECT:
-			p += emit_arm_mulh_m_direct(scratchpad_ptr, TFN_MULH, k, p);
-			break;
-		case RXJIT_K_ISMULH_R:
-			p += emit_arm_mulh_r(TFN_IMULH, k, p);
-			break;
-		case RXJIT_K_ISMULH_M_L1:
-			p += emit_arm_mulh_m_rr(scratchpad_ptr, SCRATCHPAD_L1_MASK, TFN_IMULH, k, p);
-			break;
-		case RXJIT_K_ISMULH_M_L2:
-			p += emit_arm_mulh_m_rr(scratchpad_ptr, SCRATCHPAD_L2_MASK, TFN_IMULH, k, p);
-			break;
-		case RXJIT_K_ISMULH_M_DIRECT:
-			p += emit_arm_mulh_m_direct(scratchpad_ptr, TFN_IMULH, k, p);
-			break;
-		case RXJIT_K_IMUL_RCP:
-			p += emit_arm_imul_rcp(k, p);
-			break;
-		case RXJIT_K_INEG_R:
-			p += emit_arm_ineg_r(k, p);
-			break;
-		case RXJIT_K_IXOR_R:
-			p += emit_arm_alu_rr(0x85 /*xor*/, k, p);
-			break;
-		case RXJIT_K_IXOR_R_IMM:
-			p += emit_arm_alu_imm(0x85, k, p);
-			break;
-		case RXJIT_K_IXOR_M_L1:
-			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L1_MASK, 0x85, k, p);
-			break;
-		case RXJIT_K_IXOR_M_L2:
-			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L2_MASK, 0x85, k, p);
-			break;
-		case RXJIT_K_IXOR_M_DIRECT:
-			p += emit_arm_alu_mem_l3(scratchpad_ptr, 0x85, k, p);
-			break;
-		case RXJIT_K_IROR_R:
-			p += emit_arm_alu_rr(0x8a /*rotr*/, k, p);
-			break;
-		case RXJIT_K_IROR_R_IMM:
-			p += emit_arm_alu_imm(0x8a, k, p);
-			break;
-		case RXJIT_K_IROL_R:
-			p += emit_arm_alu_rr(0x89 /*rotl*/, k, p);
-			break;
-		case RXJIT_K_IROL_R_IMM:
-			p += emit_arm_alu_imm(0x89, k, p);
-			break;
-		case RXJIT_K_ISWAP_R:
-			p += emit_arm_iswap_r(k, p);
-			break;
-		case RXJIT_K_FSWAP_R_F:
-			p += emit_arm_fswap_r(k, jit_feature, p);
-			break;
-		case RXJIT_K_FSWAP_R_E:
-			p += emit_arm_fswap_r(k, jit_feature, p);
-			break;
-		case RXJIT_K_FADD_R:
-			p += emit_arm_fbin_r(TBL_FADD, 0xf0 /* f64x2.add */, k, jit_feature, p);
-			break;
-		case RXJIT_K_FADD_M_L1:
-			p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L1_MASK, TBL_FADD, 0xf0, 0, k, jit_feature, p);
-			break;
-		case RXJIT_K_FADD_M_L2:
-			p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L2_MASK, TBL_FADD, 0xf0, 0, k, jit_feature, p);
-			break;
-		case RXJIT_K_FSUB_R:
-			p += emit_arm_fbin_r(TBL_FSUB, 0xf1 /* f64x2.sub */, k, jit_feature, p);
-			break;
-		case RXJIT_K_FSUB_M_L1:
-			p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L1_MASK, TBL_FSUB, 0xf1, 0, k, jit_feature, p);
-			break;
-		case RXJIT_K_FSUB_M_L2:
-			p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L2_MASK, TBL_FSUB, 0xf1, 0, k, jit_feature, p);
-			break;
-		case RXJIT_K_FSCAL_R:
-			p += emit_arm_fscal_r(k, p);
-			break;
-		case RXJIT_K_FMUL_R:
-			p += emit_arm_fbin_r(TBL_FMUL, 0xf2 /* f64x2.mul */, k, jit_feature, p);
-			break;
-		case RXJIT_K_FDIV_M_L1:
-			p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L1_MASK, TBL_FDIV, 0xf3 /* f64x2.div */, 1, k, jit_feature, p);
-			break;
-		case RXJIT_K_FDIV_M_L2:
-			p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L2_MASK, TBL_FDIV, 0xf3 /* f64x2.div */, 1, k, jit_feature, p);
-			break;
-		case RXJIT_K_FSQRT_R:
-			p += emit_arm_fsqrt_r(k, jit_feature, p);
-			break;
-		case RXJIT_K_CBRANCH:
-			p += emit_arm_cbranch(k, p);
-			break;
-		case RXJIT_K_CFROUND:
-			p += emit_arm_cfround(k, jit_feature, p);
-			break;
-		case RXJIT_K_ISTORE_L1:
-			p += emit_arm_istore_l12(scratchpad_ptr, SCRATCHPAD_L1_MASK, k, p);
-			break;
-		case RXJIT_K_ISTORE_L2:
-			p += emit_arm_istore_l12(scratchpad_ptr, SCRATCHPAD_L2_MASK, k, p);
-			break;
-		case RXJIT_K_ISTORE_L3:
-			p += emit_arm_istore_l3(scratchpad_ptr, k, p);
-			break;
-		case RXJIT_K_EXIT:
-			BR(ARM_BR_INNER(k) + 1); // $exit (sentinel record #256)
-			break;
-		default:
-			p += emit_arm_nop(k, p);
-			break;
+		if (k < RXJIT_K_COUNT) {
+			p += emit_arm_kind(k, k, scratchpad_ptr, jit_feature, p);
+			continue;
 		}
+		// Step 6: fused pair: record r as kind a, record r+1 (at +16) as kind
+		// b, then ip += 32. A taken CBRANCH in either half branches to $L
+		// itself; its not-taken exit is suppressed like every other exit.
+		const int a = rxjit_fuse_pairs[k - RXJIT_K_COUNT][0];
+		const int b = rxjit_fuse_pairs[k - RXJIT_K_COUNT][1];
+		g_no_exit = 1;
+		g_ro = 0;
+		p += emit_arm_kind(a, k, scratchpad_ptr, jit_feature, p);
+		g_ro = 16;
+		p += emit_arm_kind(b, k, scratchpad_ptr, jit_feature, p);
+		g_no_exit = 0;
+		g_ro = 0;
+		p += emit_arm_exit(k, 2, 0, p);
 	}
 	END_BLK(); // close $end_dispatch
 
@@ -2248,6 +2284,8 @@ uint32_t rxjit_generate_threaded_module(
 	g_emit_split_id    = 1;
 	g_emit_regs_in_mem = 1;
 	g_ro               = 0;
+	g_no_exit          = 0;
+	g_k_total          = RXJIT_K_COUNT + rxjit_fuse_n_for_feature(jit_feature);
 	g_r_file_base      = vm_state_ptr + VM_R0_OFFSET;
 	g_slot             = program_slot_ptr;
 

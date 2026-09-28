@@ -1,5 +1,6 @@
 // Ported from randomx.js (src/jit/jit_vm_decoder.c).
 #include "wasm_jit_decode.h"
+#include "wasm_jit_fuse_table.h"
 #include "wasm_jit_gen.h"          // rxjit_reciprocal
 #include "wasm_jit_inst_locals.h"  // IMM_SEXT64, MOD_COND, REGISTER_NEEDS_DISPLACEMENT
 #include "configuration.h"
@@ -359,7 +360,12 @@ static inline void rxjit_pack_v2(const rxjit_dec_idx_t *t, decoded_inst_t *o, ui
 // L1/L2 kind split: MOD_MEM != 0 selects the L1 mask (RandomX level rule).
 #define L12(k1, k2) ((inst->mod & 3) ? (k1) : (k2))
 
-void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256], uint32_t vm) {
+int rxjit_fuse_n_for_feature(int jit_feature) {
+	return (jit_feature & RXJIT_FEATURE_NO_FUSE) ? 0 : RXJIT_FUSE_N;
+}
+
+void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256], uint32_t vm,
+                             int fuse_n) {
 	int register_usage[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
 
 	for (int pc = 0; pc < 256; pc++) {
@@ -607,5 +613,14 @@ void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[2
 		o->opcode_kind = RXJIT_K_NOP;
 		} while (0);
 		rxjit_pack_v2(o, &out[pc], vm);
+	}
+	// Step 6: fused pair superinstructions. Only record pc's kind byte changes;
+	// out[pc+1] still holds its base kind here. Record 255 is never fused (its
+	// successor is the sentinel).
+	if (fuse_n > 0) {
+		for (int pc = 0; pc < 255; pc++) {
+			uint8_t f = rxjit_fuse_tab[out[pc].opcode_kind][out[pc + 1].opcode_kind];
+			if (f && f < RXJIT_K_COUNT + fuse_n) out[pc].opcode_kind = f;
+		}
 	}
 }

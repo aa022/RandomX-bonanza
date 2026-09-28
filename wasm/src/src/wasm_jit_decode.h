@@ -163,8 +163,15 @@ typedef struct {
 
 // Decode raw program → 256 × 16-byte v2 records in `out`, with operand
 // addresses baked against the calling thread's vm_state at `vm`. Does NOT
-// mutate `insts`.
-void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256], uint32_t vm);
+// mutate `insts`. fuse_n > 0 (step 6) then rewrites record r's kind to the
+// fused pair kind K+i (wasm_jit_fuse_table.h) when (kind r, kind r+1) is
+// among the first fuse_n pairs; record r+1 is untouched. fuse_n must equal
+// the value the calling thread's module was generated with.
+void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256], uint32_t vm,
+                             int fuse_n);
+
+// Number of fused pair kinds for a feature mask: 0 with RXJIT_FEATURE_NO_FUSE.
+int rxjit_fuse_n_for_feature(int jit_feature);
 
 #ifdef __cplusplus
 }

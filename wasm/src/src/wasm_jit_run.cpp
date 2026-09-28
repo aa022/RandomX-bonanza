@@ -76,6 +76,7 @@ thread_local uint32_t g_jit_threaded_size = 0;
 thread_local uint8_t *g_jit_threaded_program_slot = nullptr;
 thread_local rxjit_vm_state_t *g_jit_threaded_vm_state = nullptr;
 thread_local uint32_t g_jit_threaded_baked_sp = 0; // scratchpad baked into the module
+thread_local int g_jit_threaded_fuse_n = 0;        // fused kinds the module was generated with
 thread_local bool g_jit_threaded_initted = false;
 thread_local bool g_jit_threaded_failed = false;
 
@@ -731,6 +732,7 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 		}
 		g_jit_threaded_size = sz;
 		g_jit_threaded_baked_sp = (uint32_t)(uintptr_t)scratchpad;
+		g_jit_threaded_fuse_n = rxjit_fuse_n_for_feature(feature);
 		// Step 9: inner_dispatch loads the scratchpad base from the arena into an
 		// opaque local (a baked i32.const would be rematerialised in every arm).
 		{
@@ -762,7 +764,7 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 	// Layout v2 bakes this thread's vm_state address into every record.
 	rxjit_decode_for_interp((const rxjit_inst_t *)program_buf,
 	                        (decoded_inst_t *)g_jit_threaded_program_slot,
-	                        (uint32_t)(uintptr_t)g_jit_threaded_vm_state);
+	                        (uint32_t)(uintptr_t)g_jit_threaded_vm_state, g_jit_threaded_fuse_n);
 
 	// Invoke (lazy compile+instantiate on first call). The first call sees
 	// g_jit_threaded_size > 0 and hands the bytes over; subsequent calls
