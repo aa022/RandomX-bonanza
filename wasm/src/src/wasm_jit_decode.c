@@ -301,6 +301,21 @@ static inline void rxjit_rec_set_kind(decoded_inst_t *o, int kind, int kind16) {
 		o->h.k8.opcode_kind = (uint8_t)kind;
 }
 
+// Fused triple index j of base kinds (a, b, c) (wasm_jit_fuse_table.h), or
+// -1: lower-bound binary search of the sorted key array.
+static int rxjit_triple_find(int a, int b, int c) {
+	const uint32_t key = (uint32_t)a << 16 | (uint32_t)b << 8 | (uint32_t)c;
+	int lo = 0, hi = RXJIT_TRIPLE_NMAX;
+	while (lo < hi) {
+		const int mid = (lo + hi) >> 1;
+		if (rxjit_fuse_triple_keys[mid] < key)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	return lo < RXJIT_TRIPLE_NMAX && rxjit_fuse_triple_keys[lo] == key ? rxjit_fuse_triple_idx[lo] : -1;
+}
+
 static inline void rxjit_pack_v2(const rxjit_dec_idx_t *t, decoded_inst_t *o, uint32_t vm,
                                  int kind16) {
 	const uint32_t RA_d = vm + 8u * t->dst, RA_s = vm + 8u * t->src;
@@ -378,7 +393,7 @@ static inline void rxjit_pack_v2(const rxjit_dec_idx_t *t, decoded_inst_t *o, ui
 #define L12(k1, k2) ((inst->mod & 3) ? (k1) : (k2))
 
 int rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256], uint32_t vm,
-                            int fuse_n, int kind16) {
+                            int fuse_n, int triples_n, int kind16) {
 	int register_usage[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
 
 	for (int pc = 0; pc < 256; pc++) {
@@ -631,16 +646,31 @@ int rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[25
 	// out[pc+1] still holds its base kind here. Record 255 is never fused (its
 	// successor is the sentinel). The table ranks all pairs; this module has
 	// the first fuse_n (kinds K..K+fuse_n-1).
-	if (fuse_n > 0) {
+	// X2: fused triples first (kinds K+fuse_n+j, j < triples_n), then pairs.
+	// Records 254 and 255 never start a triple. Every record gets its own
+	// fused kind, so the walk from record 0 is greedy (triple, else pair, else
+	// one) and a CBRANCH target inside a fused group is fused from there.
+	if (fuse_n > 0 || triples_n > 0) {
 		for (int pc = 0; pc < 255; pc++) {
-			int f = rxjit_fuse_tab[rxjit_rec_kind(&out[pc], kind16)]
-			                      [rxjit_rec_kind(&out[pc + 1], kind16)];
+			const int a = rxjit_rec_kind(&out[pc], kind16);
+			const int b = rxjit_rec_kind(&out[pc + 1], kind16);
+			if (triples_n > 0 && pc < 254) {
+				int j = rxjit_triple_find(a, b, rxjit_rec_kind(&out[pc + 2], kind16));
+				if (j >= 0 && j < triples_n) {
+					rxjit_rec_set_kind(&out[pc], RXJIT_K_COUNT + fuse_n + j, kind16);
+					continue;
+				}
+			}
+			int f = rxjit_fuse_tab[a][b];
 			if (f && f - RXJIT_K_COUNT < fuse_n) rxjit_rec_set_kind(&out[pc], f, kind16);
 		}
 	}
-	// Static dispatch count (the --stats dispatches/op numerator).
+	// Static dispatch count (the --stats dispatches/op numerator): a fused
+	// pair or triple is one dispatch.
 	int ndisp = 0;
-	for (int pc = 0; pc < 256; ndisp++)
-		pc += rxjit_rec_kind(&out[pc], kind16) >= RXJIT_K_COUNT ? 2 : 1;
+	for (int pc = 0; pc < 256; ndisp++) {
+		const int f = rxjit_rec_kind(&out[pc], kind16) - RXJIT_K_COUNT;
+		pc += f < 0 ? 1 : f < fuse_n ? 2 : 3;
+	}
 	return ndisp;
 }

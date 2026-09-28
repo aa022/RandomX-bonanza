@@ -12,7 +12,7 @@
 
 #include "wasm_jit_gen.h"
 #include "wasm_jit_decode.h"
-#include "wasm_jit_fuse_table.h" // RXJIT_FUSE_NMAX
+#include "wasm_jit_fuse_table.h" // RXJIT_FUSE_NMAX, RXJIT_TRIPLE_NMAX
 #include "wasm_jit_profile.h"
 #include "wasm_jit_threaded.h"
 #include "common.hpp"
@@ -73,7 +73,7 @@ thread_local bool g_jit_static_failed = false;
 
 // Threaded-interpreter path: per-thread module buffer + per-thread state.
 // The threaded module is ~40 KiB with the arm profile's 200 fused pairs and
-// grows with fuse_n (every pair, and later fused triples, is ~1 MiB); the
+// grows with fuse_n and triples_n (all pairs + 1000 triples: 0.7-0.85 MiB); the
 // generator writes unchecked (the size check runs after the fact), so keep
 // ample headroom. Heap-allocated once per mining thread: a thread_local array
 // would be emitted as zeros into the .wasm TLS data segment and copied into
@@ -87,9 +87,10 @@ thread_local uint8_t *g_jit_threaded_program_slot = nullptr;
 thread_local rxjit_vm_state_t *g_jit_threaded_vm_state = nullptr;
 thread_local uint32_t g_jit_threaded_baked_sp = 0; // scratchpad baked into the module
 // The module's generation key besides the scratchpad: the decoder must use
-// exactly the fuse_n / kind16 the module was generated with.
+// exactly the fuse_n / triples_n / kind16 the module was generated with.
 thread_local int g_jit_threaded_feature = 0;
-thread_local int g_jit_threaded_fuse_n = 0; // fused kinds the module was generated with
+thread_local int g_jit_threaded_fuse_n = 0;    // fused pair kinds the module was generated with
+thread_local int g_jit_threaded_triples_n = 0; // fused triple kinds (after the pairs)
 thread_local int g_jit_threaded_kind16 = 0; // record head width (rxjit_kind16)
 thread_local bool g_jit_threaded_initted = false;
 thread_local bool g_jit_threaded_failed = false;
@@ -667,7 +668,6 @@ void rxjit_set_fuse_n(int n) {
 	g_rxjit_fuse_n_override.store(n < 0 ? -1 : n, std::memory_order_relaxed);
 }
 
-// Plumbing for fused triples: stored, not used yet (effective triples_n is 0).
 EMSCRIPTEN_KEEPALIVE
 void rxjit_set_triples_n(int n) {
 	g_rxjit_triples_n_override.store(n < 0 ? -1 : n, std::memory_order_relaxed);
@@ -680,6 +680,16 @@ int rxjit_fuse_n_for_feature(int jit_feature) {
 	return n > RXJIT_FUSE_NMAX ? RXJIT_FUSE_NMAX : n;
 }
 
+// Fused triple kinds (X2), like fuse_n: 0 with RXJIT_FEATURE_NO_FUSE, else the
+// rxjit_set_triples_n override (>= 0) or the profile's, clamped to
+// [0, RXJIT_TRIPLE_NMAX].
+static int rxjit_triples_n_for_feature(int jit_feature) {
+	if (jit_feature & RXJIT_FEATURE_NO_FUSE) return 0;
+	int n = g_rxjit_triples_n_override.load(std::memory_order_relaxed);
+	if (n < 0) n = rxjit_profiles[g_rxjit_profile.load(std::memory_order_relaxed)].triples_n;
+	return n > RXJIT_TRIPLE_NMAX ? RXJIT_TRIPLE_NMAX : n;
+}
+
 // Status getters (bench headers, the worker's status line): what the next
 // generated module uses with the current feature and knobs.
 EMSCRIPTEN_KEEPALIVE
@@ -688,17 +698,17 @@ int rxjit_effective_fuse_n(void) {
 }
 
 EMSCRIPTEN_KEEPALIVE
-int rxjit_effective_kind16(void) {
-	return rxjit_kind16(rxjit_effective_fuse_n(), 0);
-}
-
-// Fused triples and 2x dispatch replication are not generated yet: both read
-// 0 until the generator uses them (the knobs above are stored regardless).
-EMSCRIPTEN_KEEPALIVE
 int rxjit_effective_triples_n(void) {
-	return 0;
+	return rxjit_triples_n_for_feature(g_rxjit_feature.load(std::memory_order_relaxed));
 }
 
+EMSCRIPTEN_KEEPALIVE
+int rxjit_effective_kind16(void) {
+	return rxjit_kind16(rxjit_effective_fuse_n(), rxjit_effective_triples_n());
+}
+
+// 2x dispatch replication is not generated yet: reads 0 until the generator
+// uses it.
 EMSCRIPTEN_KEEPALIVE
 int rxjit_effective_unroll2(void) {
 	return 0;
@@ -801,20 +811,21 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 
 	// 2) generate the threaded module bytes (with per-thread pointers baked):
 	// once per thread, and again whenever the scratchpad moves (a new VM on
-	// this pthread) or the feature / fuse_n / record head width changes. The
-	// JS side sees thrLen > 0 and recompiles.
+	// this pthread) or the feature / fuse_n / triples_n / record head width
+	// changes. The JS side sees thrLen > 0 and recompiles.
 	const int feature = g_rxjit_feature.load(std::memory_order_relaxed);
 	const int fuse_n = rxjit_fuse_n_for_feature(feature);
-	const int kind16 = rxjit_kind16(fuse_n, 0);
+	const int triples_n = rxjit_triples_n_for_feature(feature);
+	const int kind16 = rxjit_kind16(fuse_n, triples_n);
 	if (!g_jit_threaded_initted || (uint32_t)(uintptr_t)scratchpad != g_jit_threaded_baked_sp ||
 	    feature != g_jit_threaded_feature || fuse_n != g_jit_threaded_fuse_n ||
-	    kind16 != g_jit_threaded_kind16) {
+	    triples_n != g_jit_threaded_triples_n || kind16 != g_jit_threaded_kind16) {
 		int regs_in_mem = g_rxjit_regs_in_memory.load(std::memory_order_relaxed);
 		int split_id = g_rxjit_split_inner_dispatch.load(std::memory_order_relaxed);
 		uint32_t sz = rxjit_generate_threaded_module(
 		    (uint32_t)(uintptr_t)g_jit_threaded_vm_state, (uint32_t)(uintptr_t)scratchpad,
 		    (uint32_t)(uintptr_t)dataset, (uint32_t)(uintptr_t)g_jit_threaded_program_slot, 1,
-		    g_jit_max_memory_pages, feature, regs_in_mem, split_id, fuse_n, kind16,
+		    g_jit_max_memory_pages, feature, regs_in_mem, split_id, fuse_n, triples_n, kind16,
 		    g_jit_threaded_buf);
 		g_rxjit_threaded_module_size.store(sz, std::memory_order_relaxed);
 		if (sz == 0 || sz > RXJIT_THREADED_BUF_SIZE) {
@@ -832,6 +843,7 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 		g_jit_threaded_baked_sp = (uint32_t)(uintptr_t)scratchpad;
 		g_jit_threaded_feature = feature;
 		g_jit_threaded_fuse_n = fuse_n;
+		g_jit_threaded_triples_n = triples_n;
 		g_jit_threaded_kind16 = kind16;
 		// Step 9: inner_dispatch loads the scratchpad base from the arena into an
 		// opaque local (a baked i32.const would be rematerialised in every arm).
@@ -864,7 +876,8 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 	// Layout v2 bakes this thread's vm_state address into every record.
 	int ndisp = rxjit_decode_for_interp(
 	    (const rxjit_inst_t *)program_buf, (decoded_inst_t *)g_jit_threaded_program_slot,
-	    (uint32_t)(uintptr_t)g_jit_threaded_vm_state, g_jit_threaded_fuse_n, g_jit_threaded_kind16);
+	    (uint32_t)(uintptr_t)g_jit_threaded_vm_state, g_jit_threaded_fuse_n,
+	    g_jit_threaded_triples_n, g_jit_threaded_kind16);
 	g_rxjit_dispatches.fetch_add((uint64_t)ndisp, std::memory_order_relaxed);
 	g_rxjit_decoded_programs.fetch_add(1, std::memory_order_relaxed);
 

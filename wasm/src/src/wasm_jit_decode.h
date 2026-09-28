@@ -184,14 +184,16 @@ static inline int rxjit_kind16(int fuse_n, int triples_n) {
 
 // Decode raw program → 256 × 16-byte v2 records in `out`, with operand
 // addresses baked against the calling thread's vm_state at `vm`. Does NOT
-// mutate `insts`. fuse_n > 0 (step 6) then rewrites record r's kind to the
-// fused pair kind K+i (wasm_jit_fuse_table.h) when (kind r, kind r+1) is
-// among the first fuse_n pairs; record r+1 is untouched. fuse_n and kind16
-// must equal the values the calling thread's module was generated with.
-// Returns the static dispatch count: records visited walking from record 0
-// (a fused kind advances 2 records, any other 1) up to the sentinel.
+// mutate `insts`. Then (wasm_jit_fuse_table.h) record r's kind becomes the
+// fused triple kind K+fuse_n+j when (kind r, r+1, r+2) is among the first
+// triples_n triples (X2), else the fused pair kind K+i when (kind r, r+1) is
+// among the first fuse_n pairs (step 6); records r+1, r+2 are untouched.
+// fuse_n, triples_n and kind16 must equal the values the calling thread's
+// module was generated with. Returns the static dispatch count: records
+// visited walking from record 0 (a fused pair advances 2 records, a triple
+// 3, any other 1) up to the sentinel.
 int rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256], uint32_t vm,
-                            int fuse_n, int kind16);
+                            int fuse_n, int triples_n, int kind16);
 
 // Effective number of fused pair kinds for a feature mask (wasm_jit_run.cpp):
 // 0 with RXJIT_FEATURE_NO_FUSE, else the rxjit_set_fuse_n override (>= 0) or

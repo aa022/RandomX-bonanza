@@ -49,11 +49,12 @@ extern "C" {
 //   mem_max_pages
 //   jit_feature     bitmask of RXJIT_FEATURE_* (FMA/RELAXED_SIMD/etc.)
 //   fuse_n          fused pair kinds (rxjit_fuse_n_for_feature)
+//   triples_n       fused triple kinds, after the pairs (X2)
 //   kind16          record head width (rxjit_kind16); the decoder must be
-//                   called with the same fuse_n and kind16
+//                   called with the same fuse_n, triples_n and kind16
 //   buf             output buffer (caller-owned), RXJIT_THREADED_BUF_SIZE
 //                   in wasm_jit_run.cpp; ~40 KiB at 200 pairs, far more
-//                   with every pair.
+//                   with every pair and triple.
 //
 // Returns number of bytes written into buf. The module exports a single
 // "d" function (takes no arguments, returns nothing) that runs the full
@@ -62,8 +63,8 @@ uint32_t rxjit_generate_threaded_module(uint32_t vm_state_ptr, uint32_t scratchp
                                         uint32_t dataset_ptr, uint32_t program_slot_ptr,
                                         uint32_t mem_min_pages, uint32_t mem_max_pages,
                                         int jit_feature, int regs_in_memory,
-                                        int split_inner_dispatch, int fuse_n, int kind16,
-                                        uint8_t *buf);
+                                        int split_inner_dispatch, int fuse_n, int triples_n,
+                                        int kind16, uint8_t *buf);
 
 #ifdef __cplusplus
 }

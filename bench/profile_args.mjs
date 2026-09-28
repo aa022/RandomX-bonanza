@@ -2,7 +2,7 @@
 // (wasm/src/src/wasm_jit_profile.h):
 //   --profile auto|arm|x86   default auto = x86 on process.arch x64, else arm
 //   --fuse-n N               fused pairs, overrides the profile's
-//   --triples-n N            fused triples, overrides the profile's (plumbing)
+//   --triples-n N            fused triples, overrides the profile's
 //
 //   const prof = parseProfileArgs(args);
 //   ... _rxjit_set_feature(...) ...

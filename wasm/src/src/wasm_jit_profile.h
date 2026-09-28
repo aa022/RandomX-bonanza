@@ -9,7 +9,8 @@
 //   fuse_n     fused pair kinds, the top-fuse_n prefix of wasm_jit_fuse_table.h
 //              (RXJIT_FEATURE_NO_FUSE forces 0)
 //   unroll2    2x dispatch replication (not implemented yet)
-//   triples_n  fused triple kinds (not implemented yet; effective value is 0)
+//   triples_n  fused triple kinds after the pairs, the top-triples_n prefix of
+//              wasm_jit_fuse_table.h (RXJIT_FEATURE_NO_FUSE forces 0)
 //
 // K + fuse_n + triples_n > 255 switches the records to u16 kinds
 // (rxjit_kind16, wasm_jit_decode.h).

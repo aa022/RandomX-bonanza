@@ -21,7 +21,7 @@
 //     load-bearing cost, not per-Module.
 #include "wasm_jit_threaded.h"
 #include "wasm_jit_decode.h"
-#include "wasm_jit_fuse_table.h" // step 6: fused pair kinds
+#include "wasm_jit_fuse_table.h" // step 6: fused pair kinds; X2: fused triples
 #include "wasm_jit_macros.h"
 #include "wasm_jit_inst_locals.h" // R/F/E/A/LOC_* indices we mirror
 #include "wasm_jit_gen.h"         // rxjit_reciprocal (unused here, but for consistency)
@@ -188,13 +188,15 @@ static _Thread_local uint32_t g_slot = 0;
 #define D_IMM32 12 // raw imm32 / CBRANCH mask / CFROUND rot (pre-masked & 63)
 
 // Record offset added to every in-arm record load (stays 0 until fused
-// superinstructions read the second record at +16).
+// superinstructions read the second record at +16, a triple's third at +32).
 static _Thread_local uint32_t g_ro = 0;
 // Step 6 (fused pairs): g_no_exit suppresses emit_arm_exit while emitting the
-// first/second half of a fused arm; g_k_total = RXJIT_K_COUNT + fuse_n is the
-// number of br_table arms (branch depths are computed from it).
+// parts of a fused arm; g_k_total = RXJIT_K_COUNT + fuse_n + triples_n is the
+// number of br_table arms (branch depths are computed from it). X2: fused
+// triple kinds start at RXJIT_K_COUNT + g_fuse_n.
 static _Thread_local int g_no_exit = 0;
 static _Thread_local int g_k_total = RXJIT_K_COUNT;
+static _Thread_local int g_fuse_n = 0;
 // Record head width (rxjit_kind16): u8 kinds with aux at +1 (the arm profile,
 // layout v2 as before), or u16 kinds with aux at +2. g_d_aux is the aux byte
 // offset (CBRANCH: target_pc; others: MOD_SHIFT | RXJIT_FLAG_MEM_L1).
@@ -1664,7 +1666,7 @@ static uint32_t emit_main_loop_body(uint32_t vm_state_ptr, uint32_t scratchpad_p
 // $end_dispatch — that's (K_COUNT - k) blocks. $end_dispatch is the
 // outermost, at BR depth K_COUNT - k - 1. $inner sits one further out
 // (K_COUNT - k).
-// Step 6: the arm count is g_k_total (base kinds + fused pair kinds).
+// Step 6: the arm count is g_k_total (base kinds + fused pair and triple kinds).
 #define ARM_BR_END(k)   ((uint32_t)(g_k_total - (k) - 1))
 #define ARM_BR_INNER(k) ((uint32_t)(g_k_total - (k)))
 
@@ -1673,7 +1675,7 @@ static uint32_t emit_main_loop_body(uint32_t vm_state_ptr, uint32_t scratchpad_p
 // blocks the caller has open inside the arm.
 static uint32_t emit_arm_exit(int k, int nrec, int extra, uint8_t *buf) {
 	if (g_no_exit)
-		return 0; // inside a fused arm: the fused arm emits one exit (ip += 32)
+		return 0; // inside a fused arm: the fused arm emits one exit (ip += 32 or 48)
 	THUNK_BEGIN;
 	LG(LOCT_inst_ptr);
 	WI32_CONST(16 * nrec);
@@ -2256,8 +2258,8 @@ static uint32_t emit_arm_istore_l3(uint32_t scratchpad_ptr, int k, uint8_t *buf)
 // ---------------- The dispatch itself ----------------
 
 // Body of one arm: `kind` selects the code, `k` is the arm position (used
-// for branch depths). k == kind for base kinds; for a fused pair arm k is the
-// fused kind and this is called once per half (step 6).
+// for branch depths). k == kind for base kinds; for a fused arm k is the
+// fused kind and this is called once per part (step 6 pairs, X2 triples).
 static uint32_t emit_arm_kind(int kind, int k, uint32_t scratchpad_ptr, int jit_feature,
                               uint8_t *buf) {
 	THUNK_BEGIN;
@@ -2436,7 +2438,7 @@ static uint32_t emit_arm_kind(int kind, int k, uint32_t scratchpad_ptr, int jit_
 
 static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, uint8_t *buf) {
 	THUNK_BEGIN;
-	const int KT = g_k_total; // RXJIT_K_COUNT base kinds + fused pair kinds
+	const int KT = g_k_total; // RXJIT_K_COUNT base kinds + fused pair and triple kinds
 
 	// Open KT+1 blocks ($end_dispatch + arm_0..arm_{KT-1})
 	for (int i = 0; i < KT + 1; i++)
@@ -2463,18 +2465,21 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 			continue;
 		}
 		// Step 6: fused pair: record r as kind a, record r+1 (at +16) as kind
-		// b, then ip += 32. A taken CBRANCH in either half branches to $L
-		// itself; its not-taken exit is suppressed like every other exit.
-		const int a = rxjit_fuse_pairs[k - RXJIT_K_COUNT][0];
-		const int b = rxjit_fuse_pairs[k - RXJIT_K_COUNT][1];
+		// b, then ip += 32. X2: a fused triple (kinds after the pairs) also
+		// runs record r+2 (at +32) as kind c, then ip += 48. A taken CBRANCH
+		// in any part branches to $L itself; its not-taken exit is suppressed
+		// like every other exit, so it falls through to the next part.
+		const int j = k - RXJIT_K_COUNT - g_fuse_n; // >= 0: triple j
+		const uint8_t *part = j < 0 ? rxjit_fuse_pairs[k - RXJIT_K_COUNT] : rxjit_fuse_triples[j];
+		const int nrec = j < 0 ? 2 : 3;
 		g_no_exit = 1;
-		g_ro = 0;
-		p += emit_arm_kind(a, k, scratchpad_ptr, jit_feature, p);
-		g_ro = 16;
-		p += emit_arm_kind(b, k, scratchpad_ptr, jit_feature, p);
+		for (int i = 0; i < nrec; i++) {
+			g_ro = 16u * (uint32_t)i;
+			p += emit_arm_kind(part[i], k, scratchpad_ptr, jit_feature, p);
+		}
 		g_no_exit = 0;
 		g_ro = 0;
-		p += emit_arm_exit(k, 2, 0, p);
+		p += emit_arm_exit(k, nrec, 0, p);
 	}
 	END_BLK(); // close $end_dispatch
 
@@ -2509,6 +2514,7 @@ uint32_t rxjit_generate_threaded_module(
 	int regs_in_memory,
 	int split_inner_dispatch,
 	int fuse_n,
+	int triples_n,
 	int kind16,
 	uint8_t *buf)
 {
@@ -2524,7 +2530,8 @@ uint32_t rxjit_generate_threaded_module(
 	g_emit_regs_in_mem = 1;
 	g_ro               = 0;
 	g_no_exit          = 0;
-	g_k_total          = RXJIT_K_COUNT + fuse_n;
+	g_k_total          = RXJIT_K_COUNT + fuse_n + triples_n;
+	g_fuse_n           = fuse_n;
 	g_kind16           = kind16;
 	g_d_aux            = kind16 ? 2 : 1;
 	g_r_file_base      = vm_state_ptr + VM_R0_OFFSET;
