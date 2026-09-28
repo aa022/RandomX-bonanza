@@ -26,7 +26,7 @@ const BENCH     = join(__dirname, 'bench_webui.mjs');
 const args = process.argv.slice(2);
 function arg(name, dflt) { const i = args.indexOf(name); return i < 0 ? dflt : args[i + 1]; }
 
-const SWEEP_RAW   = arg('--sweep', '1,4,32');
+const SWEEP_RAW   = arg('--sweep', '1,4,10,32');
 const SWEEP       = SWEEP_RAW.split(',')
                               .map((s) => Math.max(1, Math.min(32, Number(s.trim()))))
                               .filter((n) => Number.isFinite(n) && n > 0);

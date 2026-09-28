@@ -49,6 +49,9 @@ const QUIET        = flag('--quiet');
 const NO_JIT       = flag('--nojit');
 const NO_SUPJIT    = flag('--no-supjit');
 const NO_THREADED  = flag('--no-threaded');
+// Probe: --regs locals → threaded interp with regs/F/E/A in wasm locals
+// (regs_in_memory=0, split_inner_dispatch=0) instead of the JSC-tuned default.
+const REGS_MODE    = arg('--regs', 'mem');
 
 const RANDOMX_FLAG_FULL_MEM = 4;
 const pad = (s, w) => String(s).padStart(w, ' ');
@@ -70,7 +73,7 @@ async function main() {
   // every WebAssembly.Module() call throws "expected magic word".
   let jitFeature = 0;
   if (!NO_JIT && Module._rxSetJitEnabled) {
-    jitFeature = 3; // bit 0 = relaxed-simd, bit 1 = fma  (C side auto-falls-back)
+    jitFeature = 3 | Number(arg('--feature-extra', '0')); // bit 0 = relaxed-simd, bit 1 = fma  (C side auto-falls-back); --feature-extra ORs in probe/diag bits
     if (Module._rxjit_set_feature) Module._rxjit_set_feature(jitFeature);
 
     let maxPages = 65536; // emscripten MAXIMUM_MEMORY/65536 default = 4 GiB
@@ -87,8 +90,9 @@ async function main() {
       if (Module._rxjit_set_use_threaded_interp)  Module._rxjit_set_use_threaded_interp(1);
       jitFeature |= 4; // INLINE_FPRC_ZERO
       if (Module._rxjit_set_feature)              Module._rxjit_set_feature(jitFeature);
-      if (Module._rxjit_set_regs_in_memory)       Module._rxjit_set_regs_in_memory(1);
-      if (Module._rxjit_set_split_inner_dispatch) Module._rxjit_set_split_inner_dispatch(1);
+      const inMem = REGS_MODE !== 'locals' ? 1 : 0;
+      if (Module._rxjit_set_regs_in_memory)       Module._rxjit_set_regs_in_memory(inMem);
+      if (Module._rxjit_set_split_inner_dispatch) Module._rxjit_set_split_inner_dispatch(inMem);
     }
     if (!NO_SUPJIT && Module._rxjit_set_supjit_enabled) {
       Module._rxjit_set_supjit_enabled(1);
@@ -233,6 +237,14 @@ async function main() {
   api.destroy_mining_ctx(ctx);
 
   const rate = hashes / elapsed;
+
+  if (flag('--stats') && Module._rxjit_stat_runs) {
+    const runs = Module._rxjit_stat_runs() >>> 0;
+    const dyn  = Module._rxjit_stat_dyn_compile_us() >>> 0;
+    const run  = Module._rxjit_stat_run_us() >>> 0;
+    console.error(`[stats] runs=${runs} dyn_compile_us=${dyn} run_us=${run} ` +
+      `per-run: compile=${(dyn / Math.max(runs, 1)).toFixed(0)}us run=${(run / Math.max(runs, 1)).toFixed(0)}us`);
+  }
 
   const result = {
     threads:      THREADS,

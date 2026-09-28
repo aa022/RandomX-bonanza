@@ -26,9 +26,10 @@ WASM_JS        := $(PUBLIC_DIR)/randomx.js
 WASM_OUT       := $(WASM_WASM) $(WASM_JS)
 
 # Bench knobs — override on the command line, eg. `make bench DURATION=10`.
-SWEEP        ?= 1,4,32
+SWEEP        ?= 1,4,10,32
 INIT_THREADS ?= 32
 DURATION     ?= 30
+EXTRA        ?=
 
 .PHONY: all help install build serve bench test clean fclean re
 
@@ -57,7 +58,7 @@ help:
 	@printf '  fclean    clean + drop .make/ stamps\n'
 	@printf '  re        fclean + build\n'
 	@printf '\n'
-	@printf 'Bench knobs:  SWEEP=$(SWEEP)  INIT_THREADS=$(INIT_THREADS)  DURATION=$(DURATION)\n'
+	@printf 'Bench knobs:  SWEEP=$(SWEEP)  INIT_THREADS=$(INIT_THREADS)  DURATION=$(DURATION)  EXTRA=<bench_webui flags>\n'
 
 # ─── install / toolchain check ──────────────────────────────────────────
 # Per-platform install hints surfaced inline on failure — no sub-make.
@@ -143,7 +144,8 @@ bench: build
 	        '$(SWEEP)' '$(DURATION)' '$(INIT_THREADS)'
 	@printf '        (~2 GiB RAM; supjit + async dataset init; fresh node process per pass)\n'
 	@node $(BENCH_DIR)/bench_sweep.mjs \
-	      --sweep $(SWEEP) --init-threads $(INIT_THREADS) --duration $(DURATION)
+	      --sweep $(SWEEP) --init-threads $(INIT_THREADS) --duration $(DURATION) \
+	      $(if $(EXTRA),--extra '$(EXTRA)')
 
 # ─── clean ──────────────────────────────────────────────────────────────
 clean:

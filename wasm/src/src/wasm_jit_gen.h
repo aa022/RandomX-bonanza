@@ -43,6 +43,10 @@ typedef struct rxjit_vm_state {
 	uint32_t dataset_ptr_with_offset; // +308  pre-added base + offset
 } rxjit_vm_state_t;
 
+// Per-fprc v128 masks consumed by the PJIT2 inline rounding sequence:
+// [mode][K1, K2, D1, D3, Kon][2 lanes]. See rxjit_emit_instruction.
+extern uint64_t rxjit_mode_tbl[4][5][2];
+
 enum {
 	RXJIT_FEATURE_BASELINE = 0,
 	RXJIT_FEATURE_RELAXED_SIMD = 1,
@@ -56,6 +60,14 @@ enum {
 	// memory pressure isn't the bottleneck, gets it. Firefox/Chrome,
 	// where smaller modules matter more, leave it off.
 	RXJIT_FEATURE_INLINE_FPRC_ZERO = 4,
+	// DIAGNOSTIC ONLY (wrong hashes when fprc != 0): legacy per-program JIT
+	// emits native f64x2 ops instead of call_indirect into the rounding stubs.
+	RXJIT_FEATURE_DIAG_NATIVE_FP = 8,
+	// Per-program JIT v2 (dynamic module only): inline mulh/smulh, and — when
+	// FMA is also set — inline directed-rounding float ops (branchless, driven
+	// by a per-fprc mask table) instead of call_indirect into the static
+	// module's semifloat stubs. fprc lives in a local.
+	RXJIT_FEATURE_PJIT2 = 16,
 };
 
 // Generate the static module — compile this ONCE per worker thread. It

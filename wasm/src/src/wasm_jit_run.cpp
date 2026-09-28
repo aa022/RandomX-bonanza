@@ -596,7 +596,7 @@ static std::atomic<int> g_rxjit_feature{0};
 
 EMSCRIPTEN_KEEPALIVE
 void rxjit_set_feature(int feature) {
-	g_rxjit_feature.store(feature & 7, std::memory_order_relaxed);
+	g_rxjit_feature.store(feature & 31, std::memory_order_relaxed);
 }
 
 EMSCRIPTEN_KEEPALIVE

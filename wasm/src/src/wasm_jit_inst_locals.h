@@ -26,6 +26,17 @@
 #define LOC_tmp64     26
 #define LOC_mask_mant 27
 #define LOC_mask_exp  28
+// PJIT2 extras (declared unconditionally; unused locals are free).
+#define LOC_fprc      29 // i32: current rounding mode 0..3
+#define LOC_modeptr   30 // i32: &rxjit_mode_tbl[fprc]
+#define LOC_ft0       31 // v128 temps for inline rounding
+#define LOC_ft1       32
+#define LOC_ft2       33
+#define LOC_vzero     34 // v128, never written (== 0)
+#define LOC_m0        35 // i64 temps for inline mulh
+#define LOC_m1        36
+#define LOC_m2        37
+#define LOC_m3        38
 
 // imported mutable global 0 = fprc (shared with static module)
 #define GLOB_fprc 0

@@ -136,6 +136,27 @@ static uint32_t ptr_to_tmp_with_reg_offset(void *ptr, int reg, uint8_t *buf) {
 	WASM_U32(offset);                          \
 	WASM_U8_THUNK({0xfd, 0xfe, 0x01, 0x20, LOC_mask_mant, 0xfd, 0x4e, 0x20, LOC_mask_exp, 0xfd, 0x50, 0x21, reg})
 
+// [mode][K1, K2, D1, D3, Kon] — see the PJIT2 rounding fixup in wasm_jit_inst.c.
+#define M1 UINT64_MAX
+_Alignas(16) uint64_t rxjit_mode_tbl[4][5][2] = {
+	{{0, 0}, {0, 0}, {0, 0}, {1, 1}, {0, 0}},             // nearest: never adjust
+	{{0, 0}, {0, 0}, {M1, M1}, {1, 1}, {M1, M1}},         // down
+	{{M1, M1}, {0, 0}, {0, 0}, {1, 1}, {M1, M1}},         // up
+	{{0, 0}, {M1, M1}, {0, 0}, {M1, M1}, {M1, M1}},       // toward zero
+};
+#undef M1
+
+// fprc (on stack, i32) → local.tee $fprc; *80 + &rxjit_mode_tbl → local.set $modeptr
+uint32_t rxjit_emit_set_mode(uint8_t *buf) {
+	THUNK_BEGIN;
+	WASM_U8_THUNK({0x22, LOC_fprc, 0x41});
+	WASM_I64(80); // sleb128: 80 needs two bytes
+	WASM_U8_THUNK({0x6c, 0x41});
+	WASM_I64((int64_t)(intptr_t)rxjit_mode_tbl);
+	WASM_U8_THUNK({0x6a, 0x21, LOC_modeptr});
+	THUNK_END;
+}
+
 static uint32_t prologue_load_registers(rxjit_vm_state_t *vm, uint8_t *buf) {
 	THUNK_BEGIN;
 	p += ptr_to_tmp(vm, p);
@@ -163,13 +184,16 @@ static uint32_t prologue_load_registers(rxjit_vm_state_t *vm, uint8_t *buf) {
 	V128_LOAD(256, LOC_mask_exp);  // emask
 	V128_LOAD(272, LOC_mask_mant); // DYNAMIC_MANTISSA_MASK x2
 	I32_LOAD_GLOBAL(288, GLOB_fprc);
+	WASM_U8_THUNK({0x20, LOC_tmp, 0x28, 2});
+	WASM_U32(288);
+	p += rxjit_emit_set_mode(p);
 	I32_LOAD2(292, LOC_ma, LOC_sp_addr1);
 	I32_LOAD2(296, LOC_mx, LOC_sp_addr0);
 
 	THUNK_END;
 }
 
-static uint32_t epilogue_store_registers(rxjit_vm_state_t *vm, uint8_t *buf) {
+static uint32_t epilogue_store_registers(rxjit_vm_state_t *vm, int jit_feature, uint8_t *buf) {
 	THUNK_BEGIN;
 	p += ptr_to_tmp(vm, p);
 
@@ -189,7 +213,12 @@ static uint32_t epilogue_store_registers(rxjit_vm_state_t *vm, uint8_t *buf) {
 	V128_STORE(144, E(1));
 	V128_STORE(160, E(2));
 	V128_STORE(176, E(3));
-	I32_STORE_GLOBAL(288, GLOB_fprc);
+	if (jit_feature & RXJIT_FEATURE_PJIT2) {
+		WASM_U8_THUNK({0x20, LOC_tmp, 0x20, LOC_fprc, 0x36, 2});
+		WASM_U32(288);
+	} else {
+		I32_STORE_GLOBAL(288, GLOB_fprc);
+	}
 
 	THUNK_END;
 }
@@ -334,7 +363,7 @@ static uint32_t jit_main_body(rxjit_vm_state_t *vm, rxjit_inst_t program[256],
 		0x0b,
 	});
 
-	p += epilogue_store_registers(vm, p);
+	p += epilogue_store_registers(vm, jit_feature, p);
 
 	THUNK_END;
 }
@@ -581,12 +610,15 @@ uint32_t rxjit_generate_dynamic_module(
 		WASM_U8(1);
 		WASM_U32_PATCH({
 			WASM_U8_THUNK({
-				5,
+				8,
 				8, WASM_TYPE_I64,
 				12, WASM_TYPE_V128,
 				6, WASM_TYPE_I32,
 				1, WASM_TYPE_I64,
 				2, WASM_TYPE_V128,
+				2, WASM_TYPE_I32,  // fprc, modeptr
+				4, WASM_TYPE_V128, // ft0..2, vzero
+				4, WASM_TYPE_I64,  // m0..3
 			});
 			p += jit_main_body(vm, program, jump_desc, scratchpad, dataset_with_offset,
 				jit_feature, rr0, rr1, rr2, rr3, p);
