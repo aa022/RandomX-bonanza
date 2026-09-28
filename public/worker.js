@@ -130,6 +130,31 @@ function detectJitFeature() {
   return 0;
 }
 
+// CPU probe for ?jit_profile=auto: () -> i32 returning lane 0 of
+// i8x16.relaxed_swizzle(v128.const [10..25], v128.const [0x11 x16]). Index
+// 0x11 is out of range: x86 (pshufb, index & 15) gives 11, ARM (tbl) gives 0.
+// No relaxed SIMD (JSC/Safari) or any other failure -> not x86.
+function isX86() {
+  // type section: 1 type () -> i32
+  const typeSection = [0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f];
+  // function section: 1 function of type 0
+  const funcSection = [0x03, 0x02, 0x01, 0x00];
+  // export section: "f" = function 0
+  const exportSection = [0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00];
+  // code section: 0 locals, v128.const (0xfd 0x0c) data, v128.const indices,
+  // i8x16.relaxed_swizzle (0xfd 0x80 0x02), i8x16.extract_lane_u 0 (0xfd 0x16 0x00)
+  const data = Array.from({ length: 16 }, (_, i) => 10 + i);
+  const body = [0x00, 0xfd, 0x0c, ...data, 0xfd, 0x0c, ...Array(16).fill(0x11),
+    0xfd, 0x80, 0x02, 0xfd, 0x16, 0x00, 0x0b];
+  const codeSection = [0x0a, body.length + 2, 0x01, body.length, ...body];
+  const bytes = new Uint8Array([
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    ...typeSection, ...funcSection, ...exportSection, ...codeSection,
+  ]);
+  try { return new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.f() === 11; }
+  catch (_) { return false; }
+}
+
 async function init(options = {}) {
   if (Module) {
     postJitStats();
@@ -281,8 +306,8 @@ async function init(options = {}) {
         }
         // Module-gen profile (wasm_jit_profile.h): ?jit_profile=auto|arm|x86,
         // with fine overrides in jit_exp: fuse_n=N, triples_n=N, unroll2 or
-        // unroll2=0|1 (2x dispatch replication). 'auto' is arm until the x86
-        // probe lands.
+        // unroll2=0|1 (2x dispatch replication). 'auto' is isX86() ? x86 : arm;
+        // JSC always gets arm (it refused to tier up the large functions).
         if (Module._rxjit_set_profile) {
           const PROFILE_NAMES = ['arm', 'x86']; // index = RXJIT_PROFILE_*
           let req = String(options.jitProfile || 'auto').trim().toLowerCase();
@@ -290,18 +315,24 @@ async function init(options = {}) {
             postMessage({ type: 'status', message: `JIT profile: unknown '${req}', using auto` });
             req = 'auto';
           }
+          const auto = req === 'auto';
+          if (auto) {
+            const ua = String((self.navigator && self.navigator.userAgent) || '');
+            const jsc = /AppleWebKit\//.test(ua) && !/Chrom(e|ium)\//.test(ua);
+            req = !jsc && isX86() ? 'x86' : 'arm';
+          }
           const expNum = (k) => { // jit_exp token k=N, else -1 (the profile's)
             const t = jitExp.find((s) => s.startsWith(k + '='));
             return t && /^\d+$/.test(t.slice(k.length + 1)) ? Number(t.slice(k.length + 1)) : -1;
           };
-          Module._rxjit_set_profile(PROFILE_NAMES.indexOf(req === 'auto' ? 'arm' : req));
+          Module._rxjit_set_profile(PROFILE_NAMES.indexOf(req));
           Module._rxjit_set_fuse_n(expNum('fuse_n'));
           Module._rxjit_set_triples_n(expNum('triples_n'));
           // unroll2 (= unroll2=1) or unroll2=0 overrides the profile's
           Module._rxjit_set_unroll2(hasExp('unroll2') ? 1 : expNum('unroll2'));
           postMessage({
             type: 'status',
-            message: `JIT profile: ${PROFILE_NAMES[Module._rxjit_get_profile()]} (${req === 'auto' ? 'auto' : 'forced'})` +
+            message: `JIT profile: ${PROFILE_NAMES[Module._rxjit_get_profile()]} (${auto ? 'auto' : 'forced'})` +
               ` fuse_n=${Module._rxjit_effective_fuse_n()} triples_n=${Module._rxjit_effective_triples_n()}` +
               ` unroll2=${Module._rxjit_effective_unroll2()}`,
           });
