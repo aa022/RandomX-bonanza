@@ -1,6 +1,6 @@
 # RandomX bonanza
 
-In-browser Monero (RandomX) miner achieving ~13% of native execution efficiency, packaged with an easy to setup demo environment including a simple proxy with live pool presets. The raw miner payload is sub 600 KB. Shoutout to [Opus 4.7](https://www.anthropic.com/news/claude-opus-4-7) and [l1mey112's semifloat implementation](https://github.com/l1mey112/randomx.js).
+In-browser Monero (RandomX) miner achieving ~24% of native execution efficiency, packaged with an easy to setup demo environment including a simple proxy with live pool presets. The raw miner payload is sub 500 KB. Shoutout to [Opus 4.7](https://www.anthropic.com/news/claude-opus-4-7) and [l1mey112's semifloat implementation](https://github.com/l1mey112/randomx.js).
 
 ## Requirements
 
@@ -52,15 +52,16 @@ overrides wallet/pool per session (persisted in `localStorage`).
 
 ## Bench
 
-    make bench                           # sweep 1,4,32 mining threads @ 30 s/pass
+    make bench                           # sweep 1,4,10,32 mining threads @ 30 s/pass
     make bench DURATION=10               # shorter pass
     make bench SWEEP=1,8,16,32           # custom thread set
     make bench INIT_THREADS=16           # dataset init parallelism (1–32)
     make bench SWEEP=32 DURATION=60      # single 32-thread, 60 s pass
 
-Mirrors the webui worker exactly: threaded-interpreter JIT (+ INLINE_FPRC_ZERO
-+ V3 regs_in_memory + split_inner_dispatch + supjit kernel) and async dataset
-init (`rxInitDatasetStart` / `rxInitDatasetProgress` / `rxInitDatasetJoin`).
+Mirrors the webui worker exactly: the resident threaded interpreter (inline
+branchless directed rounding, fused-pair superinstructions, registers in
+linear memory, supjit dataset kernel) and async dataset init
+(`rxInitDatasetStart` / `rxInitDatasetProgress` / `rxInitDatasetJoin`).
 Each pass forks a fresh node process so JIT/pthread state cannot leak between
 thread counts. CPU model + core count are detected and printed in the
 summary.
@@ -71,29 +72,43 @@ The standalone scripts also work directly:
     node bench/bench_sweep.mjs --sweep 1,4,32 --duration 30
     node bench/bench_regfile.mjs                   # JIT codegen micro-bench
 
+Correctness gates (run after any change to the JIT):
+
+    node bench/full_mode_check.mjs --count 32                  # JIT vs portable C, full dataset
+    node bench/full_mode_check.mjs --count 32 --feature-base 0 # no-relaxed-SIMD path (Safari)
+    node bench/mine_ctx_check.mjs                              # mining-context API
+    node bench/jsc_validate.mjs --feature-base 0               # module validates in JavaScriptCore (macOS)
+
 ## Efficiency
 
 Apple M4 base · 10 cores · `make bench` (30 s/pass) vs. native
 `xmrig --bench=1M` at the same thread count:
 
-    threads   init     WASM H/s    xmrig H/s    efficiency
-    ─────────────────────────────────────────────────────
-       1     7.54 s        90          693         13.0 %
-       4     6.95 s       362         2676         13.5 %
-      32     6.65 s       586       ~4000 ¹       14.7 %
+    threads   WASM H/s    xmrig H/s    efficiency
+    ───────────────────────────────────────────
+       1         172          693         24.8 %
+      10         934            —            —
+      32         971       ~4000 ¹       ~24 %
 
+In the browser on the same machine (32 threads): Chrome ~850–880 H/s,
+Safari ~800 H/s, Firefox ~700 H/s.
 
-WASM tracks ~13 % of native per thread and ~15 % at full load.
+v0.1.0 is ~1.7× v0.0.1 (1T 90 → 172, 32T 586 → 971): a leaner dispatch loop
+(no shared join, absolute operand addresses in the decoded records),
+branchless inline directed rounding instead of `call_indirect` float stubs
+(with an FMA-free variant for engines without relaxed SIMD, e.g. Safari),
+call-free arms, fused-pair superinstructions and atomic nonce claiming.
+Details: `architecture.md`.
 
 ## Payload
 
-Total served to the browser per page load: **577 KB**.
+Total served to the browser per page load: **467 KB**.
 
-    index.html       15.1 KB     ui shell
-    miner.js         35.9 KB     ws client + ui control
-    worker.js        27.2 KB     wasm engine driver
-    randomx.js       47.1 KB     emscripten glue
-    randomx.wasm    451.7 KB     randomx engine + JIT + supjit kernel
+    index.html       21.4 KB     ui shell
+    miner.js         34.8 KB     ws client + ui control
+    worker.js        27.7 KB     wasm engine driver
+    randomx.js       47.2 KB     emscripten glue
+    randomx.wasm    335.9 KB     randomx engine + JIT + supjit kernel
 
 ## Native miners
 
@@ -123,6 +138,8 @@ URL parameters:
 - `?threads=N` — start with N mining threads (1–32)
 - `?init_threads=N` — dataset-init parallelism (default 32)
 - `?profile=1` — per-phase wall-clock profiling in the worker
+- `?jit_exp=no_fuse,no_inline_round` — per-engine A/B opt-outs (fused pairs,
+  inline rounding); hashes stay correct
 
 ## Layout
 
@@ -130,6 +147,7 @@ URL parameters:
     config.js           wallet + pool + port defaults
     proxy/index.js      HTTP + WS + raw-TCP stratum bridge
     public/             browser assets (miner.js, worker.js, built randomx.{js,wasm})
-    bench/              bench_webui.mjs · bench_sweep.mjs · bench_regfile.mjs · canonical_hash.mjs
+    bench/              bench_webui.mjs · bench_sweep.mjs · full_mode_check.mjs · mine_ctx_check.mjs · jsc_validate.mjs · …
     wasm/               vendored RandomX C/C++ sources + build.sh
     vendor/ws/          vendored npm ws (no npm install required)
+    architecture.md     interpreter architecture + the v0.1.0 perf series

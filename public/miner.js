@@ -6,7 +6,6 @@ const state = {
   accepted: 0,
   rejected: 0,
   mode: 'standby',
-  jit: '--',
   status: 'disconnected',
   workerReady: false,
   pendingConnect: false,
@@ -96,7 +95,6 @@ function updateUI() {
   $('accepted').textContent = state.accepted;
   $('rejected').textContent = state.rejected;
   $('mode').textContent = state.mode;
-  $('jit').textContent = state.jit;
   $('status').textContent = state.status;
   $('toggle').textContent = state.mining ? 'Stop' : 'Start';
   // Don't blow away .pulse — toggle only the .active modifier.
@@ -427,29 +425,10 @@ function initWorker() {
         break;
       case 'jit': {
         const stats = msg.stats || {};
-        if (stats.enabled) {
-          // c-side-wasm JIT exposes feature (0=baseline, 1=relaxed-simd,
-          // 3=relaxed+FMA) and a fail count. Older JS JIT reported
-          // compile/exec counts; keep that branch as a fallback.
-          if (stats.kind === 'c-side-wasm') {
-            const featLabel = stats.feature === 3 ? 'fma' : stats.feature === 1 ? 'relaxed' : 'base';
-            state.jit = `cside ${featLabel}`;
-            if (stats.failCount) state.jit += `/f${stats.failCount}`;
-          } else {
-            const compiles = (stats.compileCount || 0) + (stats.programCompileCount || 0);
-            const execs = (stats.execCount || 0) + (stats.programExecCount || 0);
-            const mode = stats.programExecCount ? 'batched' : 'iter';
-            state.jit = `${mode} c${compiles}/e${execs}`;
-            if (stats.failCount) state.jit += `/f${stats.failCount}`;
-          }
-          if (stats.failCount && stats.lastError && stats.lastError !== state.lastJitError) {
-            state.lastJitError = stats.lastError;
-            log(`JIT fallback: ${stats.lastError}`);
-          }
-        } else {
-          state.jit = 'off';
+        if (stats.enabled && stats.failCount && stats.lastError && stats.lastError !== state.lastJitError) {
+          state.lastJitError = stats.lastError;
+          log(`JIT fallback: ${stats.lastError}`);
         }
-        updateUI();
         break;
       }
       case 'profile': {
@@ -567,7 +546,6 @@ function toggle() {
     state.shareEtaTotal = 0;
     state.hashrateMax = 0;
     state.datasetBuilt = false;
-    state.jit = enableJit ? 'starting' : 'off';
     log(`Starting miner${enableJit ? '' : ' without JIT'} in ${fullMemory ? `full mode (${datasetThreads} threads)` : 'light mode'}${profileCore ? ' with core profile' : ''}...`);
     initWorker();
   }
