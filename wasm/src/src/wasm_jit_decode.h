@@ -115,6 +115,7 @@ enum {
 	RXJIT_K_CFROUND,
 	RXJIT_K_ISTORE_L12, // MOD_COND < 14 (L1 or L2 by MOD_MEM)
 	RXJIT_K_ISTORE_L3,  // MOD_COND >= 14
+	RXJIT_K_EXIT,       // sentinel record #256 (never emitted by the decoder)
 	RXJIT_K_COUNT,      // marker; not a real kind
 };
 

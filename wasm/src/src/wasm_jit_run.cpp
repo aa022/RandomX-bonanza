@@ -673,6 +673,15 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 		memset(blk, 0, RXJIT_ARENA_SIZE);
 		g_jit_threaded_vm_state = (rxjit_vm_state_t *)(blk + RXJIT_ARENA_VM_OFF);
 		g_jit_threaded_program_slot = blk + RXJIT_ARENA_SLOT_OFF;
+		{
+			// Sentinel record #256 terminates the inner pointer walk. Bytes 12..15
+			// hold the slot address: the inner loop loads it (an i32.load, not a
+			// constant, so TurboFan keeps the walk pointer zero-extended).
+			uint8_t *s = blk + RXJIT_ARENA_SENT_OFF;
+			s[0] = RXJIT_K_EXIT;
+			uint32_t slot = (uint32_t)(uintptr_t)(blk + RXJIT_ARENA_SLOT_OFF);
+			memcpy(s + 12, &slot, 4);
+		}
 		g_jit_threaded_vm_state->mmask[0] = DYNAMIC_MANTISSA_MASK;
 		g_jit_threaded_vm_state->mmask[1] = DYNAMIC_MANTISSA_MASK;
 		g_rxjit_threaded_phase.store(3, std::memory_order_relaxed);

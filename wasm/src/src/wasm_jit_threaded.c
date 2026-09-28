@@ -155,6 +155,10 @@ static _Thread_local uint32_t g_r_file_base = 0;
 // can be `() -> ()` with no argument-passing overhead at the call boundary.
 static _Thread_local int g_emit_split_id = 0;
 
+// Program slot address (records 0..255; sentinel EXIT record at +4096).
+// Used by the CBRANCH taken path to form the target record pointer.
+static _Thread_local uint32_t g_slot = 0;
+
 // vm_state offsets (mirrors rxjit_vm_state_t in wasm_jit_gen.h).
 #define VM_R0_OFFSET    0
 #define VM_F0_OFFSET    64
@@ -1091,18 +1095,17 @@ static uint32_t emit_step12_clear_sp(uint8_t *buf) {
 static uint32_t emit_inner_pc_loop(uint32_t scratchpad_ptr, uint32_t program_slot_ptr,
                                    int jit_feature, uint8_t *buf) {
 	THUNK_BEGIN;
-	WI32_CONST(0);
-	LS(LOCT_pc);
-	LOOP_VOID();
+	// Sentinel-terminated pointer walk. ip starts at the slot, loaded (not a
+	// constant) from the sentinel record's bytes 12..15 so TurboFan can prove
+	// the loop phi zero-extended (a const init costs a mov per record load).
+	// Every arm ends with `ip += 16; br $L` itself (tail-duplicated back-edge,
+	// no shared join); the EXIT sentinel at record #256 does `br $exit`.
+	WI32_CONST(program_slot_ptr);
+	I32_LOAD_OFF(RXJIT_ARENA_SENT_OFF - RXJIT_ARENA_SLOT_OFF + 12);
+	LS(LOCT_inst_ptr);
+	BLOCK_VOID(); // $exit
+	LOOP_VOID();  // $L
 	{
-		// inst_ptr = program_slot + (pc << 4)
-		WI32_CONST(program_slot_ptr);
-		LG(LOCT_pc);
-		WI32_CONST(4);
-		I32_SHL();
-		I32_ADD();
-		LS(LOCT_inst_ptr);
-
 		// preload dst_byte / src_byte
 		LG(LOCT_inst_ptr);
 		I32_LOAD8U_OFF(D_DST);
@@ -1114,16 +1117,15 @@ static uint32_t emit_inner_pc_loop(uint32_t scratchpad_ptr, uint32_t program_slo
 		// dispatch via br_table over opcode_kind
 		p += emit_inner_dispatch(scratchpad_ptr, jit_feature, p);
 
-		// pc++ then continue if pc < 256
-		LG(LOCT_pc);
-		WI32_CONST(1);
+		// only the br_table default lands here (never taken)
+		LG(LOCT_inst_ptr);
+		WI32_CONST(16);
 		I32_ADD();
-		LT(LOCT_pc);
-		WI32_CONST(256);
-		I32_LT_U();
-		BR_IF(0); // continue inner loop
+		LS(LOCT_inst_ptr);
+		BR(0);
 	}
-	END_BLK(); // end of inner loop
+	END_BLK(); // $L
+	END_BLK(); // $exit
 	THUNK_END;
 }
 
@@ -1263,6 +1265,19 @@ static uint32_t emit_main_loop_body(uint32_t vm_state_ptr, uint32_t scratchpad_p
 #define ARM_BR_END(k)   ((uint32_t)(RXJIT_K_COUNT - (k) - 1))
 #define ARM_BR_INNER(k) ((uint32_t)(RXJIT_K_COUNT - (k)))
 
+// Arm tail: advance the walk pointer by nrec records and branch straight back
+// to the loop header $L (tail-duplicated back-edge). `extra` = number of
+// blocks the caller has open inside the arm.
+static uint32_t emit_arm_exit(int k, int nrec, int extra, uint8_t *buf) {
+	THUNK_BEGIN;
+	LG(LOCT_inst_ptr);
+	WI32_CONST(16 * nrec);
+	I32_ADD();
+	LS(LOCT_inst_ptr);
+	BR(ARM_BR_INNER(k) + (uint32_t)extra);
+	THUNK_END;
+}
+
 // ---------------- Individual arm emitters ----------------
 
 // All take: scratchpad_ptr, jit_feature, k (kind index, for BR depth).
@@ -1271,7 +1286,7 @@ static uint32_t emit_main_loop_body(uint32_t vm_state_ptr, uint32_t scratchpad_p
 // K_NOP: just exit
 static uint32_t emit_arm_nop(int k, uint8_t *buf) {
 	THUNK_BEGIN;
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1289,7 +1304,7 @@ static uint32_t emit_arm_iadd_rs(int k, uint8_t *buf) {
 	I64_SHL();
 	I64_ADD();
 	p += emit_store_r_i64(LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1309,7 +1324,7 @@ static uint32_t emit_arm_iadd_rs_displ(int k, uint8_t *buf) {
 	I64_LOAD32S_OFF(D_IMM32);
 	I64_ADD();
 	p += emit_store_r_i64(LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1321,7 +1336,7 @@ static uint32_t emit_arm_alu_mem_l1l2(uint32_t scratchpad_ptr, uint8_t op, int k
 	I64_LOAD_OFF(0);
 	WASM_U8(op);
 	p += emit_store_r_i64(LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1333,7 +1348,7 @@ static uint32_t emit_arm_alu_mem_l3(uint32_t scratchpad_ptr, uint8_t op, int k, 
 	I64_LOAD_OFF(0);
 	WASM_U8(op);
 	p += emit_store_r_i64(LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1344,7 +1359,7 @@ static uint32_t emit_arm_alu_rr(uint8_t op, int k, uint8_t *buf) {
 	p += emit_select_r(LOCT_src_byte, p);
 	WASM_U8(op);
 	p += emit_store_r_i64(LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1356,7 +1371,7 @@ static uint32_t emit_arm_alu_imm(uint8_t op, int k, uint8_t *buf) {
 	I64_LOAD32S_OFF(D_IMM32);
 	WASM_U8(op);
 	p += emit_store_r_i64(LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1368,7 +1383,7 @@ static uint32_t emit_arm_mulh_r(uint32_t fn_idx, int k, uint8_t *buf) {
 	WASM_U8(0x10);
 	WASM_U32(fn_idx); // call <fn>
 	p += emit_store_r_i64(LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1381,7 +1396,7 @@ static uint32_t emit_arm_mulh_m_rr(uint32_t scratchpad_ptr, uint32_t fn_idx, int
 	WASM_U8(0x10);
 	WASM_U32(fn_idx);
 	p += emit_store_r_i64(LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1395,7 +1410,7 @@ static uint32_t emit_arm_mulh_m_direct(uint32_t scratchpad_ptr, uint32_t fn_idx,
 	WASM_U8(0x10);
 	WASM_U32(fn_idx);
 	p += emit_store_r_i64(LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1407,7 +1422,7 @@ static uint32_t emit_arm_imul_rcp(int k, uint8_t *buf) {
 	I64_LOAD_OFF(D_IMM64);
 	I64_MUL();
 	p += emit_store_r_i64(LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1418,7 +1433,7 @@ static uint32_t emit_arm_ineg_r(int k, uint8_t *buf) {
 	p += emit_select_r(LOCT_dst_byte, p);
 	I64_SUB();
 	p += emit_store_r_i64(LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1435,7 +1450,7 @@ static uint32_t emit_arm_iswap_r(int k, uint8_t *buf) {
 	p += emit_store_r_i64(LOCT_dst_byte, p); // r[dst] = r[src]
 	LG(LOCT_tmp64_b);                        // stack: old r[dst]
 	p += emit_store_r_i64(LOCT_src_byte, p); // r[src] = old r[dst]
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1462,7 +1477,7 @@ static uint32_t emit_arm_fswap_r_bank(int target_base, int k, int jit_feature, u
 		WASM_U8_THUNK({0xfd, 0x0e}); // i8x16.swizzle
 	}
 	p += emit_store_v128_at(target_base, LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1515,7 +1530,7 @@ static uint32_t emit_arm_fadd_fsub_r(uint32_t tbl_idx, uint8_t native_op, int k,
 	p += emit_select_a(LOCT_src_byte, p);
 	p += emit_fprc_dispatch(native_op, 2, tbl_idx, jit_feature, p);
 	p += emit_store_v128_at(F(0), LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1530,7 +1545,7 @@ static uint32_t emit_arm_fadd_fsub_m(uint32_t scratchpad_ptr, uint32_t tbl_idx, 
 	WASM_U8_THUNK({0xfd, 0xfe, 0x01}); // f64x2.convert_low_i32x4_s
 	p += emit_fprc_dispatch(native_op, 2, tbl_idx, jit_feature, p);
 	p += emit_store_v128_at(F(0), LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1546,7 +1561,7 @@ static uint32_t emit_arm_fscal_r(int k, uint8_t *buf) {
 	});     // v128.const i64x2(0x80F0_0000_0000_0000 x2)
 	WASM_U8_THUNK({0xfd, 0x51}); // v128.xor
 	p += emit_store_v128_at(F(0), LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1557,7 +1572,7 @@ static uint32_t emit_arm_fmul_r(int k, int jit_feature, uint8_t *buf) {
 	p += emit_select_a(LOCT_src_byte, p);
 	p += emit_fprc_dispatch(0xf2 /* f64x2.mul */, 2, TBL_FMUL, jit_feature, p);
 	p += emit_store_v128_at(E(0), LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1574,7 +1589,7 @@ static uint32_t emit_arm_fdiv_m(uint32_t scratchpad_ptr, int k, int jit_feature,
 	WASM_U8_THUNK({0xfd, 0x50}); // v128.or
 	p += emit_fprc_dispatch(0xf3 /* f64x2.div */, 2, TBL_FDIV, jit_feature, p);
 	p += emit_store_v128_at(E(0), LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1584,7 +1599,7 @@ static uint32_t emit_arm_fsqrt_r(int k, int jit_feature, uint8_t *buf) {
 	p += emit_select_e(LOCT_dst_byte, p);
 	p += emit_fprc_dispatch(0xef /* f64x2.sqrt */, 3, TBL_FSQRT, jit_feature, p);
 	p += emit_store_v128_at(E(0), LOCT_dst_byte, p);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1607,12 +1622,17 @@ static uint32_t emit_arm_cbranch(int k, uint8_t *buf) {
 	I64_EQZ();
 	// if cond { pc = target_pc; br $inner }
 	WASM_U8_THUNK({0x04, 0x40}); // if () -> ()
+	// ip = slot + (target_pc << 4)
 	LG(LOCT_inst_ptr);
 	I32_LOAD8U_OFF(D_FLAGS);
-	LS(LOCT_pc);
+	WI32_CONST(4);
+	I32_SHL();
+	WI32_CONST(g_slot);
+	I32_ADD();
+	LS(LOCT_inst_ptr);
 	BR(ARM_BR_INNER(k) + 1); // +1 for the if block
 	END_BLK();               // end of if
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1630,7 +1650,7 @@ static uint32_t emit_arm_cfround(int k, uint8_t *buf) {
 	WI32_CONST(3);
 	I32_AND();
 	GS(TGLOB_fprc);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1657,7 +1677,7 @@ static uint32_t emit_arm_istore_l12(uint32_t scratchpad_ptr, int k, uint8_t *buf
 	// value: r[src]
 	p += emit_select_r(LOCT_src_byte, p);
 	I64_STORE_OFF(0);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1675,7 +1695,7 @@ static uint32_t emit_arm_istore_l3(uint32_t scratchpad_ptr, int k, uint8_t *buf)
 	I32_ADD();
 	p += emit_select_r(LOCT_src_byte, p);
 	I64_STORE_OFF(0);
-	BR(ARM_BR_END(k));
+	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
@@ -1834,6 +1854,9 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 		case RXJIT_K_ISTORE_L3:
 			p += emit_arm_istore_l3(scratchpad_ptr, k, p);
 			break;
+		case RXJIT_K_EXIT:
+			BR(ARM_BR_INNER(k) + 1); // $exit (sentinel record #256)
+			break;
 		default:
 			p += emit_arm_nop(k, p);
 			break;
@@ -1878,6 +1901,7 @@ uint32_t rxjit_generate_threaded_module(
 	g_emit_split_id    = !!split_inner_dispatch;
 	g_emit_regs_in_mem = !!(regs_in_memory || split_inner_dispatch);
 	g_r_file_base      = vm_state_ptr + VM_R0_OFFSET;
+	g_slot             = program_slot_ptr;
 
 	const int split = g_emit_split_id;
 	const uint8_t fn_main_loop_idx = split ? TFN_MAIN_LOOP_SPLIT : TFN_MAIN_LOOP;
