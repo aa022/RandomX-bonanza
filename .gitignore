@@ -45,3 +45,7 @@ Desktop.ini
 *.o
 *.bc
 a.out
+
+# Local working notes (handoffs, plans, architecture) — never committed.
+*.md
+!README.md

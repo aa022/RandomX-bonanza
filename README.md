@@ -98,7 +98,6 @@ v0.1.0 is ~1.7× v0.0.1 (1T 90 → 172, 32T 586 → 971): a leaner dispatch loop
 branchless inline directed rounding instead of `call_indirect` float stubs
 (with an FMA-free variant for engines without relaxed SIMD, e.g. Safari),
 call-free arms, fused-pair superinstructions and atomic nonce claiming.
-Details: `architecture.md`.
 
 ## Payload
 
@@ -150,4 +149,3 @@ URL parameters:
     bench/              bench_webui.mjs · bench_sweep.mjs · full_mode_check.mjs · mine_ctx_check.mjs · jsc_validate.mjs · …
     wasm/               vendored RandomX C/C++ sources + build.sh
     vendor/ws/          vendored npm ws (no npm install required)
-    architecture.md     interpreter architecture + the v0.1.0 perf series
