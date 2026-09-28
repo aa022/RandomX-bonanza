@@ -29,6 +29,7 @@ WASM_OUT       := $(WASM_WASM) $(WASM_JS)
 SWEEP        ?= 1,4,10,32
 INIT_THREADS ?= 32
 DURATION     ?= 30
+PROFILE      ?= auto
 EXTRA        ?=
 
 .PHONY: all help install build serve bench test clean fclean re
@@ -59,6 +60,7 @@ help:
 	@printf '  re        fclean + build\n'
 	@printf '\n'
 	@printf 'Bench knobs:  SWEEP=$(SWEEP)  INIT_THREADS=$(INIT_THREADS)  DURATION=$(DURATION)  EXTRA=<bench_webui flags>\n'
+	@printf '              PROFILE=$(PROFILE)  JIT generator profile: auto (x86 on x86-64 hosts, else arm) | arm | x86\n'
 
 # ─── install / toolchain check ──────────────────────────────────────────
 # Per-platform install hints surfaced inline on failure — no sub-make.
@@ -145,7 +147,7 @@ bench: build
 	@printf '        (~2 GiB RAM; supjit + async dataset init; fresh node process per pass)\n'
 	@node $(BENCH_DIR)/bench_sweep.mjs \
 	      --sweep $(SWEEP) --init-threads $(INIT_THREADS) --duration $(DURATION) \
-	      $(if $(EXTRA),--extra '$(EXTRA)')
+	      --profile '$(PROFILE)' $(if $(EXTRA),--extra '$(EXTRA)')
 
 # ─── clean ──────────────────────────────────────────────────────────────
 clean:

@@ -27,11 +27,14 @@
 //   node bench/bench_webui.mjs --no-threaded            # disable threaded interp
 //   node bench/bench_webui.mjs --nojit                  # interpreter only
 //   node bench/bench_webui.mjs --feature-base 0         # no relaxed SIMD / FMA (Safari's feature set)
+//   node bench/bench_webui.mjs --profile arm            # generator profile auto|arm|x86 (default auto)
+//   node bench/bench_webui.mjs --fuse-n 800 --stats     # knob override; --stats adds dispatches/op
 
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { writeFileSync } from 'fs';
+import { parseProfileArgs, applyProfile, profileHeader, staticDispatchesPerOp } from './profile_args.mjs';
 
 const __dirname    = dirname(fileURLToPath(import.meta.url));
 const require      = createRequire(import.meta.url);
@@ -53,6 +56,7 @@ const NO_THREADED  = flag('--no-threaded');
 // Probe: --regs locals → threaded interp with regs/F/E/A in wasm locals
 // (regs_in_memory=0, split_inner_dispatch=0) instead of the JSC-tuned default.
 const REGS_MODE    = arg('--regs', 'mem');
+const PROF         = parseProfileArgs(args); // --profile auto|arm|x86, --fuse-n, --triples-n
 if (REGS_MODE === 'locals') console.error('note: --regs locals is retired (perf step 2); the threaded interpreter always uses split + registers-in-memory.');
 
 const RANDOMX_FLAG_FULL_MEM = 4;
@@ -95,6 +99,12 @@ async function main() {
       const inMem = REGS_MODE !== 'locals' ? 1 : 0;
       if (Module._rxjit_set_regs_in_memory)       Module._rxjit_set_regs_in_memory(inMem);
       if (Module._rxjit_set_split_inner_dispatch) Module._rxjit_set_split_inner_dispatch(inMem);
+    }
+    // Generator profile after the last feature write (the NO_FUSE bit feeds
+    // the effective fuse_n), before the first module is generated.
+    if (Module._rxjit_set_profile) {
+      applyProfile(Module, PROF);
+      (QUIET ? console.error : console.log)(profileHeader(Module, PROF));
     }
     if (!NO_SUPJIT && Module._rxjit_set_supjit_enabled) {
       Module._rxjit_set_supjit_enabled(1);
@@ -246,6 +256,10 @@ async function main() {
     const run  = Module._rxjit_stat_run_us() >>> 0;
     console.error(`[stats] runs=${runs} dyn_compile_us=${dyn} run_us=${run} ` +
       `per-run: compile=${(dyn / Math.max(runs, 1)).toFixed(0)}us run=${(run / Math.max(runs, 1)).toFixed(0)}us`);
+    if (Module._rxjit_stat_decoded_programs) {
+      console.error(`[stats] static dispatches/op=${staticDispatchesPerOp(Module).toFixed(3)} ` +
+        `(${Module._rxjit_stat_decoded_programs()} programs decoded)`);
+    }
   }
 
   const result = {

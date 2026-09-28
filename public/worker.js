@@ -279,6 +279,34 @@ async function init(options = {}) {
           Module._rxjit_set_feature(jitFeature);
           postMessage({ type: 'status', message: `JIT feature: opt-out bits ${optOut} set` });
         }
+        // Module-gen profile (wasm_jit_profile.h): ?jit_profile=auto|arm|x86,
+        // with fine overrides in jit_exp: fuse_n=N, triples_n=N, unroll2
+        // (feature bit 128). 'auto' is arm until the x86 probe lands.
+        if (Module._rxjit_set_profile) {
+          const PROFILE_NAMES = ['arm', 'x86']; // index = RXJIT_PROFILE_*
+          let req = String(options.jitProfile || 'auto').trim().toLowerCase();
+          if (req !== 'auto' && !PROFILE_NAMES.includes(req)) {
+            postMessage({ type: 'status', message: `JIT profile: unknown '${req}', using auto` });
+            req = 'auto';
+          }
+          const expNum = (k) => { // jit_exp token k=N, else -1 (the profile's)
+            const t = jitExp.find((s) => s.startsWith(k + '='));
+            return t && /^\d+$/.test(t.slice(k.length + 1)) ? Number(t.slice(k.length + 1)) : -1;
+          };
+          if (hasExp('unroll2') && Module._rxjit_set_feature) {
+            jitFeature |= 128; // RXJIT_FEATURE_UNROLL2
+            Module._rxjit_set_feature(jitFeature);
+          }
+          Module._rxjit_set_profile(PROFILE_NAMES.indexOf(req === 'auto' ? 'arm' : req));
+          Module._rxjit_set_fuse_n(expNum('fuse_n'));
+          Module._rxjit_set_triples_n(expNum('triples_n'));
+          postMessage({
+            type: 'status',
+            message: `JIT profile: ${PROFILE_NAMES[Module._rxjit_get_profile()]} (${req === 'auto' ? 'auto' : 'forced'})` +
+              ` fuse_n=${Module._rxjit_effective_fuse_n()} triples_n=${Module._rxjit_effective_triples_n()}` +
+              ` unroll2=${Module._rxjit_effective_unroll2()}`,
+          });
+        }
         postMessage({ type: 'status', message: 'JIT path: THREADED-INTERPRETER (resident module)' });
       }
     }

@@ -7,11 +7,12 @@
 //   node bench/full_mode_check.mjs --no-threaded         # per-program JIT
 //   node bench/full_mode_check.mjs --no-threaded --feature-extra 16   # PJIT2
 //   node bench/full_mode_check.mjs --regs locals --count 64
-//   node bench/full_mode_check.mjs --profile x86 --fuse-n 2704   # generator profile / knobs
+//   node bench/full_mode_check.mjs --profile x86 --fuse-n 2704   # generator profile / knobs (bench/profile_args.mjs)
 
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { parseProfileArgs, applyProfile, profileHeader, staticDispatchesPerOp } from './profile_args.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -27,10 +28,7 @@ const KEY = arg('--key', 'gh-distro bench key');
 const NO_THREADED = flag('--no-threaded');
 const REGS_MODE = arg('--regs', 'mem');
 const FEATURE_EXTRA = Number(arg('--feature-extra', '0'));
-const PROFILES = { arm: 0, x86: 1 };
-const PROFILE = arg('--profile', ''); // '': the C default (arm)
-const FUSE_N = arg('--fuse-n', ''); // '': the profile's
-if (PROFILE && !(PROFILE in PROFILES)) { console.error(`--profile must be one of ${Object.keys(PROFILES).join('|')}`); process.exit(2); }
+const PROF = parseProfileArgs(args);
 const FULL_MEM = 4;
 
 const Module = await createRandomX();
@@ -47,8 +45,7 @@ if (!NO_THREADED) {
   Module._rxjit_set_split_inner_dispatch(inMem);
 }
 Module._rxjit_set_feature(feature);
-if (PROFILE) Module._rxjit_set_profile(PROFILES[PROFILE]);
-if (FUSE_N !== '') Module._rxjit_set_fuse_n(Number(FUSE_N));
+applyProfile(Module, PROF);
 Module._rxjit_set_supjit_enabled(1);
 Module._rxSetJitEnabled(1);
 
@@ -108,10 +105,8 @@ for (let i = 0; i < COUNT; i++) {
     bad++;
   }
 }
-const gen = `profile=${Object.keys(PROFILES)[Module._rxjit_get_profile()]} fuse_n=${Module._rxjit_effective_fuse_n()} kind16=${Module._rxjit_effective_kind16()}`;
-const dpo = Module._rxjit_stat_dispatches() / (256 * Module._rxjit_stat_decoded_programs());
 const mode = NO_THREADED ? `per-program (feature=${feature})`
-  : `threaded regs=${REGS_MODE} (feature=${feature} ${gen} dispatches/op=${dpo.toFixed(3)})`;
+  : `threaded regs=${REGS_MODE} (feature=${feature} ${profileHeader(Module, PROF)} dispatches/op=${staticDispatchesPerOp(Module).toFixed(3)})`;
 if (jitRuns < COUNT * 8) {
   console.error(`FAIL ${mode}: JIT ran only ${jitRuns}/${COUNT * 8} programs (fell back to C)`);
   process.exit(1);

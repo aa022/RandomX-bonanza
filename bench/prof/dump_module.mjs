@@ -7,6 +7,7 @@
 //   node bench/prof/dump_module.mjs --feature-base 3 --out bench/results/ref_f7.wasm
 //   node bench/prof/dump_module.mjs --feature-base 0 --out bench/results/ref_f4.wasm
 //   node bench/prof/dump_module.mjs --feature-base 3 --profile x86 --fuse-n 2704 --out /tmp/x.wasm
+// --profile defaults to auto (x86 on x64 hosts): pass --profile arm for the ARM identity check.
 //
 // Compare (baked pointers differ between builds, so normalise numbers >= 1e6):
 //   wasm2wat --enable-all A.wasm | sed -E 's/\b[0-9]{7,}\b/P/g' > a.wat  (same for B), then diff a.wat b.wat
@@ -15,6 +16,7 @@ import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { writeFileSync } from 'fs';
+import { parseProfileArgs, applyProfile, profileHeader } from '../profile_args.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -27,13 +29,11 @@ const INIT_THREADS = Number(arg('--init-threads', '10'));
 const KEY = arg('--key', 'gh-distro bench key');
 const OUT = arg('--out', '');
 const FULL_MEM = 4;
-const PROFILES = { arm: 0, x86: 1 };
-const PROFILE = arg('--profile', ''); // '': the C default (arm)
-const FUSE_N = arg('--fuse-n', ''); // '': the profile's
-if (!OUT || (PROFILE && !(PROFILE in PROFILES))) {
-  console.error('usage: dump_module.mjs [--feature-base N] [--feature-extra N] [--profile arm|x86] [--fuse-n N] --out F.wasm');
+if (!OUT) {
+  console.error('usage: dump_module.mjs [--feature-base N] [--feature-extra N] [--profile auto|arm|x86] [--fuse-n N] [--triples-n N] --out F.wasm');
   process.exit(2);
 }
+const PROF = parseProfileArgs(args);
 
 const Module = await createRandomX();
 let maxPages = 65536;
@@ -44,8 +44,7 @@ Module._rxjit_set_use_threaded_interp(1);
 Module._rxjit_set_regs_in_memory(1);
 Module._rxjit_set_split_inner_dispatch(1);
 Module._rxjit_set_feature(feature);
-if (PROFILE) Module._rxjit_set_profile(PROFILES[PROFILE]);
-if (FUSE_N !== '') Module._rxjit_set_fuse_n(Number(FUSE_N));
+applyProfile(Module, PROF);
 Module._rxjit_set_supjit_enabled(1);
 Module._rxSetJitEnabled(1);
 
@@ -75,6 +74,5 @@ const len = Module._rxjit_stat_threaded_module_size() >>> 0;
 if (!ptr || !len) { console.error(`FAIL feature=${feature}: no threaded module was generated`); process.exit(1); }
 const bytes = Module.HEAPU8.slice(ptr, ptr + len);
 writeFileSync(OUT, bytes);
-const gen = `profile=${Object.keys(PROFILES)[Module._rxjit_get_profile()]} fuse_n=${Module._rxjit_effective_fuse_n()} kind16=${Module._rxjit_effective_kind16()}`;
-console.log(`OK feature=${feature} ${gen}: threaded module ${len} B, node validate=${WebAssembly.validate(bytes)} -> ${OUT}`);
+console.log(`OK feature=${feature} ${profileHeader(Module, PROF)}: threaded module ${len} B, node validate=${WebAssembly.validate(bytes)} -> ${OUT}`);
 process.exit(0);

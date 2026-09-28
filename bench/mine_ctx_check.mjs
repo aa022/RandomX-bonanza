@@ -3,10 +3,12 @@
 // the reported share's nonce lies in the call's range and its hash equals the
 // JIT-off (portable C) recomputation; with an all-0x00 target nothing is found.
 // Usage: node bench/mine_ctx_check.mjs [--threads 10] [--init-threads 10]
+//          [--profile auto|arm|x86] [--fuse-n N] [--triples-n N]   (bench/profile_args.mjs)
 
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { parseProfileArgs, applyProfile, profileHeader } from './profile_args.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -15,6 +17,7 @@ const args = process.argv.slice(2);
 const arg = (n, d) => { const i = args.indexOf(n); return i < 0 ? d : args[i + 1]; };
 const THREADS = Number(arg('--threads', '10'));
 const INIT_THREADS = Number(arg('--init-threads', '10'));
+const PROF = parseProfileArgs(args);
 const FULL_MEM = 4, BLOB_LEN = 76, NONCE_OFFSET = 39;
 
 const M = await createRandomX();
@@ -25,6 +28,7 @@ M._rxjit_set_use_threaded_interp(1);
 M._rxjit_set_regs_in_memory(1);
 M._rxjit_set_split_inner_dispatch(1);
 M._rxjit_set_feature(7);
+applyProfile(M, PROF);
 M._rxjit_set_supjit_enabled(1);
 M._rxSetJitEnabled(1);
 
@@ -83,6 +87,7 @@ for (const s of shares) {
   const ref = Buffer.from(M.HEAPU8.slice(outPtr, outPtr + 32)).toString('hex');
   if (ref !== s.hash) fail(`call ${s.ci}: nonce ${s.nonce} hash ${s.hash} != ref ${ref}`);
 }
-if (bad) { console.error(`FAIL mine_ctx_check (${THREADS}T): ${bad} problems`); process.exit(1); }
-console.log(`OK mine_ctx_check (${THREADS}T): ${counts.length * 2} calls returned nonceCount, ${shares.length} shares match the portable interpreter`);
+const gen = profileHeader(M, PROF);
+if (bad) { console.error(`FAIL mine_ctx_check (${THREADS}T ${gen}): ${bad} problems`); process.exit(1); }
+console.log(`OK mine_ctx_check (${THREADS}T ${gen}): ${counts.length * 2} calls returned nonceCount, ${shares.length} shares match the portable interpreter`);
 process.exit(0);

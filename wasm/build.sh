@@ -66,6 +66,8 @@ EXPORTED_FUNCTIONS='[
   "_rxjit_set_triples_n",
   "_rxjit_effective_fuse_n",
   "_rxjit_effective_kind16",
+  "_rxjit_effective_triples_n",
+  "_rxjit_effective_unroll2",
   "_rxjit_test_generate",
   "_rxjit_test_generate_static",
   "_rxjit_stat_runs",

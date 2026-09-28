@@ -692,6 +692,18 @@ int rxjit_effective_kind16(void) {
 	return rxjit_kind16(rxjit_effective_fuse_n(), 0);
 }
 
+// Fused triples and 2x dispatch replication are not generated yet: both read
+// 0 until the generator uses them (the knobs above are stored regardless).
+EMSCRIPTEN_KEEPALIVE
+int rxjit_effective_triples_n(void) {
+	return 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int rxjit_effective_unroll2(void) {
+	return 0;
+}
+
 EMSCRIPTEN_KEEPALIVE
 uint32_t rxjit_test_generate(void *program256, void *vm_state, void *scratchpad, void *dataset,
                              uint64_t dataset_offset, uint32_t rr0, uint32_t rr1, uint32_t rr2,

@@ -13,6 +13,7 @@
 //   node bench/bench_sweep.mjs --duration 15                # 15s per pass
 //   node bench/bench_sweep.mjs --init-threads 16            # init at 16 thr
 //   node bench/bench_sweep.mjs --extra "--no-supjit"        # forward args
+//   node bench/bench_sweep.mjs --profile x86                # generator profile auto|arm|x86
 
 import { spawn, execSync } from 'child_process';
 import { fileURLToPath } from 'url';
@@ -33,6 +34,7 @@ const SWEEP       = SWEEP_RAW.split(',')
 const INIT_THREADS = arg('--init-threads', '32');
 const DURATION_S   = arg('--duration', '30');
 const EXTRA        = arg('--extra', ''); // forwarded raw to bench_webui.mjs
+const PROFILE      = arg('--profile', 'auto'); // forwarded to bench_webui.mjs (profile_args.mjs)
 
 if (SWEEP.length === 0) {
   console.error(`bad --sweep value: "${SWEEP_RAW}"`);
@@ -78,6 +80,7 @@ function runPass(threads, outPath) {
       '--duration',     String(DURATION_S),
       '--out',          outPath,
       ...extra,
+      '--profile',      PROFILE, // after extra: a --profile inside --extra wins
     ];
     const child = spawn(process.execPath, argv, { stdio: 'inherit' });
     child.on('error', reject);
@@ -120,7 +123,7 @@ async function main() {
   console.log('');
   console.log('═══════════════════════════════════════════════════════════════════════');
   console.log(`  sweep summary  —  ${cpu.model}  (${cpu.cores} cores, ${cpu.arch})`);
-  console.log(`                    init=${INIT_THREADS} threads · ${DURATION_S}s/pass · wall=${wall}s`);
+  console.log(`                    init=${INIT_THREADS} threads · ${DURATION_S}s/pass · profile=${PROFILE} · wall=${wall}s`);
   console.log('═══════════════════════════════════════════════════════════════════════');
   console.log('   threads    init        hashes    elapsed     H/s      H/s/thread');
   console.log('  ──────────────────────────────────────────────────────────────────');

@@ -484,7 +484,9 @@ function initWorker() {
       log(`JIT experiment mode active: ${jitExperiment} (hashes are correct)`);
     }
   }
-  state.worker.postMessage({ type: 'init', enableJit, fullMemory, datasetThreads, datasetInitThreads, profileCore, jitExperiment });
+  // ?jit_profile=auto|arm|x86: threaded-module generator profile (worker.js).
+  const jitProfile = params.get('jit_profile') || 'auto';
+  state.worker.postMessage({ type: 'init', enableJit, fullMemory, datasetThreads, datasetInitThreads, profileCore, jitExperiment, jitProfile });
 }
 
 // Reads the threads input (the only source of truth the user can edit) and
