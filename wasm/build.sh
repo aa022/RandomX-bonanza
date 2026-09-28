@@ -81,6 +81,7 @@ EXPORTED_FUNCTIONS='[
   "_rxjit_set_supjit_enabled",
   "_rxjit_get_supjit_enabled",
   "_rxjit_stat_threaded_module_size",
+  "_rxjit_threaded_module_ptr",
   "_rxjit_stat_threaded_entries",
   "_rxjit_stat_threaded_phase",
   "_rxjit_record_run_us_sample",

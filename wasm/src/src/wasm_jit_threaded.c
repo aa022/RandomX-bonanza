@@ -727,9 +727,18 @@ static uint32_t emit_addr_l3_reg(uint32_t scratchpad_base, int reg_local, uint8_
 // arena at vm_state + RXJIT_ARENA_RMASK_OFF + fprc*128 + 16*i, i = TEG, TEL,
 // K1, K2, D1, D3, KON (filled once by wasm_jit_run.cpp), and are reloaded into
 // LOCT_mTEG..mKON at every inner_dispatch entry and after every CFROUND.
-// Relies on relaxed_madd/nmadd being fused: gated on RXJIT_FEATURE_FMA.
-static inline int rxjit_inline_round_on(int jit_feature) {
+// add/sub use TwoSum (plain SIMD128, no FMA): inline on every engine unless
+// NO_INLINE_ROUND. mul/div/sqrt rely on relaxed_madd/nmadd being fused: gated
+// on RXJIT_FEATURE_FMA (else emit_fprc_dispatch stubs). The mask table is
+// loaded whenever any inline arm is active (= addsub_on, since muldiv implies it).
+static inline int rxjit_inline_round_addsub_on(int jit_feature) {
+	return !(jit_feature & RXJIT_FEATURE_NO_INLINE_ROUND);
+}
+static inline int rxjit_inline_round_muldiv_on(int jit_feature) {
 	return (jit_feature & RXJIT_FEATURE_FMA) && !(jit_feature & RXJIT_FEATURE_NO_INLINE_ROUND);
+}
+static inline int rxjit_inline_round_any_on(int jit_feature) {
+	return rxjit_inline_round_addsub_on(jit_feature);
 }
 
 // 0xfd-prefixed SIMD op (uleb128 opcode: relaxed and i64x2 ops are multi-byte).
@@ -1285,7 +1294,7 @@ static uint32_t emit_inner_pc_loop(uint32_t scratchpad_ptr, uint32_t program_slo
 	// the loop phi zero-extended (a const init costs a mov per record load).
 	// Every arm ends with `ip += 16; br $L` itself (tail-duplicated back-edge,
 	// no shared join); the EXIT sentinel at record #256 does `br $exit`.
-	if (rxjit_inline_round_on(jit_feature))
+	if (rxjit_inline_round_any_on(jit_feature))
 		p += emit_load_round_masks(p); // once per call (256 ops); CFROUND reloads
 	p += emit_load_spb(p);             // step 9: opaque scratchpad base
 	WI32_CONST(program_slot_ptr);
@@ -1818,7 +1827,8 @@ static uint32_t emit_arm_fbin_r(uint32_t tbl_idx, uint8_t native_op, int k, int 
 	p += emit_ld_dst(p);
 	p += emit_ld_src(p);
 	LG(LOCT_dst_byte);
-	if (rxjit_inline_round_on(jit_feature)) {
+	if (native_op == 0xf2 ? rxjit_inline_round_muldiv_on(jit_feature)
+	                      : rxjit_inline_round_addsub_on(jit_feature)) {
 		RDV(LOCT_dst_byte);
 		LS(LOCT_fa);
 		RDV(LOCT_src_byte);
@@ -1861,7 +1871,8 @@ static uint32_t emit_arm_fbin_m(uint32_t scratchpad_ptr, uint32_t mask, uint32_t
 	p += emit_ld_src(p);
 	LG(LOCT_dst_byte);
 	RDV(LOCT_dst_byte);
-	const int inl = rxjit_inline_round_on(jit_feature);
+	const int inl = native_op == 0xf3 ? rxjit_inline_round_muldiv_on(jit_feature)
+	                                  : rxjit_inline_round_addsub_on(jit_feature);
 	if (inl)
 		LS(LOCT_fa);
 	p += emit_addr_l1l2(scratchpad_ptr, mask, LOCT_src_byte, p);
@@ -1921,7 +1932,7 @@ static uint32_t emit_arm_fsqrt_r(int k, int jit_feature, uint8_t *buf) {
 	p += emit_ld_dst(p);
 	LG(LOCT_dst_byte);
 	RDV(LOCT_dst_byte);
-	if (rxjit_inline_round_on(jit_feature)) { // res = a - c*c
+	if (rxjit_inline_round_muldiv_on(jit_feature)) { // res = a - c*c
 		LS(LOCT_fa);
 		LG(LOCT_fa);
 		SIMD(0xef);
@@ -1988,7 +1999,7 @@ static uint32_t emit_arm_cfround(int k, int jit_feature, uint8_t *buf) {
 	WI32_CONST(3);
 	I32_AND();
 	GS(TGLOB_fprc);
-	if (rxjit_inline_round_on(jit_feature))
+	if (rxjit_inline_round_any_on(jit_feature))
 		p += emit_load_round_masks(p);
 	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;

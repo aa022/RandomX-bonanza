@@ -507,6 +507,14 @@ uint32_t rxjit_stat_threaded_module_size(void) {
 	return g_rxjit_threaded_module_size.load(std::memory_order_relaxed);
 }
 
+// Calling thread's last generated threaded module (bench/jsc_validate.mjs);
+// its size is rxjit_stat_threaded_module_size (g_jit_threaded_size is zeroed
+// once the bytes are handed to JS).
+EMSCRIPTEN_KEEPALIVE
+void *rxjit_threaded_module_ptr(void) {
+	return g_jit_threaded_buf;
+}
+
 EMSCRIPTEN_KEEPALIVE
 uint32_t rxjit_stat_threaded_entries(void) {
 	return g_rxjit_threaded_entries.load(std::memory_order_relaxed);

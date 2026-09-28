@@ -26,6 +26,7 @@
 //   node bench/bench_webui.mjs --no-supjit              # disable supjit kernel
 //   node bench/bench_webui.mjs --no-threaded            # disable threaded interp
 //   node bench/bench_webui.mjs --nojit                  # interpreter only
+//   node bench/bench_webui.mjs --feature-base 0         # no relaxed SIMD / FMA (Safari's feature set)
 
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
@@ -74,7 +75,7 @@ async function main() {
   // every WebAssembly.Module() call throws "expected magic word".
   let jitFeature = 0;
   if (!NO_JIT && Module._rxSetJitEnabled) {
-    jitFeature = 3 | Number(arg('--feature-extra', '0')); // bit 0 = relaxed-simd, bit 1 = fma  (C side auto-falls-back); --feature-extra ORs in probe/diag bits
+    jitFeature = Number(arg('--feature-base', '3')) | Number(arg('--feature-extra', '0')); // bit 0 = relaxed-simd, bit 1 = fma  (C side auto-falls-back); --feature-base 0 = Safari/JSC; --feature-extra ORs in probe/diag bits
     if (Module._rxjit_set_feature) Module._rxjit_set_feature(jitFeature);
 
     let maxPages = 65536; // emscripten MAXIMUM_MEMORY/65536 default = 4 GiB
