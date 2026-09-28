@@ -11,7 +11,7 @@ This is an appendix to `opus_handoff.md`, which covers the ARM history and the t
 |---|---|---|
 | Node 1T | 82 H/s | 100–108 |
 | Node 12T | 525 | 580–610 |
-| Chromium, 32 threads (measured by the user) | about 550 | **615, max 632** |
+| Chromium (measured by the user) | about 550 | 615 (max 632) before the relaxed AES; **max 660** with it |
 | ARM (the `arm` profile) | | unchanged: the generated module is byte-identical to v0.1.0 |
 
 ## 2. Design: one build, runtime profiles
