@@ -682,6 +682,25 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 			uint32_t slot = (uint32_t)(uintptr_t)(blk + RXJIT_ARENA_SLOT_OFF);
 			memcpy(s + 12, &slot, 4);
 		}
+		{
+			// Inline directed-rounding masks (step 3): mode m (fprc 0=RN 1=RD
+			// 2=RU 3=RZ) at +RMASK_OFF + m*128, i64x2 splats in the order
+			// TEG, TEL, K1, K2, D1, D3, KON (see wasm_jit_threaded.c).
+			const uint64_t PI = 0x7FF0000000000000ull, NI = 0xFFF0000000000000ull, A = ~0ull;
+			static const uint64_t RM[4][7] = {
+			    {PI, NI, 0, 0, 0, 1, 0}, // RN
+			    {PI, 0, 0, 0, A, 1, A},  // RD
+			    {0, NI, A, 0, 0, 1, A},  // RU
+			    {PI, 0, 0, A, 0, A, A},  // RZ
+			};
+			static_assert(RXJIT_ARENA_RMASK_OFF + 4 * 128 <= RXJIT_ARENA_PAD_OFF, "rmask table");
+			for (int m = 0; m < 4; m++)
+				for (int i = 0; i < 7; i++) {
+					uint8_t *q = blk + RXJIT_ARENA_RMASK_OFF + m * 128 + 16 * i;
+					memcpy(q, &RM[m][i], 8);
+					memcpy(q + 8, &RM[m][i], 8);
+				}
+		}
 		g_jit_threaded_vm_state->mmask[0] = DYNAMIC_MANTISSA_MASK;
 		g_jit_threaded_vm_state->mmask[1] = DYNAMIC_MANTISSA_MASK;
 		g_rxjit_threaded_phase.store(3, std::memory_order_relaxed);

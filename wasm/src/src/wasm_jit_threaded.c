@@ -700,6 +700,121 @@ static uint32_t emit_addr_l3_reg(uint32_t scratchpad_base, int reg_local, uint8_
 	THUNK_END;
 }
 
+// ---------------- Inline directed rounding (step 3) ----------------
+//
+// Branchless, bit-exact with the semifloat FMA stubs. c = round-to-nearest
+// result, res = exact residue (TwoSum / FMA), then a per-mode mask fixup
+// nudges c by one ulp (integer +-1 on the bit pattern). Masks live in the
+// arena at vm_state + RXJIT_ARENA_RMASK_OFF + fprc*128 + 16*i, i = TEG, TEL,
+// K1, K2, D1, D3, KON (filled once by wasm_jit_run.cpp), and are reloaded into
+// LOCT_mTEG..mKON at every inner_dispatch entry and after every CFROUND.
+// Relies on relaxed_madd/nmadd being fused: gated on RXJIT_FEATURE_FMA.
+static inline int rxjit_inline_round_on(int jit_feature) {
+	return (jit_feature & RXJIT_FEATURE_FMA) && !(jit_feature & RXJIT_FEATURE_NO_INLINE_ROUND);
+}
+
+// 0xfd-prefixed SIMD op (uleb128 opcode: relaxed and i64x2 ops are multi-byte).
+// f64x2.lt 0x49 gt 0x4a | v128.and 0x4e or 0x50 xor 0x51 bitselect 0x52 |
+// i64x2.add 0xce sub 0xd1 | f64x2.neg 0xed sqrt 0xef add 0xf0 sub 0xf1 mul 0xf2
+// div 0xf3 | f64x2.relaxed_madd 0x107 relaxed_nmadd 0x108
+#define SIMD(op)                      \
+	do {                              \
+		WASM_U8(0xfd);                \
+		WASM_U32((uint32_t)(op));     \
+	} while (0)
+// v128.const 0 (a literal zero lets TurboFan use fcmlt/fcmgt #0.0)
+#define V128_ZERO()                                                          \
+	do {                                                                     \
+		WASM_U8_THUNK({0xfd, 0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, \
+		               0, 0});                                               \
+	} while (0)
+
+static uint32_t emit_load_round_masks(uint8_t *buf) {
+	THUNK_BEGIN;
+	GG(TGLOB_fprc);
+	WI32_CONST(7);
+	I32_SHL();
+	LS(LOCT_rmoff);
+	for (int i = 0; i < 7; i++) {
+		LG(LOCT_rmoff);
+		V128_LOAD_OFF(g_r_file_base + RXJIT_ARENA_RMASK_OFF + 16 * (uint32_t)i);
+		LS(LOCT_mTEG + i);
+	}
+	THUNK_END;
+}
+
+// fa, fb -> fc = fa op fb (nearest), fr = exact residue (TwoSum).
+static uint32_t emit_twosum(int is_sub, uint8_t *buf) {
+	THUNK_BEGIN;
+	const uint32_t op = is_sub ? 0xf1 : 0xf0, inv = is_sub ? 0xf0 : 0xf1;
+	LG(LOCT_fa);
+	LG(LOCT_fb);
+	SIMD(op);
+	LS(LOCT_fc);
+	LG(LOCT_fa);
+	LG(LOCT_fc);
+	LG(LOCT_fb);
+	SIMD(inv);
+	SIMD(0xf1);
+	LG(LOCT_fb);
+	LG(LOCT_fc);
+	LG(LOCT_fa);
+	SIMD(0xf1);
+	SIMD(inv);
+	SIMD(op);
+	LS(LOCT_fr);
+	THUNK_END;
+}
+
+// F fixup: stack [addr] -> [addr, out]. out = c + ((bitselect(res>0, res<0,
+// K1|(s&K2)) & KON) & ((s^D1)|D3)), s = c<0.
+static uint32_t emit_round_f(uint8_t *buf) {
+	THUNK_BEGIN;
+	LG(LOCT_fc);
+	V128_ZERO();
+	SIMD(0x49);
+	LS(LOCT_fs);
+	LG(LOCT_fc);
+	LG(LOCT_fr);
+	V128_ZERO();
+	SIMD(0x4a);
+	LG(LOCT_fr);
+	V128_ZERO();
+	SIMD(0x49);
+	LG(LOCT_fs);
+	LG(LOCT_mK2);
+	SIMD(0x4e);
+	LG(LOCT_mK1);
+	SIMD(0x50);
+	SIMD(0x52);
+	LG(LOCT_mKON);
+	SIMD(0x4e);
+	LG(LOCT_fs);
+	LG(LOCT_mD1);
+	SIMD(0x51);
+	LG(LOCT_mD3);
+	SIMD(0x50);
+	SIMD(0x4e);
+	SIMD(0xce);
+	THUNK_END;
+}
+
+// E fixup (E results are always > 0): stack [addr] -> [addr, out].
+// out = (c - (res > TEG)) + (res < TEL); compare masks are -1 when true.
+static uint32_t emit_round_e(uint8_t *buf) {
+	THUNK_BEGIN;
+	LG(LOCT_fc);
+	LG(LOCT_fr);
+	LG(LOCT_mTEG);
+	SIMD(0x4a);
+	SIMD(0xd1);
+	LG(LOCT_fr);
+	LG(LOCT_mTEL);
+	SIMD(0x49);
+	SIMD(0xce);
+	THUNK_END;
+}
+
 
 // ---------------- Stub function bodies (same as static module) ----------------
 //
@@ -1151,6 +1266,8 @@ static uint32_t emit_inner_pc_loop(uint32_t scratchpad_ptr, uint32_t program_slo
 	// the loop phi zero-extended (a const init costs a mov per record load).
 	// Every arm ends with `ip += 16; br $L` itself (tail-duplicated back-edge,
 	// no shared join); the EXIT sentinel at record #256 does `br $exit`.
+	if (rxjit_inline_round_on(jit_feature))
+		p += emit_load_round_masks(p); // once per call (256 ops); CFROUND reloads
 	WI32_CONST(program_slot_ptr);
 	I32_LOAD_OFF(RXJIT_ARENA_SENT_OFF - RXJIT_ARENA_SLOT_OFF + 12);
 	LS(LOCT_inst_ptr);
@@ -1602,9 +1719,32 @@ static uint32_t emit_arm_fbin_r(uint32_t tbl_idx, uint8_t native_op, int k, int 
 	p += emit_ld_dst(p);
 	p += emit_ld_src(p);
 	LG(LOCT_dst_byte);
-	RDV(LOCT_dst_byte);
-	RDV(LOCT_src_byte);
-	p += emit_fprc_dispatch(native_op, 2, tbl_idx, jit_feature, p);
+	if (rxjit_inline_round_on(jit_feature)) {
+		RDV(LOCT_dst_byte);
+		LS(LOCT_fa);
+		RDV(LOCT_src_byte);
+		LS(LOCT_fb);
+		if (native_op == 0xf2) { // FMUL_R -> E: res = fma(a, b, -c)
+			LG(LOCT_fa);
+			LG(LOCT_fb);
+			SIMD(0xf2);
+			LS(LOCT_fc);
+			LG(LOCT_fa);
+			LG(LOCT_fb);
+			LG(LOCT_fc);
+			SIMD(0xed);
+			SIMD(0x107);
+			LS(LOCT_fr);
+			p += emit_round_e(p);
+		} else {
+			p += emit_twosum(native_op == 0xf1, p);
+			p += emit_round_f(p);
+		}
+	} else {
+		RDV(LOCT_dst_byte);
+		RDV(LOCT_src_byte);
+		p += emit_fprc_dispatch(native_op, 2, tbl_idx, jit_feature, p);
+	}
 	V128_STORE_OFF(0);
 	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
@@ -1620,6 +1760,9 @@ static uint32_t emit_arm_fbin_m(uint32_t scratchpad_ptr, uint32_t tbl_idx, uint8
 	p += emit_ld_src(p);
 	LG(LOCT_dst_byte);
 	RDV(LOCT_dst_byte);
+	const int inl = rxjit_inline_round_on(jit_feature);
+	if (inl)
+		LS(LOCT_fa);
 	p += emit_addr_l1l2(scratchpad_ptr, LOCT_src_byte, p);
 	WASM_U8_THUNK({0xfd, 0x5d, 3, 0});  // v128.load64_zero align=3 offset=0
 	WASM_U8_THUNK({0xfd, 0xfe, 0x01}); // f64x2.convert_low_i32x4_s
@@ -1629,7 +1772,26 @@ static uint32_t emit_arm_fbin_m(uint32_t scratchpad_ptr, uint32_t tbl_idx, uint8
 		LG(LOC_mask_exp);
 		WASM_U8_THUNK({0xfd, 0x50}); // v128.or
 	}
-	p += emit_fprc_dispatch(native_op, 2, tbl_idx, jit_feature, p);
+	if (inl) {
+		LS(LOCT_fb);
+		if (native_op == 0xf3) { // FDIV_M -> E: res = a - c*b
+			LG(LOCT_fa);
+			LG(LOCT_fb);
+			SIMD(0xf3);
+			LS(LOCT_fc);
+			LG(LOCT_fc);
+			LG(LOCT_fb);
+			LG(LOCT_fa);
+			SIMD(0x108);
+			LS(LOCT_fr);
+			p += emit_round_e(p);
+		} else {
+			p += emit_twosum(native_op == 0xf1, p);
+			p += emit_round_f(p);
+		}
+	} else {
+		p += emit_fprc_dispatch(native_op, 2, tbl_idx, jit_feature, p);
+	}
 	V128_STORE_OFF(0);
 	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
@@ -1658,7 +1820,20 @@ static uint32_t emit_arm_fsqrt_r(int k, int jit_feature, uint8_t *buf) {
 	p += emit_ld_dst(p);
 	LG(LOCT_dst_byte);
 	RDV(LOCT_dst_byte);
-	p += emit_fprc_dispatch(0xef /* f64x2.sqrt */, 3, TBL_FSQRT, jit_feature, p);
+	if (rxjit_inline_round_on(jit_feature)) { // res = a - c*c
+		LS(LOCT_fa);
+		LG(LOCT_fa);
+		SIMD(0xef);
+		LS(LOCT_fc);
+		LG(LOCT_fc);
+		LG(LOCT_fc);
+		LG(LOCT_fa);
+		SIMD(0x108);
+		LS(LOCT_fr);
+		p += emit_round_e(p);
+	} else {
+		p += emit_fprc_dispatch(0xef /* f64x2.sqrt */, 3, TBL_FSQRT, jit_feature, p);
+	}
 	V128_STORE_OFF(0);
 	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
@@ -1701,7 +1876,7 @@ static uint32_t emit_arm_cbranch(int k, uint8_t *buf) {
 
 // K_CFROUND: fprc = (r[src] rotr imm) & 3. The decoder pre-masks imm & 63
 // (and i64.rotr is mod 64 anyway).
-static uint32_t emit_arm_cfround(int k, uint8_t *buf) {
+static uint32_t emit_arm_cfround(int k, int jit_feature, uint8_t *buf) {
 	THUNK_BEGIN;
 	p += emit_ld_src(p);
 	RD64(LOCT_src_byte);
@@ -1712,6 +1887,8 @@ static uint32_t emit_arm_cfround(int k, uint8_t *buf) {
 	WI32_CONST(3);
 	I32_AND();
 	GS(TGLOB_fprc);
+	if (rxjit_inline_round_on(jit_feature))
+		p += emit_load_round_masks(p);
 	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
@@ -1888,7 +2065,7 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 			p += emit_arm_cbranch(k, p);
 			break;
 		case RXJIT_K_CFROUND:
-			p += emit_arm_cfround(k, p);
+			p += emit_arm_cfround(k, jit_feature, p);
 			break;
 		case RXJIT_K_ISTORE_L12:
 			p += emit_arm_istore_l12(scratchpad_ptr, k, p);
