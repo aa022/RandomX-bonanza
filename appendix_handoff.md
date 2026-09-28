@@ -3,16 +3,27 @@
 This is an appendix to `opus_handoff.md`, which covers the ARM history and the threaded interpreter. It is tracked in git; the other local `.md` notes are gitignored. The longer per-step log is `amd64_notes.md` (local only).
 
 - **Box:** Ryzen 5 5600X (Zen 3, 6C/12T with SMT; CPUs n and n+6 are siblings), Debian 13, Chromium 154, Node 26.10 (V8 14.6) at `/usr/local/bin`.
-- **Branch:** `perf/amd64`, cut from `threaded-interp` @ `ea261c3` (v0.1.0). HEAD at the time of writing is `fbb8bc9`.
+- **Branch:** `perf/amd64`, cut from `threaded-interp` @ `ea261c3` (v0.1.0). It is pushed to `origin/perf/amd64`; `git log ea261c3..` gives the step commits.
 
 ## 1. Result
 
 | Where | Before (`ea261c3`) | Now (x86 profile) |
 |---|---|---|
-| Node 1T | 82 H/s | 100–108 |
-| Node 12T | 525 | 580–610 |
+| Node 1T | 82 H/s | about 109 |
+| Node 12T | 525 | about 678 |
 | Chromium (measured by the user) | about 550 | 615 (max 632) before the relaxed AES; **max 660** with it |
 | ARM (the `arm` profile) | | unchanged: the generated module is byte-identical to v0.1.0 |
+
+**Where the 12T gain came from** (Node, one run per step, ±5%):
+
+| Step | 12T change | Note |
+|---|---|---|
+| 800 fused pairs | 525 → about 585, +12% | 1T +22% |
+| `shared_code` | +7% | one compiled copy for all threads |
+| relaxed-swizzle AES side module | +7.6% | 630 → 678 |
+| vpaes AES on plain swizzle | ±0 | superseded for hashAndFill |
+
+On this box the whole history, including the earlier ARM-tuned series, went from about 280 to 660 H/s in Chromium.
 
 ## 2. Design: one build, runtime profiles
 `public/randomx.wasm` is a single arch-neutral binary. The hot path is the threaded-interpreter module, which each pthread **generates at runtime** (`wasm/src/src/wasm_jit_threaded.c`). An "x86 mode" is therefore just a different set of generator and runtime parameters: no second build and no second download.
@@ -25,7 +36,8 @@ This is an appendix to `opus_handoff.md`, which covers the ARM history and the t
 | `unroll2` | 0 | 0 | 2× dispatch replication (two `br_table` sites); knob only |
 | `triples_n` | 0 | 0 | fused triple superinstructions; knob only |
 | `shared_code` | 0 | **1** | no per-thread pointers in the module bytes, so all workers share one compiled copy |
-| `aes_simd` | 0 | **1** | vpaes-style SIMD AES in `randomx.wasm` instead of T-tables (perf-neutral on x64, see §5) |
+| `aes_simd` | 0 | **1** | vpaes-style SIMD AES in `randomx.wasm` instead of T-tables (perf-neutral on x64, see §5); still used by the AES functions the side module doesn't cover |
+| `aes_relaxed` | 0 | **1** | `hashAndFillAes1Rx4` (about 98% of AES rounds) runs in a separate relaxed-SIMD side module (`i8x16.relaxed_swizzle`, one `pshufb`). Effective only when the feature has relaxed SIMD (bit 1 or 2), so JSC and feature 4 never use it |
 
 **Knob precedence:** the profile sets every field, and an explicit knob overrides one field. The C setters take `-1` to mean "use the profile":
 - `rxjit_set_profile`
@@ -34,6 +46,7 @@ This is an appendix to `opus_handoff.md`, which covers the ARM history and the t
 - `rxjit_set_unroll2`
 - `rxjit_set_shared_code`
 - `rxjit_set_aes_simd`
+- `rxjit_set_aes_relaxed`
 
 Getters `rxjit_effective_*` read back what is actually used. The C-side default profile is **arm**.
 
@@ -46,11 +59,11 @@ Getters `rxjit_effective_*` read back what is actually used. The C-side default 
      - x86 (`pshufb`, which keeps the low 4 bits of the index) returns **11**, so the profile is **x86**;
      - ARM (`tbl`, where an index ≥ 16 gives 0) returns **0**, so the profile is **arm**;
      - if the probe fails to compile or instantiate (no relaxed SIMD), the profile is **arm**.
-3. Apply the profile with `_rxjit_set_profile`, then the fine overrides from `?jit_exp=` tokens: `fuse_n=N`, `triples_n=N`, `unroll2` or `unroll2=0|1`, `shared_code=0|1`, `aes_simd=0|1`. The older `no_fuse` and `no_inline_round` still work.
-4. The status line reports the result, for example `JIT profile: x86 (auto) fuse_n=800 triples_n=0 unroll2=0 shared_code=1 aes_simd=1`; a forced profile shows `(forced)`.
+3. Apply the profile with `_rxjit_set_profile`, then the fine overrides from `?jit_exp=` tokens: `fuse_n=N`, `triples_n=N`, `unroll2` or `unroll2=0|1`, `shared_code=0|1`, `aes_simd=0|1`, `aes_relaxed=0|1`. The older `no_fuse` and `no_inline_round` still work.
+4. The status line reports the result, for example `JIT profile: x86 (auto) fuse_n=800 triples_n=0 unroll2=0 shared_code=1 aes_simd=1 aes_relaxed=1`; a forced profile shows `(forced)`.
 5. All of this runs **before** any cache or dataset work. Every mining pthread generates its module from the effective values.
 
-**Node** (`bench/profile_args.mjs`, used by `bench_webui`, `full_mode_check`, `mine_ctx_check` and `prof/dump_module`): `--profile auto|arm|x86`, where auto means `process.arch === 'x64'`, plus `--fuse-n`, `--triples-n`, `--unroll2 [0|1]`, `--shared-code 0|1` and `--aes-simd 0|1`. The bench header prints the effective values. For the Makefile: `make bench PROFILE=x86 EXTRA='--fuse-n 1600'`.
+**Node** (`bench/profile_args.mjs`, used by `bench_webui`, `full_mode_check`, `mine_ctx_check` and `prof/dump_module`): `--profile auto|arm|x86`, where auto means `process.arch === 'x64'`, plus `--fuse-n`, `--triples-n`, `--unroll2 [0|1]`, `--shared-code 0|1`, `--aes-simd 0|1` and `--aes-relaxed 0|1`. The bench header prints the effective values. For the Makefile: `make bench PROFILE=x86 EXTRA='--fuse-n 1600'`.
 
 ## 4. Implementation notes
 - **Fuse table** (`wasm/tools/gen_fuse_table.py` generates `wasm_jit_fuse_table.h`).
@@ -80,6 +93,14 @@ Getters `rxjit_effective_*` read back what is actually used. The C-side default 
   - vpaes nibble tables: `inv`, `inva`, `ipt` and `sbo` come from OpenSSL; the decryption-side tables were derived and checked exhaustively by `bench/prof/x86/vpaes_derive.py`.
   - Each aes_hash function is an `_impl<soft, simd>` behind a per-call branch on `g_rx_aes_simd`.
   - Standard `i8x16.swizzle` only (there is no relaxed SIMD in `randomx.wasm`).
+- **Relaxed AES side module** (`813a0d4`):
+  - **Source:** `wasm/aes_relaxed/aes_relaxed.c`, a freestanding C port of `hashAndFillAes1Rx4_impl<true,true>` using `wasm_i8x16_relaxed_swizzle` (176 of them). It exports one function, `hf(scratchpad, size, hash, fill_state, kptr)`.
+  - **Build:** `wasm/build.sh` compiles it with `clang-19 --target=wasm32 -msimd128 -mrelaxed-simd -matomics -mbulk-memory -nostdlib` and `wasm-ld-19` (`--import-memory --shared-memory --max-memory=4GiB --no-entry`). The result is 4.3 KB; it imports only the shared `env.memory` and has no data section, globals or stack.
+  - **Embedding:** the bytes are written to `wasm/src/src/rx_aes_relaxed_blob.h`, which is committed and rewritten only when its content changes, so the Makefile doesn't loop. Without clang-19, the committed header is used.
+  - **Constants:** the 17 vpaes vectors plus the 1R states, keys and xkeys sit in the host struct `rx_aes_relaxed_k` in `aes_hash.cpp`, filled at startup, and are passed by pointer. The side module has no constants of its own in memory.
+  - **Bridge:** EM_JS `rx_js_aes_relaxed_hf` in `soft_aes.cpp`. On first use it compiles and instantiates the blob per worker (cached in `globalThis.__rxAesR`). It copies the bytes from `mem.buffer`, because `HEAPU8` can be stale after memory growth. Any failure caches `null`, and the worker falls back for good.
+  - **Hook:** the first line of `hashAndFillAes1Rx4<softAes>`, `if (softAes && g_rx_aes_relaxed && rx_aes_relaxed_hf(...)) return;`; otherwise the existing path runs. `rx_aes_relaxed_calls()` counts successful calls, so tests can catch a silent fallback.
+  - **Index rule:** every relaxed swizzle index is in 0..15 (masked nibbles, constant permutations) or 0x80..0x8f (vpaes's `k_inv` outputs). x86 `pshufb` and ARM `tbl` agree on those, so forcing `?jit_profile=x86` on ARM still hashes correctly.
 - **Stats:** the decoder counts dispatch records per program; `bench_webui --stats` prints the static dispatches/op. The simulation matches it exactly (200 pairs: 0.673, 800: 0.546, 1600: 0.512, 1600+1000 triples: 0.458).
 
 ## 5. What we learned on x86 (Zen 3)
@@ -99,6 +120,7 @@ Getters `rxjit_effective_*` read back what is actually used. The C-side default 
 
   Float emulation of directed rounding (TwoSum or FMA residue plus the mask fixup) costs about 25 x64 instructions per float op.
 - **x64 codegen is clean:** the `br_table` header is 7 instructions, and the 9 mask v128s stay pinned in `xmm0`–`xmm8` with no spills. The handoff's x86 suspects (fusion too big for L1i, XMM pressure) were both false.
+- **AES needs `relaxed_swizzle` on x64:** the relaxed side module turns each lookup into one `pshufb`, and that gives the +7.6% at 12T (AES was 13% of the 1T mining thread). Because relaxed ops can't go in `randomx.wasm` (Safari), they live in a separate module that only relaxed engines ever compile.
 - **SIMD AES is perf-neutral on x64:** V8 lowers each non-relaxed `i8x16.swizzle` to `movq`, `vpaddusb [const]` and `vpshufb`, i.e. 3 instructions and 2 loads. vpaes needs about 11 swizzles per round, so a round is about 61 instructions (enc) or 74 (dec), against about 95 for the T-table. The measurement was 1T 107.6 → 104.8 and 12T 609 → 610.
 
 ## 6. Pitfalls and caveats
@@ -107,7 +129,9 @@ Getters `rxjit_effective_*` read back what is actually used. The C-side default 
 - **Rosetta:** an x86 browser under Rosetta on Apple Silicon probes as x86 (the probe tests the semantics of the emitted code) and gets the x86 profile. Untested.
 - **The probe relies on implementation-defined behaviour.** If an engine ever canonicalises out-of-range `relaxed_swizzle` to 0 on x86, the probe fails safe to arm.
 - **The x86 profile has not been measured on ARM.** `bench/arm_ab.sh` runs `--profile arm` vs `--profile x86` at 1T/10T on the M4. Only if the result is ≥0.98× at every thread count should x86 values become the global default. Note that this A/B now also toggles `aes_simd`, and vpaes should do better on arm64, where a swizzle is one `TBL`.
-- **The AES gate gap:** `full_mode_check` and `mine_ctx_check` compare the JIT against the portable interpreter **in the same module**, and both read the same `g_rx_aes_simd`, so they would pass with a broken AES. Use `bench/canonical_hash.mjs` (with `_rxjit_set_aes_simd(1)`) and the `rx_aes_selftest(n)` export to test AES.
+- **The AES gate gap:** `full_mode_check` and `mine_ctx_check` compare the JIT against the portable interpreter **in the same module**, and both read the same AES flags, so they would pass with a broken AES. **`bench/aes_check.mjs` is the AES gate:** T-table against relaxed through the first/next/last chain, plus the canonical vector and a check that the relaxed path really ran. The `rx_aes_selftest(n)` export covers the vpaes rounds.
+- **Relaxed AES needs relaxed SIMD** (feature bit 1 or 2). Firefox without relaxed SIMD and Safari silently use the older AES path, so check `aes_relaxed=` in the status line. Each worker compiles the 4.3 KB side module on its first hashAndFill; V8's native module cache dedupes this.
+- **Rebuilding the side module needs clang-19 and `/usr/bin/wasm-ld-19`.** Without them, build.sh keeps the committed `rx_aes_relaxed_blob.h`, so a C change to `aes_relaxed.c` silently does nothing on a box without clang-19.
 - **The ARM identity check on x64 needs `--profile arm`**, because `auto` is x86 here:
   ```
   node bench/prof/dump_module.mjs --feature-base 3 --profile arm --out /tmp/f7.wasm
@@ -136,6 +160,7 @@ Getters `rxjit_effective_*` read back what is actually used. The C-side default 
 | `bench/prof/x86/pstat.sh` | per-thread `perf stat` on the mining thread |
 | `bench/prof/x86/{jd,thr,arms}.py` | jitdump parsers: per-function and per-`br_table`-arm cycles from `perf record -k 1 -e cycles` plus `node --perf-prof` |
 | `bench/prof/x86/vpaes_derive.py` | derivation and check of the vpaes tables |
+| `bench/aes_check.mjs` | AES gate: T-table vs relaxed (chain + canonical vector), the relaxed call counter, and the knob semantics; needs Node ≥24 |
 
 **perf recipe:**
 - `sudo sysctl -w kernel.perf_event_paranoid=-1` (it resets on reboot).
@@ -147,12 +172,15 @@ Getters `rxjit_effective_*` read back what is actually used. The C-side default 
 - `node bench/full_mode_check.mjs --count 32` at `--feature-base 3`, `0`, `1`, and `0 --feature-extra 32`, for `--profile arm` and `x86`;
 - `node bench/mine_ctx_check.mjs`;
 - the ARM identity check;
-- for AES changes, also the canonical hash and `rx_aes_selftest`.
+- `node bench/aes_check.mjs` (must print `AES CHECK PASS`);
+- `/usr/bin/node` (v20) `WebAssembly.validate(public/randomx.wasm)` must be true, meaning there are no relaxed ops in the main module.
 
-## 8. Open levers (not done)
+## 8. Open levers
 1. ~~**AES with `relaxed_swizzle`**~~ **Done for hashAndFill** (`813a0d4`): a separate 4.3 KB relaxed side module (`wasm/aes_relaxed/`), whose bytes are embedded in `randomx.wasm` and instantiated per worker only when `aes_relaxed` (x86 = 1) is set and the feature has relaxed SIMD. One run: 1T 105.1 → 108.8 H/s (+3.5%), 12T 630.4 → 678.4 (+7.6%). Left: `fillAes1Rx4`/`hashAes1Rx4`/`fillAes4Rx4` (about 2% of rounds) are still on the plain swizzle.
-2. **Float-arm trims:** `v128.const 0` is rematerialised 3× per FADD/FSUB, and the rounding fixup could be tighter (+2–4%).
-3. **Size-aware pair selection** (prefer small integer pairs per byte of code) for the 12T footprint.
-4. **A Firefox fallback** for `auto` detection without relaxed SIMD.
-5. **The M4 sign-off** (`bench/arm_ab.sh`), then possibly one profile for all.
-6. **Decide on `aes_simd` for x86:** neutral today, so 0 would be the conservative choice.
+2. **The remaining AES on relaxed:** `fillAes4Rx4` (program generation), `fillAes1Rx4` and `hashAes1Rx4` (the first and last hash), about 2% of rounds, go into the same side module. A small gain.
+3. **Float-arm trims:** `v128.const 0` is rematerialised 3× per FADD/FSUB, and the rounding fixup could be tighter (+2–4%).
+4. **Size-aware pair selection** (prefer small integer pairs per byte of code) for the 12T footprint.
+5. **A Firefox fallback** for `auto` detection without relaxed SIMD.
+6. **The M4 sign-off** (`bench/arm_ab.sh`), then possibly one profile for all.
+7. **`aes_simd` for x86:** the vpaes rounds on plain swizzle are neutral. They now only run where the relaxed module doesn't: the other AES functions, or engines without relaxed SIMD. 0 is the conservative choice.
+8. **A slimmer deliverable, if it ever matters:** `randomx.wasm` was 242 KB raw (86 KB gzipped) before the relaxed side module; the embedded 4.3 KB blob plus the bridge add a little. See §6.
