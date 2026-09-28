@@ -29,5 +29,8 @@ typedef struct {
 
 static const rxjit_profile_t rxjit_profiles[RXJIT_PROFILE_COUNT] = {
 	{200, 0, 0}, // arm: RXJIT_FUSE_N_DEFAULT, u8 kinds
-	{200, 0, 0}, // x86: = arm until the fuse-n sweep picks its values
+	// x86: 800 pairs (u16 kinds). Zen 3 sweep (amd64_notes.md): 12T 525 -> 570-599
+	// H/s, 1T 82 -> 100; bigger tables / triples / unroll2 win at 1T and 6T but
+	// not at 12T (SMT siblings share the op cache and L1i).
+	{800, 0, 0},
 };

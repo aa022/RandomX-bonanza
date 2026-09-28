@@ -75,11 +75,21 @@ thread_local bool g_jit_static_failed = false;
 // The threaded module is ~40 KiB with the arm profile's 200 fused pairs and
 // grows with fuse_n and triples_n (all pairs + 1000 triples: 0.7-0.85 MiB;
 // unroll2 about doubles it, max 1.62 MiB at feature 4/5); the generator writes
-// unchecked (the size check runs after the fact), so keep ample headroom. Heap-allocated once per mining thread: a thread_local array
-// would be emitted as zeros into the .wasm TLS data segment and copied into
-// every pthread's TLS block (1 KiB of buffer = 1 KiB of randomx.wasm).
-constexpr size_t RXJIT_THREADED_BUF_SIZE = 1 << 21;
+// unchecked (the size check runs after the fact), so keep ample headroom.
+// Two sizes: the v0.1.0 256 KiB while the module has u8 kinds and one dispatch
+// copy (the arm profile, max 64 KiB at feature 4), 2 MiB otherwise; the buffer
+// grows on regeneration when a knob change needs the larger size.
+// Heap-allocated per mining thread: a thread_local array would be emitted as
+// zeros into the .wasm TLS data segment and copied into every pthread's TLS
+// block (1 KiB of buffer = 1 KiB of randomx.wasm).
+constexpr size_t RXJIT_THREADED_BUF_SMALL = 1 << 18;
+constexpr size_t RXJIT_THREADED_BUF_LARGE = 1 << 21;
+static size_t rxjit_threaded_buf_need(int feature, int kind16) {
+	return (kind16 || (feature & RXJIT_FEATURE_UNROLL2)) ? RXJIT_THREADED_BUF_LARGE
+	                                                      : RXJIT_THREADED_BUF_SMALL;
+}
 thread_local uint8_t *g_jit_threaded_buf = nullptr;
+thread_local size_t g_jit_threaded_buf_cap = 0;
 thread_local uint32_t g_jit_threaded_size = 0;
 // Both point into one per-thread RXJIT_ARENA_SIZE block (wasm_jit_threaded.h):
 // vm_state == arena base (the pointer to free), program slot at +1024.
@@ -778,12 +788,8 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 		              "program slot overflows the arena");
 		static_assert(RXJIT_ARENA_SIZE % RXJIT_ARENA_ALIGN == 0, "aligned_alloc size");
 		uint8_t *blk = (uint8_t *)aligned_alloc(RXJIT_ARENA_ALIGN, RXJIT_ARENA_SIZE);
-		g_jit_threaded_buf = (uint8_t *)malloc(RXJIT_THREADED_BUF_SIZE);
-		if (!blk || !g_jit_threaded_buf) {
+		if (!blk) {
 			g_rxjit_threaded_phase.store(101, std::memory_order_relaxed);
-			free(blk);
-			free(g_jit_threaded_buf);
-			g_jit_threaded_buf = nullptr;
 			g_jit_threaded_failed = true;
 			return 0;
 		}
@@ -840,19 +846,26 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 	    triples_n != g_jit_threaded_triples_n || kind16 != g_jit_threaded_kind16) {
 		int regs_in_mem = g_rxjit_regs_in_memory.load(std::memory_order_relaxed);
 		int split_id = g_rxjit_split_inner_dispatch.load(std::memory_order_relaxed);
-		uint32_t sz = rxjit_generate_threaded_module(
+		const size_t need = rxjit_threaded_buf_need(feature, kind16);
+		if (need > g_jit_threaded_buf_cap) {
+			free(g_jit_threaded_buf);
+			g_jit_threaded_buf = (uint8_t *)malloc(need);
+			g_jit_threaded_buf_cap = g_jit_threaded_buf ? need : 0;
+		}
+		uint32_t sz = g_jit_threaded_buf ? rxjit_generate_threaded_module(
 		    (uint32_t)(uintptr_t)g_jit_threaded_vm_state, (uint32_t)(uintptr_t)scratchpad,
 		    (uint32_t)(uintptr_t)dataset, (uint32_t)(uintptr_t)g_jit_threaded_program_slot, 1,
 		    g_jit_max_memory_pages, feature, regs_in_mem, split_id, fuse_n, triples_n, kind16,
-		    g_jit_threaded_buf);
+		    g_jit_threaded_buf) : 0;
 		g_rxjit_threaded_module_size.store(sz, std::memory_order_relaxed);
-		if (sz == 0 || sz > RXJIT_THREADED_BUF_SIZE) {
+		if (sz == 0 || sz > g_jit_threaded_buf_cap) {
 			g_rxjit_threaded_phase.store(103, std::memory_order_relaxed);
 			free(g_jit_threaded_vm_state); // the arena base; the slot lives inside it
 			free(g_jit_threaded_buf);
 			g_jit_threaded_program_slot = nullptr;
 			g_jit_threaded_vm_state = nullptr;
 			g_jit_threaded_buf = nullptr;
+			g_jit_threaded_buf_cap = 0;
 			g_jit_threaded_size = 0;
 			g_jit_threaded_failed = true;
 			return 0;
