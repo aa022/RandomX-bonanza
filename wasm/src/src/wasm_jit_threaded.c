@@ -107,6 +107,8 @@
 #define LOCT_rmoff        56 // i32: rounding-mask table offset
 #define LOCT_spb          57 // i32: scratchpad base
 #define LOCT_spare        58 // i32
+#define LOCT_fx1          59 // v128: no-FMA Dekker temps (step 8 part B; declared only without FMA)
+#define LOCT_fx2          60
 
 // Function indices in the threaded module (no imports, so first locally-
 // defined function is index 0).
@@ -727,15 +729,18 @@ static uint32_t emit_addr_l3_reg(uint32_t scratchpad_base, int reg_local, uint8_
 // arena at vm_state + RXJIT_ARENA_RMASK_OFF + fprc*128 + 16*i, i = TEG, TEL,
 // K1, K2, D1, D3, KON (filled once by wasm_jit_run.cpp), and are reloaded into
 // LOCT_mTEG..mKON at every inner_dispatch entry and after every CFROUND.
-// add/sub use TwoSum (plain SIMD128, no FMA): inline on every engine unless
-// NO_INLINE_ROUND. mul/div/sqrt rely on relaxed_madd/nmadd being fused: gated
-// on RXJIT_FEATURE_FMA (else emit_fprc_dispatch stubs). The mask table is
-// loaded whenever any inline arm is active (= addsub_on, since muldiv implies it).
+// add/sub use TwoSum (plain SIMD128, no FMA). mul/div/sqrt use a fused
+// relaxed_madd/nmadd with RXJIT_FEATURE_FMA, else the Dekker TwoProduct
+// sequences below (plain SIMD128: Safari/JSC). All inline unless
+// NO_INLINE_ROUND (then emit_fprc_dispatch stubs everywhere).
 static inline int rxjit_inline_round_addsub_on(int jit_feature) {
 	return !(jit_feature & RXJIT_FEATURE_NO_INLINE_ROUND);
 }
 static inline int rxjit_inline_round_muldiv_on(int jit_feature) {
-	return (jit_feature & RXJIT_FEATURE_FMA) && !(jit_feature & RXJIT_FEATURE_NO_INLINE_ROUND);
+	return !(jit_feature & RXJIT_FEATURE_NO_INLINE_ROUND);
+}
+static inline int rxjit_inline_round_muldiv_fma(int jit_feature) {
+	return (jit_feature & RXJIT_FEATURE_FMA) != 0;
 }
 static inline int rxjit_inline_round_any_on(int jit_feature) {
 	return rxjit_inline_round_addsub_on(jit_feature);
@@ -824,6 +829,195 @@ static uint32_t emit_round_f(uint8_t *buf) {
 	SIMD(0x50);
 	SIMD(0x4e);
 	SIMD(0xce);
+	THUNK_END;
+}
+
+// ---- No-FMA residue sign for E results (step 8 part B) ----
+//
+// emit_round_e only needs sign(res) and NaN-ness, so without FMA the exact
+// residue comes from Dekker's TwoProduct: every partial product and partial
+// sum is exact and the last add is RN, which keeps the exact sign. One factor
+// is split by bit truncation (hi = top 26 significant bits, lo = the other 27:
+// 2 ops, never overflows), the other by Veltkamp (C = 2^27+1, 26 + 26 bits),
+// so all four partial products fit in 53 bits. sqrt squares one value, so it
+// needs Veltkamp on both sides (TwoSqr). The Veltkamp operand is pre-scaled by
+// an exact power of two (mul 2^-40, div 1/2; sqrt c/2 and a/4) so C*x and the
+// partial products stay finite for E up to DBL_MAX (and for c = +inf in mul).
+// RandomX E values are >= 2^-511 (loads >= 2^-255, A >= 1, FDIV divisors < 2),
+// far from underflow (checked down to 2^-850 .. 2^-960).
+// Specials match the FMA path: c = +inf from finite operands -> res = -inf
+// (mul: -inf propagates; div: the NaN error term is clamped by pmin), an inf
+// operand -> NaN (never rounds). Bit-exact with the FMA fixup and an exact
+// BigInt reference on 48M harness pairs x 4 modes incl. |res| = 1 unit (the
+// session scratchpad harness, not committed), and identical in JSC.
+#define RX_F64_SPLIT   0x41A0000002000000ull // 2^27 + 1
+#define RX_F64_2M40    0x3D70000000000000ull // 2^-40
+#define RX_F64_2P1000  0x7E70000000000000ull // 2^1000
+#define RX_F64_HALF    0x3FE0000000000000ull
+#define RX_F64_QUARTER 0x3FD0000000000000ull
+#define RX_F64_TRUNC26 0xFFFFFFFFF8000000ull // keep sign, exponent, top 25 mantissa bits
+
+static uint32_t emit_f64x2_splat(uint64_t b, uint8_t *buf) {
+	THUNK_BEGIN;
+	WASM_U8(0xfd);
+	WASM_U8(0x0c);
+	for (int i = 0; i < 16; i++)
+		WASM_U8((uint8_t)(b >> (8 * (i & 7))));
+	THUNK_END;
+}
+
+// Veltkamp split of local v: hi -> h, lo -> l (l may equal v). Uses LOCT_fs.
+static uint32_t emit_split(uint32_t v, uint32_t h, uint32_t l, uint8_t *buf) {
+	THUNK_BEGIN;
+	LG(v);
+	p += emit_f64x2_splat(RX_F64_SPLIT, p);
+	SIMD(0xf2);
+	LT(LOCT_fs);
+	LG(LOCT_fs);
+	LG(v);
+	SIMD(0xf1);
+	SIMD(0xf1);
+	LS(h);
+	LG(v);
+	LG(h);
+	SIMD(0xf1);
+	LS(l);
+	THUNK_END;
+}
+
+// Truncation split of local v: hi (26 bits) -> h, lo (27 bits, >= 0) -> l.
+static uint32_t emit_split_trunc(uint32_t v, uint32_t h, uint32_t l, uint8_t *buf) {
+	THUNK_BEGIN;
+	LG(v);
+	p += emit_f64x2_splat(RX_F64_TRUNC26, p);
+	SIMD(0x4e);
+	LS(h);
+	LG(v);
+	LG(h);
+	SIMD(0xf1);
+	LS(l);
+	THUNK_END;
+}
+
+// fa = E, fb = A -> fc = fa*fb, fr ~ sign(fa*fb - fc). Clobbers fa, fb, fs, fx1, fx2.
+static uint32_t emit_nofma_mul(uint8_t *buf) {
+	THUNK_BEGIN;
+	LG(LOCT_fa);
+	LG(LOCT_fb);
+	SIMD(0xf2);
+	LS(LOCT_fc);
+	LG(LOCT_fb);
+	p += emit_f64x2_splat(RX_F64_2M40, p);
+	SIMD(0xf2);
+	LS(LOCT_fb);                                          // b' = b*2^-40
+	p += emit_split_trunc(LOCT_fa, LOCT_fx1, LOCT_fa, p); // fx1 = ah, fa = al
+	p += emit_split(LOCT_fb, LOCT_fx2, LOCT_fb, p);       // fx2 = bh, fb = bl
+	LG(LOCT_fx1);
+	LG(LOCT_fx2);
+	SIMD(0xf2);
+	LG(LOCT_fc);
+	p += emit_f64x2_splat(RX_F64_2M40, p);
+	SIMD(0xf2);
+	SIMD(0xf1);                                           // ah*bh - c'
+	LG(LOCT_fa);
+	LG(LOCT_fx2);
+	SIMD(0xf2);
+	SIMD(0xf0);                                           // + al*bh
+	LG(LOCT_fx1);
+	LG(LOCT_fb);
+	SIMD(0xf2);
+	SIMD(0xf0);                                           // + ah*bl
+	LG(LOCT_fa);
+	LG(LOCT_fb);
+	SIMD(0xf2);
+	SIMD(0xf0);                                           // + al*bl (RN)
+	LS(LOCT_fr);
+	THUNK_END;
+}
+
+// fa = E, fb = divisor -> fc = fa/fb, fr ~ sign(fa - fc*fb). Clobbers fb, fs, fx1, fx2.
+static uint32_t emit_nofma_div(uint8_t *buf) {
+	THUNK_BEGIN;
+	LG(LOCT_fa);
+	LG(LOCT_fb);
+	SIMD(0xf3);
+	LS(LOCT_fc);
+	LG(LOCT_fb);
+	p += emit_f64x2_splat(RX_F64_HALF, p);
+	SIMD(0xf2);
+	LS(LOCT_fb);                                          // b' = b/2
+	p += emit_split_trunc(LOCT_fc, LOCT_fx1, LOCT_fr, p); // fx1 = ch, fr = cl
+	LG(LOCT_fc);
+	LG(LOCT_fb);
+	SIMD(0xf2);
+	LS(LOCT_fx2);                                         // p = c*b'
+	p += emit_split(LOCT_fb, LOCT_fs, LOCT_fb, p);        // fs = bh, fb = bl
+	LG(LOCT_fa);
+	p += emit_f64x2_splat(RX_F64_HALF, p);
+	SIMD(0xf2);
+	LG(LOCT_fx2);
+	SIMD(0xf1);                                           // a/2 - p (exact)
+	p += emit_f64x2_splat(RX_F64_2P1000, p);
+	LG(LOCT_fx1);
+	LG(LOCT_fs);
+	SIMD(0xf2);
+	LG(LOCT_fx2);
+	SIMD(0xf1);                                           // ch*bh - p
+	LG(LOCT_fr);
+	LG(LOCT_fs);
+	SIMD(0xf2);
+	SIMD(0xf0);                                           // + cl*bh
+	LG(LOCT_fx1);
+	LG(LOCT_fb);
+	SIMD(0xf2);
+	SIMD(0xf0);                                           // + ch*bl
+	LG(LOCT_fr);
+	LG(LOCT_fb);
+	SIMD(0xf2);
+	SIMD(0xf0);                                           // e = c*b' - p
+	SIMD(0xf6);                                           // f64x2.pmin(2^1000, e): NaN -> 2^1000
+	SIMD(0xf1);
+	LS(LOCT_fr);
+	THUNK_END;
+}
+
+// fa = E -> fc = sqrt(fa), fr ~ sign(fa - fc*fc). Clobbers fs, fx1, fx2.
+static uint32_t emit_nofma_sqrt(uint8_t *buf) {
+	THUNK_BEGIN;
+	LG(LOCT_fa);
+	SIMD(0xef);
+	LS(LOCT_fc);
+	LG(LOCT_fc);
+	p += emit_f64x2_splat(RX_F64_HALF, p);
+	SIMD(0xf2);
+	LS(LOCT_fx1);                                    // c' = c/2
+	p += emit_split(LOCT_fx1, LOCT_fx2, LOCT_fr, p); // fx2 = ch, fr = cl
+	LG(LOCT_fx1);
+	LG(LOCT_fx1);
+	SIMD(0xf2);
+	LS(LOCT_fx1);                                    // p = c'^2
+	LG(LOCT_fa);
+	p += emit_f64x2_splat(RX_F64_QUARTER, p);
+	SIMD(0xf2);
+	LG(LOCT_fx1);
+	SIMD(0xf1);                                      // a/4 - p (exact)
+	LG(LOCT_fx2);
+	LG(LOCT_fx2);
+	SIMD(0xf2);
+	LG(LOCT_fx1);
+	SIMD(0xf1);
+	LG(LOCT_fx2);
+	LG(LOCT_fx2);
+	SIMD(0xf0);
+	LG(LOCT_fr);
+	SIMD(0xf2);
+	SIMD(0xf0);
+	LG(LOCT_fr);
+	LG(LOCT_fr);
+	SIMD(0xf2);
+	SIMD(0xf0);                                      // e = c'^2 - p
+	SIMD(0xf1);
+	LS(LOCT_fr);
 	THUNK_END;
 }
 
@@ -1021,7 +1215,7 @@ static uint32_t emit_inner_pc_loop(uint32_t scratchpad_ptr, uint32_t program_slo
                                    int jit_feature, uint8_t *buf);
 static uint32_t emit_inner_dispatch_fn(uint32_t vm_state_ptr, uint32_t scratchpad_ptr,
                                        uint32_t program_slot_ptr, int jit_feature, uint8_t *buf);
-static uint32_t emit_local_decls(uint8_t *buf);
+static uint32_t emit_local_decls(int jit_feature, uint8_t *buf);
 
 // ---------------- Step 1 / 2 / 3 / 5-13 emitters ----------------
 
@@ -1320,10 +1514,14 @@ static uint32_t emit_inner_pc_loop(uint32_t scratchpad_ptr, uint32_t program_slo
 
 // Emit the locals declaration shared between main_loop and inner_dispatch
 // (split_id mode). Indices match wasm_jit_inst_locals.h + the LOCT_* extension.
-static uint32_t emit_local_decls(uint8_t *buf) {
+static uint32_t emit_local_decls(int jit_feature, uint8_t *buf) {
 	THUNK_BEGIN;
+	// The no-FMA Dekker temps are declared only when used, so the FMA
+	// (feature 7) module stays byte-identical.
+	const int nofma = rxjit_inline_round_muldiv_on(jit_feature) &&
+	                  !rxjit_inline_round_muldiv_fma(jit_feature);
+	WASM_U8(nofma ? 12 : 11);               // local groups
 	WASM_U8_THUNK({
-		11,                                 // 11 local groups
 		8,  WASM_TYPE_I64,                  // R(0..7) (unused if regs_in_mem)
 		12, WASM_TYPE_V128,                 // F/E/A (unused if split_id)
 		6,  WASM_TYPE_I32,                  // sp_addr0/1, mx, ma, tmp, ic
@@ -1336,6 +1534,10 @@ static uint32_t emit_local_decls(uint8_t *buf) {
 		12, WASM_TYPE_V128,                 // 44..55 LOCT_fa..fs, LOCT_mTEG..mKON
 		3,  WASM_TYPE_I32,                  // 56..58 LOCT_rmoff, spb, spare
 	});
+	if (nofma) {
+		WASM_U8(2);                         // 59..60 LOCT_fx1, fx2
+		WASM_U8(WASM_TYPE_V128);
+	}
 	THUNK_END;
 }
 
@@ -1833,7 +2035,10 @@ static uint32_t emit_arm_fbin_r(uint32_t tbl_idx, uint8_t native_op, int k, int 
 		LS(LOCT_fa);
 		RDV(LOCT_src_byte);
 		LS(LOCT_fb);
-		if (native_op == 0xf2) { // FMUL_R -> E: res = fma(a, b, -c)
+		if (native_op == 0xf2 && !rxjit_inline_round_muldiv_fma(jit_feature)) {
+			p += emit_nofma_mul(p); // FMUL_R -> E, Dekker residue sign
+			p += emit_round_e(p);
+		} else if (native_op == 0xf2) { // FMUL_R -> E: res = fma(a, b, -c)
 			LG(LOCT_fa);
 			LG(LOCT_fb);
 			SIMD(0xf2);
@@ -1886,7 +2091,10 @@ static uint32_t emit_arm_fbin_m(uint32_t scratchpad_ptr, uint32_t mask, uint32_t
 	}
 	if (inl) {
 		LS(LOCT_fb);
-		if (native_op == 0xf3) { // FDIV_M -> E: res = a - c*b
+		if (native_op == 0xf3 && !rxjit_inline_round_muldiv_fma(jit_feature)) {
+			p += emit_nofma_div(p); // FDIV_M -> E, Dekker residue sign
+			p += emit_round_e(p);
+		} else if (native_op == 0xf3) { // FDIV_M -> E: res = a - c*b
 			LG(LOCT_fa);
 			LG(LOCT_fb);
 			SIMD(0xf3);
@@ -1932,7 +2140,11 @@ static uint32_t emit_arm_fsqrt_r(int k, int jit_feature, uint8_t *buf) {
 	p += emit_ld_dst(p);
 	LG(LOCT_dst_byte);
 	RDV(LOCT_dst_byte);
-	if (rxjit_inline_round_muldiv_on(jit_feature)) { // res = a - c*c
+	if (rxjit_inline_round_muldiv_on(jit_feature) && !rxjit_inline_round_muldiv_fma(jit_feature)) {
+		LS(LOCT_fa);
+		p += emit_nofma_sqrt(p); // Dekker residue sign
+		p += emit_round_e(p);
+	} else if (rxjit_inline_round_muldiv_on(jit_feature)) { // res = a - c*c
 		LS(LOCT_fa);
 		LG(LOCT_fa);
 		SIMD(0xef);
@@ -2380,7 +2592,7 @@ uint32_t rxjit_generate_threaded_module(
 		if (split) {
 			// inner_dispatch function body (index 22 when split is on)
 			WASM_U32_PATCH({
-				p += emit_local_decls(p);
+				p += emit_local_decls(jit_feature, p);
 				p += emit_inner_dispatch_fn(vm_state_ptr, scratchpad_ptr,
 				                            program_slot_ptr, jit_feature, p);
 				WASM_U8(0x0b);                      // end of function
@@ -2388,7 +2600,7 @@ uint32_t rxjit_generate_threaded_module(
 		}
 		// main_loop function body (index 22 or 23)
 		WASM_U32_PATCH({
-			p += emit_local_decls(p);
+			p += emit_local_decls(jit_feature, p);
 			p += emit_main_loop_body(vm_state_ptr, scratchpad_ptr, dataset_ptr,
 			                         program_slot_ptr, jit_feature, p);
 			WASM_U8(0x0b);                          // end of function
