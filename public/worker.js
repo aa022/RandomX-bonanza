@@ -270,6 +270,15 @@ async function init(options = {}) {
           Module._rxjit_set_split_inner_dispatch(1);
           postMessage({ type: 'status', message: 'JIT feature: V2-MINIMAL split_inner_dispatch on' });
         }
+        // Opt-outs of the perf series, for per-engine A/B (feature bits in
+        // wasm_jit_gen.h): ?jit_exp=no_fuse (fused pairs), no_inline_round
+        // (old call_indirect float path).
+        const optOut = (hasExp('no_fuse') ? 64 : 0) | (hasExp('no_inline_round') ? 32 : 0);
+        if (optOut && Module._rxjit_set_feature) {
+          jitFeature |= optOut;
+          Module._rxjit_set_feature(jitFeature);
+          postMessage({ type: 'status', message: `JIT feature: opt-out bits ${optOut} set` });
+        }
         postMessage({ type: 'status', message: 'JIT path: THREADED-INTERPRETER (resident module)' });
       }
     }
