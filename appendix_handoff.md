@@ -123,6 +123,7 @@ Getters `rxjit_effective_*` read back what is actually used. The C-side default 
   - the AES key-constant hack is defeated in `hashAndFillAes1Rx4` (about 0.4%);
   - the RandomX V2 AES path in `vm_interpreted.cpp` is not switched (it is dead code today);
   - the unchecked generator writes.
+- **The relaxed AES side module must stay data-free:** it imports the SHARED memory, so any data segment, global or stack use in `wasm/aes_relaxed/aes_relaxed.c` would write over randomx.wasm's memory. Check `wasm-objdump -h` after edits (only Type/Import/Function/Export/Code). Gate: `bench/aes_check.mjs`, which needs Node ≥24 (it prints FAIL on v20, because nothing calls the side module).
 - **Benchmarks:** use an idle box, one short run per variant (`bench/prof/x86_ab.sh`), and treat 12T noise as about ±5%.
 
 ## 7. Tooling (all committed)
@@ -149,7 +150,7 @@ Getters `rxjit_effective_*` read back what is actually used. The C-side default 
 - for AES changes, also the canonical hash and `rx_aes_selftest`.
 
 ## 8. Open levers (not done)
-1. **AES with `relaxed_swizzle`** (a single `pshufb`) emitted into the **generated** module, which already carries x86-only ops, instead of `randomx.wasm`. It could recover most of the 13% AES share (about +8%).
+1. ~~**AES with `relaxed_swizzle`**~~ **Done for hashAndFill** (`813a0d4`): a separate 4.3 KB relaxed side module (`wasm/aes_relaxed/`), whose bytes are embedded in `randomx.wasm` and instantiated per worker only when `aes_relaxed` (x86 = 1) is set and the feature has relaxed SIMD. One run: 1T 105.1 → 108.8 H/s (+3.5%), 12T 630.4 → 678.4 (+7.6%). Left: `fillAes1Rx4`/`hashAes1Rx4`/`fillAes4Rx4` (about 2% of rounds) are still on the plain swizzle.
 2. **Float-arm trims:** `v128.const 0` is rematerialised 3× per FADD/FSUB, and the rounding fixup could be tighter (+2–4%).
 3. **Size-aware pair selection** (prefer small integer pairs per byte of code) for the 12T footprint.
 4. **A Firefox fallback** for `auto` detection without relaxed SIMD.
