@@ -734,8 +734,10 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 	vm->dataset_ptr_with_offset = (uint32_t)((uintptr_t)dataset + (uintptr_t)dataset_offset);
 
 	// Decode program into the slot.
+	// Layout v2 bakes this thread's vm_state address into every record.
 	rxjit_decode_for_interp((const rxjit_inst_t *)program_buf,
-	                        (decoded_inst_t *)g_jit_threaded_program_slot);
+	                        (decoded_inst_t *)g_jit_threaded_program_slot,
+	                        (uint32_t)(uintptr_t)g_jit_threaded_vm_state);
 
 	// Invoke (lazy compile+instantiate on first call). The first call sees
 	// g_jit_threaded_size > 0 and hands the bytes over; subsequent calls

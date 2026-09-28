@@ -119,38 +119,41 @@ enum {
 	RXJIT_K_COUNT,      // marker; not a real kind
 };
 
-// flags byte bits (non-CBRANCH ops):
+// aux byte bits (non-CBRANCH ops):
 //   [0..1] MOD_SHIFT (0..3) — IADD_RS / IADD_RS_DISPL read this directly
 //          off the inline byte; no mask macro is needed.
 //   [2]    MOD_MEM_L1 (1=L1 mask, 0=L2 mask) — used by L1/L2 memory ops
 // For CBRANCH this byte holds the target_pc instead.
 #define RXJIT_FLAG_MEM_L1 0x04
 
-// 16-byte decoded instruction record. Lives in linear memory; the threaded
-// main_loop loads dst/src/imm/etc via i32.load(8_u) at runtime.
+// 16-byte decoded instruction record, layout v2 (absolute operand addresses).
+// Lives in linear memory; each threaded arm loads its own fields.
 //
-// Per-kind interpretation:
-//   CBRANCH: flags = target_pc; imm32 = mask (low 24 bits used);
-//            imm64 = composed jump imm.
-//   IMUL_RCP: imm64 = rxjit_reciprocal(orig imm32); imm32 unused.
-//   Others:  flags = MOD_SHIFT/MOD_MEM_L1; imm32 = raw 32-bit imm
-//            (sign-extended at use site); imm64 = 0.
+//   +0  u8  opcode_kind
+//   +1  u8  aux       CBRANCH: target_pc; others: MOD_SHIFT | RXJIT_FLAG_MEM_L1
+//   +2  u16 zero
+//   +4  u32 dst_addr  absolute address of the destination operand
+//                     (r: vm+8d, F: vm+64+16d, E: vm+128+16d;
+//                      ISTORE: r[dst] = the address register)
+//   +8  u32 src_addr  absolute address of the source operand (r: vm+8s, A: vm+192+16s)
+//                     CBRANCH: int32 composed imm (sign-extended at use)
+//                     IMUL_RCP: +8..+15 = u64 reciprocal (overlaps imm32)
+//   +12 u32 imm32     raw imm32 (sign-extended at use); CBRANCH: mask;
+//                     CFROUND: imm32 & 63. EXIT sentinel: slot address.
 typedef struct {
-	uint8_t opcode_kind; // 0..RXJIT_K_COUNT-1  (offset 0)
-	uint8_t dst;         // 0..7 (R/A) or 0..3 (F/E)  (offset 1)
-	uint8_t src;         // 0..7 (R/A) or 0..3 (F/E)  (offset 2)
-	uint8_t flags;       // see RXJIT_FLAG_* / CBRANCH target_pc  (offset 3)
-	uint32_t imm32;      // raw imm32 / CBRANCH mask  (offset 4)
-	uint64_t imm64;      // CBRANCH composed imm / IMUL_RCP reciprocal  (offset 8)
+	uint8_t opcode_kind; // +0
+	uint8_t aux;         // +1
+	uint16_t _z;         // +2
+	uint32_t dst_addr;   // +4
+	uint32_t src_addr;   // +8
+	uint32_t imm32;      // +12
 } decoded_inst_t;
-// sizeof(decoded_inst_t) must be 16 — the threaded main_loop multiplies pc<<4
-// to compute the record address. A static_assert is asserted in the .c.
+// sizeof(decoded_inst_t) must be 16 (asserted in the .c).
 
-// Decode raw program → 256 × 16-byte records in `out`. Does NOT mutate
-// `insts`. Computes the same canonicalisations as rxjit_decode plus the
-// expanded opcode_kind, packed flags, pre-computed reciprocals, and
-// CBRANCH (mask, composed imm, target_pc).
-void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256]);
+// Decode raw program → 256 × 16-byte v2 records in `out`, with operand
+// addresses baked against the calling thread's vm_state at `vm`. Does NOT
+// mutate `insts`.
+void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256], uint32_t vm);
 
 #ifdef __cplusplus
 }

@@ -4,6 +4,7 @@
 #include "wasm_jit_inst_locals.h"  // IMM_SEXT64, MOD_COND, REGISTER_NEEDS_DISPLACEMENT
 #include "configuration.h"
 #include <string.h>
+#include <assert.h>
 
 _Static_assert(sizeof(decoded_inst_t) == 16,
                "decoded_inst_t must be exactly 16 bytes — main_loop uses pc<<4 to index.");
@@ -277,14 +278,92 @@ void rxjit_decode(rxjit_inst_t insts[256], rxjit_jump_desc_t jump_desc[256]) {
 // distinct opcode_kind values so the interpreter dispatch is a single
 // br_table lookup with no secondary branches inside the arm.
 
-void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256]) {
+// Pre-v2 (index-based) record: the classification below fills this, then
+// rxjit_pack_v2 turns it into the absolute-address v2 record.
+typedef struct {
+	uint8_t opcode_kind;
+	uint8_t dst;
+	uint8_t src;
+	uint8_t flags;
+	uint32_t imm32;
+	uint64_t imm64;
+} rxjit_dec_idx_t;
+
+static inline void rxjit_pack_v2(const rxjit_dec_idx_t *t, decoded_inst_t *o, uint32_t vm) {
+	const uint32_t RA_d = vm + 8u * t->dst, RA_s = vm + 8u * t->src;
+	const uint32_t FA_d = vm + 64u + 16u * t->dst, EA_d = vm + 128u + 16u * t->dst;
+	const uint32_t AA_s = vm + 192u + 16u * t->src;
+	memset(o, 0, sizeof(*o));
+	o->opcode_kind = t->opcode_kind;
+	o->aux = t->flags;
+	o->imm32 = t->imm32;
+	switch (t->opcode_kind) {
+	case RXJIT_K_NOP:
+		memset(o, 0, sizeof(*o));
+		break;
+	case RXJIT_K_IMUL_RCP:
+		o->dst_addr = RA_d;
+		memcpy((uint8_t *)o + 8, &t->imm64, 8); // overlaps src_addr + imm32
+		break;
+	case RXJIT_K_INEG_R:
+		o->dst_addr = RA_d;
+		break;
+	case RXJIT_K_FSWAP_R_F:
+	case RXJIT_K_FSCAL_R:
+		o->dst_addr = FA_d;
+		break;
+	case RXJIT_K_FSWAP_R_E:
+	case RXJIT_K_FSQRT_R:
+		o->dst_addr = EA_d;
+		break;
+	case RXJIT_K_FADD_R:
+	case RXJIT_K_FSUB_R:
+		o->dst_addr = FA_d;
+		o->src_addr = AA_s;
+		break;
+	case RXJIT_K_FMUL_R:
+		o->dst_addr = EA_d;
+		o->src_addr = AA_s;
+		break;
+	case RXJIT_K_FADD_M:
+	case RXJIT_K_FSUB_M:
+		o->dst_addr = FA_d;
+		o->src_addr = RA_s;
+		break;
+	case RXJIT_K_FDIV_M:
+		o->dst_addr = EA_d;
+		o->src_addr = RA_s;
+		break;
+	case RXJIT_K_CBRANCH: {
+		int32_t imm = (int32_t)t->imm64;
+		// b = cond + 8 <= 23, so bits 32..63 are copies of bit 31.
+		assert((uint64_t)(int64_t)imm == t->imm64);
+		o->dst_addr = RA_d;
+		memcpy((uint8_t *)o + 8, &imm, 4);
+		break; // aux = target_pc, imm32 = mask (set above)
+	}
+	case RXJIT_K_CFROUND:
+		o->src_addr = RA_s;
+		o->imm32 = t->imm32 & 63;
+		break;
+	default: // integer ops (incl. ISWAP, ISTORE): r[dst], r[src]
+		o->dst_addr = RA_d;
+		o->src_addr = RA_s;
+		break;
+	}
+}
+
+void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256], uint32_t vm) {
 	int register_usage[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
-	memset(out, 0, sizeof(decoded_inst_t) * 256);
 
 	for (int pc = 0; pc < 256; pc++) {
 		const rxjit_inst_t *inst = &insts[pc];
-		decoded_inst_t *o = &out[pc];
+		rxjit_dec_idx_t tmp;
+		rxjit_dec_idx_t *o = &tmp;
+		memset(o, 0, sizeof(tmp));
 		int opcode = inst->opcode;
+		// `continue` inside the do/while(0) exits to the v2 pack below.
+		do {
 
 		uint8_t flags = (uint8_t)(((inst->mod >> 2) & 0x3) /* MOD_SHIFT */);
 		if (inst->mod & 0x3) flags |= RXJIT_FLAG_MEM_L1; /* MOD_MEM */
@@ -512,5 +591,7 @@ void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[2
 			continue;
 		}
 		o->opcode_kind = RXJIT_K_NOP;
+		} while (0);
+		rxjit_pack_v2(o, &out[pc], vm);
 	}
 }

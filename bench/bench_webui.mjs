@@ -52,6 +52,7 @@ const NO_THREADED  = flag('--no-threaded');
 // Probe: --regs locals → threaded interp with regs/F/E/A in wasm locals
 // (regs_in_memory=0, split_inner_dispatch=0) instead of the JSC-tuned default.
 const REGS_MODE    = arg('--regs', 'mem');
+if (REGS_MODE === 'locals') console.error('note: --regs locals is retired (perf step 2); the threaded interpreter always uses split + registers-in-memory.');
 
 const RANDOMX_FLAG_FULL_MEM = 4;
 const pad = (s, w) => String(s).padStart(w, ' ');
