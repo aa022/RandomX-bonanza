@@ -290,13 +290,30 @@ typedef struct {
 	uint64_t imm64;
 } rxjit_dec_idx_t;
 
-static inline void rxjit_pack_v2(const rxjit_dec_idx_t *t, decoded_inst_t *o, uint32_t vm) {
+// Record kind accessors for the fuse rewrite (u8 or u16 kinds, see decoded_inst_t).
+static inline int rxjit_rec_kind(const decoded_inst_t *o, int kind16) {
+	return kind16 ? o->h.k16.opcode_kind : o->h.k8.opcode_kind;
+}
+static inline void rxjit_rec_set_kind(decoded_inst_t *o, int kind, int kind16) {
+	if (kind16)
+		o->h.k16.opcode_kind = (uint16_t)kind;
+	else
+		o->h.k8.opcode_kind = (uint8_t)kind;
+}
+
+static inline void rxjit_pack_v2(const rxjit_dec_idx_t *t, decoded_inst_t *o, uint32_t vm,
+                                 int kind16) {
 	const uint32_t RA_d = vm + 8u * t->dst, RA_s = vm + 8u * t->src;
 	const uint32_t FA_d = vm + 64u + 16u * t->dst, EA_d = vm + 128u + 16u * t->dst;
 	const uint32_t AA_s = vm + 192u + 16u * t->src;
 	memset(o, 0, sizeof(*o));
-	o->opcode_kind = t->opcode_kind;
-	o->aux = t->flags;
+	if (kind16) {
+		o->h.k16.opcode_kind = t->opcode_kind;
+		o->h.k16.aux = t->flags;
+	} else {
+		o->h.k8.opcode_kind = t->opcode_kind;
+		o->h.k8.aux = t->flags;
+	}
 	o->imm32 = t->imm32;
 	switch (t->opcode_kind) {
 	case RXJIT_K_NOP:
@@ -360,12 +377,8 @@ static inline void rxjit_pack_v2(const rxjit_dec_idx_t *t, decoded_inst_t *o, ui
 // L1/L2 kind split: MOD_MEM != 0 selects the L1 mask (RandomX level rule).
 #define L12(k1, k2) ((inst->mod & 3) ? (k1) : (k2))
 
-int rxjit_fuse_n_for_feature(int jit_feature) {
-	return (jit_feature & RXJIT_FEATURE_NO_FUSE) ? 0 : RXJIT_FUSE_N;
-}
-
-void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256], uint32_t vm,
-                             int fuse_n) {
+int rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256], uint32_t vm,
+                            int fuse_n, int kind16) {
 	int register_usage[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
 
 	for (int pc = 0; pc < 256; pc++) {
@@ -612,15 +625,22 @@ void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[2
 		}
 		o->opcode_kind = RXJIT_K_NOP;
 		} while (0);
-		rxjit_pack_v2(o, &out[pc], vm);
+		rxjit_pack_v2(o, &out[pc], vm, kind16);
 	}
-	// Step 6: fused pair superinstructions. Only record pc's kind byte changes;
+	// Step 6: fused pair superinstructions. Only record pc's kind changes;
 	// out[pc+1] still holds its base kind here. Record 255 is never fused (its
-	// successor is the sentinel).
+	// successor is the sentinel). The table ranks all pairs; this module has
+	// the first fuse_n (kinds K..K+fuse_n-1).
 	if (fuse_n > 0) {
 		for (int pc = 0; pc < 255; pc++) {
-			uint8_t f = rxjit_fuse_tab[out[pc].opcode_kind][out[pc + 1].opcode_kind];
-			if (f && f < RXJIT_K_COUNT + fuse_n) out[pc].opcode_kind = f;
+			int f = rxjit_fuse_tab[rxjit_rec_kind(&out[pc], kind16)]
+			                      [rxjit_rec_kind(&out[pc + 1], kind16)];
+			if (f && f - RXJIT_K_COUNT < fuse_n) rxjit_rec_set_kind(&out[pc], f, kind16);
 		}
 	}
+	// Static dispatch count (the --stats dispatches/op numerator).
+	int ndisp = 0;
+	for (int pc = 0; pc < 256; ndisp++)
+		pc += rxjit_rec_kind(&out[pc], kind16) >= RXJIT_K_COUNT ? 2 : 1;
+	return ndisp;
 }

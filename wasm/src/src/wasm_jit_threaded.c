@@ -179,9 +179,8 @@ static _Thread_local uint32_t g_slot = 0;
 
 // Decoded-inst field offsets within the 16-byte record (layout v2, see
 // wasm_jit_decode.h). Only D_OP is loaded by the loop header; every arm loads
-// its own fields (each at most once) at g_ro + D_*.
-#define D_OP    0
-#define D_AUX   1  // CBRANCH: target_pc; others: MOD_SHIFT | RXJIT_FLAG_MEM_L1
+// its own fields (each at most once) at g_ro + D_* (aux: g_ro + g_d_aux).
+#define D_OP    0  // u8 kind (i32.load8_u), or u16 with g_kind16 (i32.load16_u)
 #define D_DSTA  4  // u32 absolute dst operand address
 #define D_SRCA  8  // u32 absolute src operand address
 #define D_CBIMM 8  // CBRANCH: int32 composed imm
@@ -196,6 +195,11 @@ static _Thread_local uint32_t g_ro = 0;
 // number of br_table arms (branch depths are computed from it).
 static _Thread_local int g_no_exit = 0;
 static _Thread_local int g_k_total = RXJIT_K_COUNT;
+// Record head width (rxjit_kind16): u8 kinds with aux at +1 (the arm profile,
+// layout v2 as before), or u16 kinds with aux at +2. g_d_aux is the aux byte
+// offset (CBRANCH: target_pc; others: MOD_SHIFT | RXJIT_FLAG_MEM_L1).
+static _Thread_local int g_kind16 = 0;
+static _Thread_local uint32_t g_d_aux = 1;
 
 // ---------------- Small helpers (operate on `uint8_t *p`) ----------------
 
@@ -328,6 +332,13 @@ static _Thread_local int g_k_total = RXJIT_K_COUNT;
 	do {                           \
 		WASM_U8(0x2d);             \
 		WASM_U8(0);                \
+		WASM_U32((uint32_t)(off)); \
+	} while (0)
+// i32.load16_u align=1 offset=$off
+#define I32_LOAD16U_OFF(off)       \
+	do {                           \
+		WASM_U8(0x2f);             \
+		WASM_U8(1);                \
 		WASM_U32((uint32_t)(off)); \
 	} while (0)
 // i64.load32_s align=2 offset=$off  (sign-extend 32→64)
@@ -1698,7 +1709,7 @@ static uint32_t emit_arm_iadd_rs(int k, uint8_t *buf) {
 	RD64(LOCT_dst_byte);
 	RD64(LOCT_src_byte);
 	LG(LOCT_inst_ptr);
-	I32_LOAD8U_OFF(g_ro + D_AUX);
+	I32_LOAD8U_OFF(g_ro + g_d_aux);
 	WI32_CONST(0x03);
 	I32_AND();
 	I64_EXT_I32_U();
@@ -1718,7 +1729,7 @@ static uint32_t emit_arm_iadd_rs_displ(int k, uint8_t *buf) {
 	RD64(LOCT_dst_byte);
 	RD64(LOCT_src_byte);
 	LG(LOCT_inst_ptr);
-	I32_LOAD8U_OFF(g_ro + D_AUX);
+	I32_LOAD8U_OFF(g_ro + g_d_aux);
 	WI32_CONST(0x03);
 	I32_AND();
 	I64_EXT_I32_U();
@@ -2186,7 +2197,7 @@ static uint32_t emit_arm_cbranch(int k, uint8_t *buf) {
 	WASM_U8_THUNK({0x04, 0x40}); // if () -> ()
 	// ip = slot + (target_pc << 4)
 	LG(LOCT_inst_ptr);
-	I32_LOAD8U_OFF(g_ro + D_AUX);
+	I32_LOAD8U_OFF(g_ro + g_d_aux);
 	WI32_CONST(4);
 	I32_SHL();
 	WI32_CONST(g_slot);
@@ -2433,7 +2444,10 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 
 	// load opcode_kind and dispatch
 	LG(LOCT_inst_ptr);
-	I32_LOAD8U_OFF(D_OP);
+	if (g_kind16)
+		I32_LOAD16U_OFF(D_OP);
+	else
+		I32_LOAD8U_OFF(D_OP);
 	WASM_U8(0x0e);          // br_table opcode
 	WASM_U32((uint32_t)KT); // count of labels
 	for (int i = 0; i < KT; i++)
@@ -2494,6 +2508,8 @@ uint32_t rxjit_generate_threaded_module(
 	int jit_feature,
 	int regs_in_memory,
 	int split_inner_dispatch,
+	int fuse_n,
+	int kind16,
 	uint8_t *buf)
 {
 	// Per-thread module-gen flags. VM_R0_OFFSET is 0, so r_file_base == vm_state_ptr.
@@ -2508,7 +2524,9 @@ uint32_t rxjit_generate_threaded_module(
 	g_emit_regs_in_mem = 1;
 	g_ro               = 0;
 	g_no_exit          = 0;
-	g_k_total          = RXJIT_K_COUNT + rxjit_fuse_n_for_feature(jit_feature);
+	g_k_total          = RXJIT_K_COUNT + fuse_n;
+	g_kind16           = kind16;
+	g_d_aux            = kind16 ? 2 : 1;
 	g_r_file_base      = vm_state_ptr + VM_R0_OFFSET;
 	g_slot             = program_slot_ptr;
 

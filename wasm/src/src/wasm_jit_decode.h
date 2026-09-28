@@ -138,11 +138,18 @@ enum {
 #define RXJIT_FLAG_MEM_L1 0x04
 
 // 16-byte decoded instruction record, layout v2 (absolute operand addresses).
-// Lives in linear memory; each threaded arm loads its own fields.
+// Lives in linear memory; each threaded arm loads its own fields. The record
+// head has two widths, fixed per module (rxjit_kind16 below):
 //
+//   u8 kinds (K + fuse_n + triples_n <= 255, the arm profile):
 //   +0  u8  opcode_kind
 //   +1  u8  aux       CBRANCH: target_pc; others: MOD_SHIFT | RXJIT_FLAG_MEM_L1
 //   +2  u16 zero
+//   u16 kinds (more dispatch arms):
+//   +0  u16 opcode_kind
+//   +2  u8  aux
+//   +3  u8  zero
+//
 //   +4  u32 dst_addr  absolute address of the destination operand
 //                     (r: vm+8d, F: vm+64+16d, E: vm+128+16d;
 //                      ISTORE: r[dst] = the address register)
@@ -152,25 +159,43 @@ enum {
 //   +12 u32 imm32     raw imm32 (sign-extended at use); CBRANCH: mask;
 //                     CFROUND: imm32 & 63. EXIT sentinel: slot address.
 typedef struct {
-	uint8_t opcode_kind; // +0
-	uint8_t aux;         // +1
-	uint16_t _z;         // +2
+	union {
+		struct {
+			uint8_t opcode_kind; // +0
+			uint8_t aux;         // +1
+			uint16_t _z;         // +2
+		} k8;
+		struct {
+			uint16_t opcode_kind; // +0
+			uint8_t aux;          // +2
+			uint8_t _z;           // +3
+		} k16;
+	} h;
 	uint32_t dst_addr;   // +4
 	uint32_t src_addr;   // +8
 	uint32_t imm32;      // +12
 } decoded_inst_t;
 // sizeof(decoded_inst_t) must be 16 (asserted in the .c).
 
+// Record head width: u16 kinds once the dispatch has more than 255 arms.
+static inline int rxjit_kind16(int fuse_n, int triples_n) {
+	return RXJIT_K_COUNT + fuse_n + triples_n > 255;
+}
+
 // Decode raw program → 256 × 16-byte v2 records in `out`, with operand
 // addresses baked against the calling thread's vm_state at `vm`. Does NOT
 // mutate `insts`. fuse_n > 0 (step 6) then rewrites record r's kind to the
 // fused pair kind K+i (wasm_jit_fuse_table.h) when (kind r, kind r+1) is
-// among the first fuse_n pairs; record r+1 is untouched. fuse_n must equal
-// the value the calling thread's module was generated with.
-void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256], uint32_t vm,
-                             int fuse_n);
+// among the first fuse_n pairs; record r+1 is untouched. fuse_n and kind16
+// must equal the values the calling thread's module was generated with.
+// Returns the static dispatch count: records visited walking from record 0
+// (a fused kind advances 2 records, any other 1) up to the sentinel.
+int rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256], uint32_t vm,
+                            int fuse_n, int kind16);
 
-// Number of fused pair kinds for a feature mask: 0 with RXJIT_FEATURE_NO_FUSE.
+// Effective number of fused pair kinds for a feature mask (wasm_jit_run.cpp):
+// 0 with RXJIT_FEATURE_NO_FUSE, else the rxjit_set_fuse_n override (>= 0) or
+// the profile's fuse_n, clamped to [0, RXJIT_FUSE_NMAX].
 int rxjit_fuse_n_for_feature(int jit_feature);
 
 #ifdef __cplusplus

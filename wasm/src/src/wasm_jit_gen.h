@@ -76,8 +76,9 @@ enum {
 // Bits 256, 512, 1024: debug layout-pad count 0..7 for the threaded
 // inner_dispatch (each pad is one dummy i32.store at function entry, which
 // shifts all following code). A shift amount, not a flag: pad n = n << 8.
+// Bits 2048..32768 are free for new knobs.
 #define RXJIT_FEATURE_PAD_SHIFT 8
-#define RXJIT_FEATURE_MASK      0x7ff
+#define RXJIT_FEATURE_MASK      0xffff
 
 // Generate the static module — compile this ONCE per worker thread. It
 // contains the 22 SIMD semifloat + mulh stubs and exports their function

@@ -12,6 +12,8 @@
 
 #include "wasm_jit_gen.h"
 #include "wasm_jit_decode.h"
+#include "wasm_jit_fuse_table.h" // RXJIT_FUSE_NMAX
+#include "wasm_jit_profile.h"
 #include "wasm_jit_threaded.h"
 #include "common.hpp"
 #include "program.hpp"
@@ -49,6 +51,13 @@ std::atomic<uint32_t> g_rxjit_static_compile_us{0};
 std::atomic<uint32_t> g_rxjit_dyn_compile_us{0};
 std::atomic<uint32_t> g_rxjit_run_us{0};
 
+// Static dispatch statistic (threaded path): dispatch records per decoded
+// program (rxjit_decode_for_interp's return), summed, and the number of
+// programs decoded. dispatches/op = dispatches / (256 * programs). 64-bit
+// (returned to JS as doubles): a 12-thread run passes 2^32 in ~2 hours.
+std::atomic<uint64_t> g_rxjit_dispatches{0};
+std::atomic<uint64_t> g_rxjit_decoded_programs{0};
+
 // Shared last-error buffer. Pthread workers write into this when JS catches
 // an exception during JIT module compile/instantiate; the main thread polls
 // it and surfaces to the UI. Last-write-wins is fine for diagnostics.
@@ -63,12 +72,13 @@ thread_local uint32_t g_jit_static_size = 0;
 thread_local bool g_jit_static_failed = false;
 
 // Threaded-interpreter path: per-thread module buffer + per-thread state.
-// The threaded module is ~30-40 KiB today; the generator writes unchecked
-// (the size check runs after the fact), so leave room for superinstructions.
-// Heap-allocated once per mining thread: a thread_local array would be
-// emitted as zeros into the .wasm TLS data segment and copied into every
-// pthread's TLS block (1 KiB of buffer = 1 KiB of randomx.wasm).
-constexpr size_t RXJIT_THREADED_BUF_SIZE = 1 << 18;
+// The threaded module is ~40 KiB with the arm profile's 200 fused pairs and
+// grows with fuse_n (every pair, and later fused triples, is ~1 MiB); the
+// generator writes unchecked (the size check runs after the fact), so keep
+// ample headroom. Heap-allocated once per mining thread: a thread_local array
+// would be emitted as zeros into the .wasm TLS data segment and copied into
+// every pthread's TLS block (1 KiB of buffer = 1 KiB of randomx.wasm).
+constexpr size_t RXJIT_THREADED_BUF_SIZE = 1 << 21;
 thread_local uint8_t *g_jit_threaded_buf = nullptr;
 thread_local uint32_t g_jit_threaded_size = 0;
 // Both point into one per-thread RXJIT_ARENA_SIZE block (wasm_jit_threaded.h):
@@ -76,7 +86,11 @@ thread_local uint32_t g_jit_threaded_size = 0;
 thread_local uint8_t *g_jit_threaded_program_slot = nullptr;
 thread_local rxjit_vm_state_t *g_jit_threaded_vm_state = nullptr;
 thread_local uint32_t g_jit_threaded_baked_sp = 0; // scratchpad baked into the module
-thread_local int g_jit_threaded_fuse_n = 0;        // fused kinds the module was generated with
+// The module's generation key besides the scratchpad: the decoder must use
+// exactly the fuse_n / kind16 the module was generated with.
+thread_local int g_jit_threaded_feature = 0;
+thread_local int g_jit_threaded_fuse_n = 0; // fused kinds the module was generated with
+thread_local int g_jit_threaded_kind16 = 0; // record head width (rxjit_kind16)
 thread_local bool g_jit_threaded_initted = false;
 thread_local bool g_jit_threaded_failed = false;
 
@@ -585,12 +599,20 @@ EMSCRIPTEN_KEEPALIVE uint32_t rxjit_stat_dyn_compile_us(void) {
 EMSCRIPTEN_KEEPALIVE uint32_t rxjit_stat_run_us(void) {
 	return g_rxjit_run_us.load(std::memory_order_relaxed);
 }
+EMSCRIPTEN_KEEPALIVE double rxjit_stat_dispatches(void) {
+	return (double)g_rxjit_dispatches.load(std::memory_order_relaxed);
+}
+EMSCRIPTEN_KEEPALIVE double rxjit_stat_decoded_programs(void) {
+	return (double)g_rxjit_decoded_programs.load(std::memory_order_relaxed);
+}
 EMSCRIPTEN_KEEPALIVE void rxjit_stat_reset(void) {
 	g_rxjit_runs.store(0, std::memory_order_relaxed);
 	g_rxjit_fails.store(0, std::memory_order_relaxed);
 	g_rxjit_static_compile_us.store(0, std::memory_order_relaxed);
 	g_rxjit_dyn_compile_us.store(0, std::memory_order_relaxed);
 	g_rxjit_run_us.store(0, std::memory_order_relaxed);
+	g_rxjit_dispatches.store(0, std::memory_order_relaxed);
+	g_rxjit_decoded_programs.store(0, std::memory_order_relaxed);
 }
 // Called from the EM_JS runner after each timed phase.
 EMSCRIPTEN_KEEPALIVE void rxjit_record_timing(uint32_t static_us, uint32_t dyn_us,
@@ -621,6 +643,53 @@ static std::atomic<int> g_rxjit_feature{0};
 EMSCRIPTEN_KEEPALIVE
 void rxjit_set_feature(int feature) {
 	g_rxjit_feature.store(feature & RXJIT_FEATURE_MASK, std::memory_order_relaxed);
+}
+
+// Threaded-module generator profile + knob overrides (wasm_jit_profile.h).
+// Like the feature, read by each pthread when it (re)generates its module;
+// a change regenerates the module on that thread's next program.
+static std::atomic<int> g_rxjit_profile{RXJIT_PROFILE_ARM};
+static std::atomic<int> g_rxjit_fuse_n_override{-1};    // -1: the profile's fuse_n
+static std::atomic<int> g_rxjit_triples_n_override{-1}; // -1: the profile's triples_n
+
+EMSCRIPTEN_KEEPALIVE
+void rxjit_set_profile(int id) {
+	if (id >= 0 && id < RXJIT_PROFILE_COUNT) g_rxjit_profile.store(id, std::memory_order_relaxed);
+}
+
+EMSCRIPTEN_KEEPALIVE
+int rxjit_get_profile(void) {
+	return g_rxjit_profile.load(std::memory_order_relaxed);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void rxjit_set_fuse_n(int n) {
+	g_rxjit_fuse_n_override.store(n < 0 ? -1 : n, std::memory_order_relaxed);
+}
+
+// Plumbing for fused triples: stored, not used yet (effective triples_n is 0).
+EMSCRIPTEN_KEEPALIVE
+void rxjit_set_triples_n(int n) {
+	g_rxjit_triples_n_override.store(n < 0 ? -1 : n, std::memory_order_relaxed);
+}
+
+int rxjit_fuse_n_for_feature(int jit_feature) {
+	if (jit_feature & RXJIT_FEATURE_NO_FUSE) return 0;
+	int n = g_rxjit_fuse_n_override.load(std::memory_order_relaxed);
+	if (n < 0) n = rxjit_profiles[g_rxjit_profile.load(std::memory_order_relaxed)].fuse_n;
+	return n > RXJIT_FUSE_NMAX ? RXJIT_FUSE_NMAX : n;
+}
+
+// Status getters (bench headers, the worker's status line): what the next
+// generated module uses with the current feature and knobs.
+EMSCRIPTEN_KEEPALIVE
+int rxjit_effective_fuse_n(void) {
+	return rxjit_fuse_n_for_feature(g_rxjit_feature.load(std::memory_order_relaxed));
+}
+
+EMSCRIPTEN_KEEPALIVE
+int rxjit_effective_kind16(void) {
+	return rxjit_kind16(rxjit_effective_fuse_n(), 0);
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -685,9 +754,12 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 		{
 			// Sentinel record #256 terminates the inner pointer walk. Bytes 12..15
 			// hold the slot address: the inner loop loads it (an i32.load, not a
-			// constant, so TurboFan keeps the walk pointer zero-extended).
+			// constant, so TurboFan keeps the walk pointer zero-extended). With
+			// u16 kinds the kind is s[0] | s[1] << 8: s[1] stays 0 (the arena is
+			// zeroed), so one sentinel serves both record head widths.
 			uint8_t *s = blk + RXJIT_ARENA_SENT_OFF;
 			s[0] = RXJIT_K_EXIT;
+			s[1] = 0;
 			uint32_t slot = (uint32_t)(uintptr_t)(blk + RXJIT_ARENA_SLOT_OFF);
 			memcpy(s + 12, &slot, 4);
 		}
@@ -717,15 +789,21 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 
 	// 2) generate the threaded module bytes (with per-thread pointers baked):
 	// once per thread, and again whenever the scratchpad moves (a new VM on
-	// this pthread). The JS side sees thrLen > 0 and recompiles.
-	if (!g_jit_threaded_initted || (uint32_t)(uintptr_t)scratchpad != g_jit_threaded_baked_sp) {
+	// this pthread) or the feature / fuse_n / record head width changes. The
+	// JS side sees thrLen > 0 and recompiles.
+	const int feature = g_rxjit_feature.load(std::memory_order_relaxed);
+	const int fuse_n = rxjit_fuse_n_for_feature(feature);
+	const int kind16 = rxjit_kind16(fuse_n, 0);
+	if (!g_jit_threaded_initted || (uint32_t)(uintptr_t)scratchpad != g_jit_threaded_baked_sp ||
+	    feature != g_jit_threaded_feature || fuse_n != g_jit_threaded_fuse_n ||
+	    kind16 != g_jit_threaded_kind16) {
 		int regs_in_mem = g_rxjit_regs_in_memory.load(std::memory_order_relaxed);
 		int split_id = g_rxjit_split_inner_dispatch.load(std::memory_order_relaxed);
-		int feature = g_rxjit_feature.load(std::memory_order_relaxed);
 		uint32_t sz = rxjit_generate_threaded_module(
 		    (uint32_t)(uintptr_t)g_jit_threaded_vm_state, (uint32_t)(uintptr_t)scratchpad,
 		    (uint32_t)(uintptr_t)dataset, (uint32_t)(uintptr_t)g_jit_threaded_program_slot, 1,
-		    g_jit_max_memory_pages, feature, regs_in_mem, split_id, g_jit_threaded_buf);
+		    g_jit_max_memory_pages, feature, regs_in_mem, split_id, fuse_n, kind16,
+		    g_jit_threaded_buf);
 		g_rxjit_threaded_module_size.store(sz, std::memory_order_relaxed);
 		if (sz == 0 || sz > RXJIT_THREADED_BUF_SIZE) {
 			g_rxjit_threaded_phase.store(103, std::memory_order_relaxed);
@@ -740,7 +818,9 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 		}
 		g_jit_threaded_size = sz;
 		g_jit_threaded_baked_sp = (uint32_t)(uintptr_t)scratchpad;
-		g_jit_threaded_fuse_n = rxjit_fuse_n_for_feature(feature);
+		g_jit_threaded_feature = feature;
+		g_jit_threaded_fuse_n = fuse_n;
+		g_jit_threaded_kind16 = kind16;
 		// Step 9: inner_dispatch loads the scratchpad base from the arena into an
 		// opaque local (a baked i32.const would be rematerialised in every arm).
 		{
@@ -770,9 +850,11 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 
 	// Decode program into the slot.
 	// Layout v2 bakes this thread's vm_state address into every record.
-	rxjit_decode_for_interp((const rxjit_inst_t *)program_buf,
-	                        (decoded_inst_t *)g_jit_threaded_program_slot,
-	                        (uint32_t)(uintptr_t)g_jit_threaded_vm_state, g_jit_threaded_fuse_n);
+	int ndisp = rxjit_decode_for_interp(
+	    (const rxjit_inst_t *)program_buf, (decoded_inst_t *)g_jit_threaded_program_slot,
+	    (uint32_t)(uintptr_t)g_jit_threaded_vm_state, g_jit_threaded_fuse_n, g_jit_threaded_kind16);
+	g_rxjit_dispatches.fetch_add((uint64_t)ndisp, std::memory_order_relaxed);
+	g_rxjit_decoded_programs.fetch_add(1, std::memory_order_relaxed);
 
 	// Invoke (lazy compile+instantiate on first call). The first call sees
 	// g_jit_threaded_size > 0 and hands the bytes over; subsequent calls
