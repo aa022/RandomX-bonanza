@@ -68,7 +68,16 @@ enum {
 	// by a per-fprc mask table) instead of call_indirect into the static
 	// module's semifloat stubs. fprc lives in a local.
 	RXJIT_FEATURE_PJIT2 = 16,
+	// Threaded interpreter opt-out / opt-in bits (A/B knobs).
+	RXJIT_FEATURE_NO_INLINE_ROUND = 32, // old float path (call_indirect stubs)
+	RXJIT_FEATURE_NO_FUSE = 64,         // no fused pair superinstructions
+	RXJIT_FEATURE_UNROLL2 = 128,        // 2x unrolled dispatch loop
 };
+// Bits 256, 512, 1024: debug layout-pad count 0..7 for the threaded
+// inner_dispatch (each pad is one dummy i32.store at function entry, which
+// shifts all following code). A shift amount, not a flag: pad n = n << 8.
+#define RXJIT_FEATURE_PAD_SHIFT 8
+#define RXJIT_FEATURE_MASK      0x7ff
 
 // Generate the static module — compile this ONCE per worker thread. It
 // contains the 22 SIMD semifloat + mulh stubs and exports their function

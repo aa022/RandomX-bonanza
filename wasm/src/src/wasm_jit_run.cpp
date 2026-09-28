@@ -63,11 +63,19 @@ thread_local uint32_t g_jit_static_size = 0;
 thread_local bool g_jit_static_failed = false;
 
 // Threaded-interpreter path: per-thread module buffer + per-thread state.
-// The threaded module is ~30-40 KiB; 128 KiB buffer gives plenty of slack.
-thread_local uint8_t g_jit_threaded_buf[1 << 17];
+// The threaded module is ~30-40 KiB today; the generator writes unchecked
+// (the size check runs after the fact), so leave room for superinstructions.
+// Heap-allocated once per mining thread: a thread_local array would be
+// emitted as zeros into the .wasm TLS data segment and copied into every
+// pthread's TLS block (1 KiB of buffer = 1 KiB of randomx.wasm).
+constexpr size_t RXJIT_THREADED_BUF_SIZE = 1 << 18;
+thread_local uint8_t *g_jit_threaded_buf = nullptr;
 thread_local uint32_t g_jit_threaded_size = 0;
-thread_local uint8_t *g_jit_threaded_program_slot = nullptr;      // 4 KiB malloc'd
-thread_local rxjit_vm_state_t *g_jit_threaded_vm_state = nullptr; // 312 bytes malloc'd
+// Both point into one per-thread RXJIT_ARENA_SIZE block (wasm_jit_threaded.h):
+// vm_state == arena base (the pointer to free), program slot at +1024.
+thread_local uint8_t *g_jit_threaded_program_slot = nullptr;
+thread_local rxjit_vm_state_t *g_jit_threaded_vm_state = nullptr;
+thread_local uint32_t g_jit_threaded_baked_sp = 0; // scratchpad baked into the module
 thread_local bool g_jit_threaded_initted = false;
 thread_local bool g_jit_threaded_failed = false;
 
@@ -343,7 +351,10 @@ EM_JS(int, rxjit_js_run_threaded, (int thrPtr, int thrLen), {
 	try {
 		var t0, t1, t2;
 		var initUs = 0;
-		if (!ctx._rxjit_threaded) {
+		// thrLen > 0 means C generated a fresh module (new pthread on a reused
+		// pool worker, or a new scratchpad): always replace the cached instance,
+		// whose baked pointers may be stale.
+		if (thrLen > 0 || !ctx._rxjit_threaded) {
 			if (thrLen === 0) {
 				console.error('[rxjit-threaded] run before init');
 				return 0;
@@ -357,7 +368,10 @@ EM_JS(int, rxjit_js_run_threaded, (int thrPtr, int thrLen), {
 			// Module compile sees a stable ArrayBuffer that isn't a view
 			// over shared memory (some engines refuse / are slow on shared).
 			var buf = new Uint8Array(thrLen);
-			buf.set(Module.HEAPU8.subarray(thrPtr, thrPtr + thrLen));
+			// The buffer is heap-allocated and may sit above 2 GiB (thrPtr is
+			// a signed int) or beyond a stale Module.HEAPU8 view after growth:
+			// view the live memory buffer at the unsigned address.
+			buf.set(new Uint8Array(mem.buffer, thrPtr >>> 0, thrLen));
 			var mod = new WebAssembly.Module(buf);
 			var inst = new WebAssembly.Instance(mod, { e: { m: mem } });
 			ctx._rxjit_threaded = { inst: inst };
@@ -590,13 +604,14 @@ EMSCRIPTEN_KEEPALIVE uint32_t rxjit_err_buf_size(void) {
 //   bit 0  RELAXED_SIMD
 //   bit 1  FMA (implies relaxed)
 //   bit 2  INLINE_FPRC_ZERO
+//   bits 3..7, 8..10 (layout pad): see RXJIT_FEATURE_* in wasm_jit_gen.h
 // Set from the main thread; read by every pthread worker — must be atomic
 // so the C++ memory model is satisfied. Initial value 0 (baseline emitter).
 static std::atomic<int> g_rxjit_feature{0};
 
 EMSCRIPTEN_KEEPALIVE
 void rxjit_set_feature(int feature) {
-	g_rxjit_feature.store(feature & 31, std::memory_order_relaxed);
+	g_rxjit_feature.store(feature & RXJIT_FEATURE_MASK, std::memory_order_relaxed);
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -638,34 +653,35 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 
 	if (!g_jit_threaded_initted) {
 		g_rxjit_threaded_phase.store(1, std::memory_order_relaxed);
-		// 1) allocate the 4 KiB program slot
-		g_jit_threaded_program_slot = (uint8_t *)aligned_alloc(16, 4096);
-		if (!g_jit_threaded_program_slot) {
+		// 1) allocate the per-thread arena (vm_state + program slot + reserved
+		// areas), 128-B aligned so no cache line is shared with other threads.
+		static_assert(sizeof(rxjit_vm_state_t) <= RXJIT_ARENA_RMASK_OFF, "vm_state grew");
+		static_assert(alignof(rxjit_vm_state_t) <= RXJIT_ARENA_ALIGN, "vm_state alignment");
+		static_assert(sizeof(decoded_inst_t) * 256 <= RXJIT_ARENA_SENT_OFF - RXJIT_ARENA_SLOT_OFF,
+		              "program slot overflows the arena");
+		static_assert(RXJIT_ARENA_SIZE % RXJIT_ARENA_ALIGN == 0, "aligned_alloc size");
+		uint8_t *blk = (uint8_t *)aligned_alloc(RXJIT_ARENA_ALIGN, RXJIT_ARENA_SIZE);
+		g_jit_threaded_buf = (uint8_t *)malloc(RXJIT_THREADED_BUF_SIZE);
+		if (!blk || !g_jit_threaded_buf) {
 			g_rxjit_threaded_phase.store(101, std::memory_order_relaxed);
+			free(blk);
+			free(g_jit_threaded_buf);
+			g_jit_threaded_buf = nullptr;
 			g_jit_threaded_failed = true;
 			return 0;
 		}
-		memset(g_jit_threaded_program_slot, 0, 4096);
-		g_rxjit_threaded_phase.store(2, std::memory_order_relaxed);
-
-		// 2) allocate vm_state (aligned). aligned_alloc requires the size to be
-		// a multiple of the alignment, so round up to the next 16-byte multiple.
-		static_assert(alignof(rxjit_vm_state_t) <= 16, "vm_state alignment");
-		const size_t vm_alloc_sz = (sizeof(rxjit_vm_state_t) + 15) & ~(size_t)15;
-		g_jit_threaded_vm_state = (rxjit_vm_state_t *)aligned_alloc(16, vm_alloc_sz);
-		if (!g_jit_threaded_vm_state) {
-			g_rxjit_threaded_phase.store(102, std::memory_order_relaxed);
-			free(g_jit_threaded_program_slot);
-			g_jit_threaded_program_slot = nullptr;
-			g_jit_threaded_failed = true;
-			return 0;
-		}
-		memset(g_jit_threaded_vm_state, 0, sizeof(rxjit_vm_state_t));
+		memset(blk, 0, RXJIT_ARENA_SIZE);
+		g_jit_threaded_vm_state = (rxjit_vm_state_t *)(blk + RXJIT_ARENA_VM_OFF);
+		g_jit_threaded_program_slot = blk + RXJIT_ARENA_SLOT_OFF;
 		g_jit_threaded_vm_state->mmask[0] = DYNAMIC_MANTISSA_MASK;
 		g_jit_threaded_vm_state->mmask[1] = DYNAMIC_MANTISSA_MASK;
 		g_rxjit_threaded_phase.store(3, std::memory_order_relaxed);
+	}
 
-		// 3) generate the threaded module bytes (with per-thread pointers baked)
+	// 2) generate the threaded module bytes (with per-thread pointers baked):
+	// once per thread, and again whenever the scratchpad moves (a new VM on
+	// this pthread). The JS side sees thrLen > 0 and recompiles.
+	if (!g_jit_threaded_initted || (uint32_t)(uintptr_t)scratchpad != g_jit_threaded_baked_sp) {
 		int regs_in_mem = g_rxjit_regs_in_memory.load(std::memory_order_relaxed);
 		int split_id = g_rxjit_split_inner_dispatch.load(std::memory_order_relaxed);
 		int feature = g_rxjit_feature.load(std::memory_order_relaxed);
@@ -674,16 +690,19 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 		    (uint32_t)(uintptr_t)dataset, (uint32_t)(uintptr_t)g_jit_threaded_program_slot, 1,
 		    g_jit_max_memory_pages, feature, regs_in_mem, split_id, g_jit_threaded_buf);
 		g_rxjit_threaded_module_size.store(sz, std::memory_order_relaxed);
-		if (sz == 0 || sz > sizeof(g_jit_threaded_buf)) {
+		if (sz == 0 || sz > RXJIT_THREADED_BUF_SIZE) {
 			g_rxjit_threaded_phase.store(103, std::memory_order_relaxed);
-			free(g_jit_threaded_program_slot);
-			free(g_jit_threaded_vm_state);
+			free(g_jit_threaded_vm_state); // the arena base; the slot lives inside it
+			free(g_jit_threaded_buf);
 			g_jit_threaded_program_slot = nullptr;
 			g_jit_threaded_vm_state = nullptr;
+			g_jit_threaded_buf = nullptr;
+			g_jit_threaded_size = 0;
 			g_jit_threaded_failed = true;
 			return 0;
 		}
 		g_jit_threaded_size = sz;
+		g_jit_threaded_baked_sp = (uint32_t)(uintptr_t)scratchpad;
 		g_jit_threaded_initted = true;
 		g_rxjit_threaded_phase.store(10, std::memory_order_relaxed);
 	}

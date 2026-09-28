@@ -10,6 +10,24 @@
 #include <stdint.h>
 #include "wasm_jit_gen.h" // rxjit_vm_state_t
 
+// Per-thread arena: one aligned_alloc(RXJIT_ARENA_ALIGN, RXJIT_ARENA_SIZE)
+// block per pthread holds vm_state and the program slot (M4 cache lines are
+// 128 B, so nothing is shared with other threads' data).
+//   +0     rxjit_vm_state_t (312 B)          vm_state_ptr = blk
+//   +320   rounding-mask table, 4 x 128 B
+//   +832   64 B layout-pad dummy-store area (feature bits 256..1024)
+//   +896   u32 scratchpad base
+//   +1024  program slot: 256 records x 16 B  program_slot_ptr = blk + 1024
+//   +5120  sentinel record #256
+#define RXJIT_ARENA_ALIGN     128
+#define RXJIT_ARENA_VM_OFF    0
+#define RXJIT_ARENA_RMASK_OFF 320
+#define RXJIT_ARENA_PAD_OFF   832
+#define RXJIT_ARENA_SPB_OFF   896
+#define RXJIT_ARENA_SLOT_OFF  1024
+#define RXJIT_ARENA_SENT_OFF  5120
+#define RXJIT_ARENA_SIZE      6144
+
 #ifdef __cplusplus
 extern "C" {
 #endif

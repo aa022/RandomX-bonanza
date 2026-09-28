@@ -84,6 +84,28 @@
 #define LOCT_ds_ptr       37
 #define LOCT_tmp64_b      38
 #define LOCT_v128_scratch 39
+// Reserved locals (declared in emit_local_decls; unused locals are free in
+// TurboFan). NEVER use LOC_m0..m3 / LOC_ft* from wasm_jit_inst_locals.h here:
+// their indices 29..38 collide with the LOCT_* i32 locals above.
+#define LOCT_m0           40 // i64: inline mulh temps
+#define LOCT_m1           41
+#define LOCT_m2           42
+#define LOCT_m3           43
+#define LOCT_fa           44 // v128: inline rounding temps
+#define LOCT_fb           45
+#define LOCT_fc           46
+#define LOCT_fr           47
+#define LOCT_fs           48
+#define LOCT_mTEG         49 // v128: rounding masks
+#define LOCT_mTEL         50
+#define LOCT_mK1          51
+#define LOCT_mK2          52
+#define LOCT_mD1          53
+#define LOCT_mD3          54
+#define LOCT_mKON         55
+#define LOCT_rmoff        56 // i32: rounding-mask table offset
+#define LOCT_spb          57 // i32: scratchpad base
+#define LOCT_spare        58 // i32
 
 // Function indices in the threaded module (no imports, so first locally-
 // defined function is index 0).
@@ -1110,7 +1132,7 @@ static uint32_t emit_inner_pc_loop(uint32_t scratchpad_ptr, uint32_t program_slo
 static uint32_t emit_local_decls(uint8_t *buf) {
 	THUNK_BEGIN;
 	WASM_U8_THUNK({
-		8,                                  // 8 local groups
+		11,                                 // 11 local groups
 		8,  WASM_TYPE_I64,                  // R(0..7) (unused if regs_in_mem)
 		12, WASM_TYPE_V128,                 // F/E/A (unused if split_id)
 		6,  WASM_TYPE_I32,                  // sp_addr0/1, mx, ma, tmp, ic
@@ -1119,6 +1141,9 @@ static uint32_t emit_local_decls(uint8_t *buf) {
 		9,  WASM_TYPE_I32,                  // threaded i32 locals (inst_ptr/pc/...)
 		1,  WASM_TYPE_I64,                  // tmp64_b
 		1,  WASM_TYPE_V128,                 // v128_scratch
+		4,  WASM_TYPE_I64,                  // 40..43 LOCT_m0..m3
+		12, WASM_TYPE_V128,                 // 44..55 LOCT_fa..fs, LOCT_mTEG..mKON
+		3,  WASM_TYPE_I32,                  // 56..58 LOCT_rmoff, spb, spare
 	});
 	THUNK_END;
 }
@@ -1133,6 +1158,17 @@ static uint32_t emit_local_decls(uint8_t *buf) {
 static uint32_t emit_inner_dispatch_fn(uint32_t vm_state_ptr, uint32_t scratchpad_ptr,
                                        uint32_t program_slot_ptr, int jit_feature, uint8_t *buf) {
 	THUNK_BEGIN;
+	// Debug layout-pad knob (feature bits 256..1024): n dummy i32 stores into
+	// the arena's pad area, each ~3 ARM64 instructions, shifting all code
+	// that follows. Used to average A/B measurements over code layouts.
+	{
+		int pad = (jit_feature >> RXJIT_FEATURE_PAD_SHIFT) & 7;
+		for (int i = 0; i < pad; i++) {
+			WI32_CONST(0);
+			WI32_CONST(0);
+			I32_STORE_OFF(vm_state_ptr + RXJIT_ARENA_PAD_OFF + 4 * i);
+		}
+	}
 	// vm_state pointer in LOC_tmp; many arms expect this (K_FDIV_M loads mask
 	// constants from it via the preloaded mask locals, but the addr load
 	// helpers don't reference LOC_tmp directly — they use LOCT_inst_ptr).
