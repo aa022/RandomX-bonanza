@@ -30,12 +30,13 @@
 //   node bench/bench_webui.mjs --profile arm            # generator profile auto|arm|x86 (default auto)
 //   node bench/bench_webui.mjs --fuse-n 800 --stats     # knob override; --stats adds dispatches/op
 //   node bench/bench_webui.mjs --unroll2                # 2x dispatch replication (--unroll2 0: off)
+//   node bench/bench_webui.mjs --shared-code 0          # per-thread module bytes (x86 profile default: 1)
 
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { writeFileSync } from 'fs';
-import { parseProfileArgs, applyProfile, profileHeader, staticDispatchesPerOp } from './profile_args.mjs';
+import { parseProfileArgs, applyProfile, profileHeader, staticDispatchesPerOp, moduleHashLine } from './profile_args.mjs';
 
 const __dirname    = dirname(fileURLToPath(import.meta.url));
 const require      = createRequire(import.meta.url);
@@ -261,6 +262,7 @@ async function main() {
       console.error(`[stats] static dispatches/op=${staticDispatchesPerOp(Module).toFixed(3)} ` +
         `(${Module._rxjit_stat_decoded_programs()} programs decoded)`);
     }
+    if (Module._rxjit_stat_module_hash) console.error(`[stats] ${moduleHashLine(Module)}`);
   }
 
   const result = {

@@ -107,6 +107,7 @@
 #define LOCT_rmoff        56 // i32: rounding-mask table offset
 #define LOCT_spb          57 // i32: scratchpad base
 #define LOCT_spare        58 // i32
+#define LOCT_arena        LOCT_spare // i32: shared_code arena base (TGLOB_arena)
 #define LOCT_fx1          59 // v128: no-FMA Dekker temps (step 8 part B; declared only without FMA)
 #define LOCT_fx2          60
 
@@ -131,6 +132,9 @@
 
 // Mutable i32 global: fprc (same role as in static/dynamic modules).
 #define TGLOB_fprc 0
+// shared_code only: exported mutable i32 global "a" = this thread's arena base
+// (vm_state), set by rxjit_js_run_threaded after instantiation.
+#define TGLOB_arena 1
 
 // ---------------- V3 module-gen flags (thread-local) ----------------
 //
@@ -161,6 +165,18 @@ static _Thread_local int g_emit_split_id = 0;
 // Program slot address (records 0..255; sentinel EXIT record at +4096).
 // Used by the CBRANCH taken path to form the target record pointer.
 static _Thread_local uint32_t g_slot = 0;
+
+// shared_code (wasm_jit_profile.h): no per-thread pointer in the module bytes,
+// so every thread generates the same bytes and V8's native module cache
+// compiles them once for all workers. main_loop and inner_dispatch read the
+// arena base from global TGLOB_arena into LOCT_arena once at entry; the
+// generator then works with arena-relative "pointers" (vm_state_ptr = 0,
+// g_r_file_base = 0, g_slot = RXJIT_ARENA_SLOT_OFF) and every vm_state /
+// arena / slot access adds LOCT_arena (the macros below). main_loop's steps
+// read the scratchpad base from the arena's SPB slot (LOCT_spb), like
+// inner_dispatch. The records keep their absolute operand addresses (data,
+// decoded per thread). Off: every macro emits exactly the old bytes.
+static _Thread_local int g_shared = 0;
 
 // vm_state offsets (mirrors rxjit_vm_state_t in wasm_jit_gen.h).
 #define VM_R0_OFFSET    0
@@ -382,6 +398,47 @@ static _Thread_local int g_unroll_c0 = 0;
 		WASM_U8(3);                 \
 		WASM_U32((uint32_t)(off));  \
 	} while (0)
+// shared_code addressing (g_shared). ARENA_BASE: the address operand of a
+// vm_state / arena access whose memarg offset is g_r_file_base + X (baked:
+// i32.const 0; shared: LOCT_arena, the offset being arena-relative).
+// ARENA_ADD: after a computed index (idx << 3, fprc << 7), add the arena base.
+// ARENA_PTR(a): a pointer value (baked: i32.const a; shared: LOCT_arena + a,
+// a arena-relative). SP_PTR(a): the scratchpad base (baked: i32.const a;
+// shared: LOCT_spb).
+#define ARENA_BASE()           \
+	do {                       \
+		if (g_shared)          \
+			LG(LOCT_arena);    \
+		else                   \
+			WI32_CONST(0);     \
+	} while (0)
+#define ARENA_ADD()            \
+	do {                       \
+		if (g_shared) {        \
+			LG(LOCT_arena);    \
+			I32_ADD();         \
+		}                      \
+	} while (0)
+#define ARENA_PTR(a)                   \
+	do {                               \
+		if (!g_shared) {               \
+			WI32_CONST(a);             \
+		} else {                       \
+			LG(LOCT_arena);            \
+			if (a) {                   \
+				WI32_CONST(a);         \
+				I32_ADD();             \
+			}                          \
+		}                              \
+	} while (0)
+#define SP_PTR(a)              \
+	do {                       \
+		if (g_shared)          \
+			LG(LOCT_spb);      \
+		else                   \
+			WI32_CONST(a);     \
+	} while (0)
+
 // i32.load8_u align=0 offset=$off  (alias)
 // i32.const + i32.add pattern: `i32.const $base; LG; i32.add`
 #define I32_BASE_PLUS_LOCAL(base, loc) \
@@ -407,6 +464,7 @@ static uint32_t emit_select_r(int idx_local, uint8_t *buf) {
 		LG(idx_local);
 		WI32_CONST(3);
 		I32_SHL();
+		ARENA_ADD();
 		I64_LOAD_OFF(g_r_file_base);
 		THUNK_END;
 	}
@@ -463,6 +521,7 @@ static uint32_t emit_select_v128_mem(int idx_local, uint32_t bank_offset, uint8_
 	LG(idx_local);
 	WI32_CONST(4);
 	I32_SHL(); // idx * 16 (sizeof v128)
+	ARENA_ADD();
 	V128_LOAD_OFF(g_r_file_base + bank_offset);
 	THUNK_END;
 }
@@ -560,6 +619,7 @@ static uint32_t emit_store_r_i64(int idx_local, uint8_t *buf) {
 		LG(idx_local);
 		WI32_CONST(3);
 		I32_SHL();
+		ARENA_ADD();
 		LG(LOC_tmp64);
 		I64_STORE_OFF(g_r_file_base);
 		THUNK_END;
@@ -610,6 +670,7 @@ static uint32_t emit_store_v128_at(int target_base /* F(0) / E(0) / A(0) */, int
 		LG(idx_local);
 		WI32_CONST(4);
 		I32_SHL();             // idx * 16
+		ARENA_ADD();
 		LG(LOCT_v128_scratch); // re-push value
 		V128_STORE_OFF(g_r_file_base + bank_offset);
 		THUNK_END;
@@ -682,7 +743,7 @@ static uint32_t emit_ld_src(uint8_t *buf) {
 // parameters of the address helpers are kept for the signature only.
 static uint32_t emit_load_spb(uint8_t *buf) {
 	THUNK_BEGIN;
-	WI32_CONST(0);
+	ARENA_BASE();
 	I32_LOAD_OFF(g_r_file_base + RXJIT_ARENA_SPB_OFF);
 	LS(LOCT_spb);
 	THUNK_END;
@@ -784,6 +845,7 @@ static uint32_t emit_load_round_masks(uint8_t *buf) {
 	GG(TGLOB_fprc);
 	WI32_CONST(7);
 	I32_SHL();
+	ARENA_ADD();
 	LS(LOCT_rmoff);
 	for (int i = 0; i < 7; i++) {
 		LG(LOCT_rmoff);
@@ -1111,7 +1173,7 @@ static uint32_t emit_stub_bodies(int jit_feature, uint8_t *buf) {
 // can use `local.get $LOC_tmp` + i64.load offset=$N to read fields).
 static uint32_t emit_vm_ptr_to_tmp(uint32_t vm_state_ptr, uint8_t *buf) {
 	THUNK_BEGIN;
-	WI32_CONST(vm_state_ptr);
+	ARENA_PTR(vm_state_ptr);
 	LS(LOC_tmp);
 	THUNK_END;
 }
@@ -1275,7 +1337,7 @@ static uint32_t emit_step1_sp_mix(uint8_t *buf) {
 static uint32_t emit_step2_xor_r(uint32_t scratchpad_ptr, uint8_t *buf) {
 	THUNK_BEGIN;
 	// LOC_tmp = scratchpad + sp_addr0
-	WI32_CONST(scratchpad_ptr);
+	SP_PTR(scratchpad_ptr);
 	LG(LOC_sp_addr0);
 	I32_ADD();
 	LS(LOC_tmp);
@@ -1283,10 +1345,10 @@ static uint32_t emit_step2_xor_r(uint32_t scratchpad_ptr, uint8_t *buf) {
 		for (int i = 0; i < 8; i++) {
 			// Stack: addr=0 (for store) ; sp[i] ; r[i] → xor → r[i]^sp[i]
 			//        i64.store pops (i32 addr, i64 value).
-			WI32_CONST(0);
+			ARENA_BASE();
 			LG(LOC_tmp);
 			I64_LOAD_OFF((uint32_t)(i * 8));
-			WI32_CONST(0);
+			ARENA_BASE();
 			I64_LOAD_OFF(g_r_file_base + (uint32_t)(i * 8));
 			I64_XOR();
 			I64_STORE_OFF(g_r_file_base + (uint32_t)(i * 8));
@@ -1309,20 +1371,20 @@ static uint32_t emit_step2_xor_r(uint32_t scratchpad_ptr, uint8_t *buf) {
 // split_id mode: results land in vm_state F/E slots (memory) instead of locals.
 static uint32_t emit_step3_load_fe(uint32_t scratchpad_ptr, uint8_t *buf) {
 	THUNK_BEGIN;
-	WI32_CONST(scratchpad_ptr);
+	SP_PTR(scratchpad_ptr);
 	LG(LOC_sp_addr1);
 	I32_ADD();
 	LS(LOC_tmp);
 	if (g_emit_split_id) {
 		for (int i = 0; i < 4; i++) {
-			WI32_CONST(0); // addr=0 for v128.store
+			ARENA_BASE(); // addr=0 for v128.store
 			LG(LOC_tmp);
 			V128_LOAD64_ZERO_OFF((uint32_t)(i * 8));
 			WASM_U8_THUNK({0xfd, 0xfe, 0x01}); // f64x2.convert_low_i32x4_s
 			V128_STORE_OFF(g_r_file_base + VM_F0_OFFSET + (uint32_t)(i * 16));
 		}
 		for (int i = 0; i < 4; i++) {
-			WI32_CONST(0); // addr=0 for v128.store
+			ARENA_BASE(); // addr=0 for v128.store
 			LG(LOC_tmp);
 			V128_LOAD64_ZERO_OFF((uint32_t)(32 + i * 8));
 			WASM_U8_THUNK({0xfd, 0xfe, 0x01}); // f64x2.convert_low_i32x4_s
@@ -1378,10 +1440,10 @@ static uint32_t emit_step7_dataset_xor(uint8_t *buf) {
 	LS(LOC_tmp);
 	if (g_emit_regs_in_mem) {
 		for (int i = 0; i < 8; i++) {
-			WI32_CONST(0);
+			ARENA_BASE();
 			LG(LOC_tmp);
 			I64_LOAD_OFF((uint32_t)(i * 8));
-			WI32_CONST(0);
+			ARENA_BASE();
 			I64_LOAD_OFF(g_r_file_base + (uint32_t)(i * 8));
 			I64_XOR();
 			I64_STORE_OFF(g_r_file_base + (uint32_t)(i * 8));
@@ -1412,14 +1474,14 @@ static uint32_t emit_step8_swap_mx_ma(uint8_t *buf) {
 //   V3 mode: r[i] loaded from linear memory; scratchpad store unchanged.
 static uint32_t emit_step9_store_r(uint32_t scratchpad_ptr, uint8_t *buf) {
 	THUNK_BEGIN;
-	WI32_CONST(scratchpad_ptr);
+	SP_PTR(scratchpad_ptr);
 	LG(LOC_sp_addr1);
 	I32_ADD();
 	LS(LOC_tmp);
 	if (g_emit_regs_in_mem) {
 		for (int i = 0; i < 8; i++) {
 			LG(LOC_tmp);
-			WI32_CONST(0);
+			ARENA_BASE();
 			I64_LOAD_OFF(g_r_file_base + (uint32_t)(i * 8));
 			I64_STORE_OFF((uint32_t)(i * 8));
 		}
@@ -1439,10 +1501,10 @@ static uint32_t emit_step10_f_xor_e(uint8_t *buf) {
 	THUNK_BEGIN;
 	if (g_emit_split_id) {
 		for (int i = 0; i < 4; i++) {
-			WI32_CONST(0); // addr=0 for store
-			WI32_CONST(0);
+			ARENA_BASE(); // addr=0 for store
+			ARENA_BASE();
 			V128_LOAD_OFF(g_r_file_base + VM_F0_OFFSET + (uint32_t)(i * 16));
-			WI32_CONST(0);
+			ARENA_BASE();
 			V128_LOAD_OFF(g_r_file_base + VM_E0_OFFSET + (uint32_t)(i * 16));
 			WASM_U8_THUNK({0xfd, 0x51}); // v128.xor
 			V128_STORE_OFF(g_r_file_base + VM_F0_OFFSET + (uint32_t)(i * 16));
@@ -1462,14 +1524,14 @@ static uint32_t emit_step10_f_xor_e(uint8_t *buf) {
 // split_id mode: read F[i] from vm_state slot.
 static uint32_t emit_step11_store_f(uint32_t scratchpad_ptr, uint8_t *buf) {
 	THUNK_BEGIN;
-	WI32_CONST(scratchpad_ptr);
+	SP_PTR(scratchpad_ptr);
 	LG(LOC_sp_addr0);
 	I32_ADD();
 	LS(LOC_tmp);
 	if (g_emit_split_id) {
 		for (int i = 0; i < 4; i++) {
 			LG(LOC_tmp);
-			WI32_CONST(0);
+			ARENA_BASE();
 			V128_LOAD_OFF(g_r_file_base + VM_F0_OFFSET + (uint32_t)(i * 16));
 			V128_STORE_OFF((uint32_t)(i * 16));
 		}
@@ -1508,8 +1570,13 @@ static uint32_t emit_inner_pc_loop(uint32_t scratchpad_ptr, uint32_t program_slo
 	if (rxjit_inline_round_any_on(jit_feature))
 		p += emit_load_round_masks(p); // once per call (256 ops); CFROUND reloads
 	p += emit_load_spb(p);             // step 9: opaque scratchpad base
-	WI32_CONST(program_slot_ptr);
-	I32_LOAD_OFF(RXJIT_ARENA_SENT_OFF - RXJIT_ARENA_SLOT_OFF + 12);
+	if (g_shared) { // arena-relative program_slot_ptr: fold it into the offset
+		LG(LOCT_arena);
+		I32_LOAD_OFF(program_slot_ptr + RXJIT_ARENA_SENT_OFF - RXJIT_ARENA_SLOT_OFF + 12);
+	} else {
+		WI32_CONST(program_slot_ptr);
+		I32_LOAD_OFF(RXJIT_ARENA_SENT_OFF - RXJIT_ARENA_SLOT_OFF + 12);
+	}
 	LS(LOCT_inst_ptr);
 	BLOCK_VOID(); // $exit
 	LOOP_VOID();  // $L
@@ -1581,13 +1648,17 @@ static uint32_t emit_local_decls(int jit_feature, uint8_t *buf) {
 static uint32_t emit_inner_dispatch_fn(uint32_t vm_state_ptr, uint32_t scratchpad_ptr,
                                        uint32_t program_slot_ptr, int jit_feature, uint8_t *buf) {
 	THUNK_BEGIN;
+	if (g_shared) { // shared_code: the arena base, once per call
+		GG(TGLOB_arena);
+		LS(LOCT_arena);
+	}
 	// Debug layout-pad knob (feature bits 256..1024): n dummy i32 stores into
 	// the arena's pad area, each ~3 ARM64 instructions, shifting all code
 	// that follows. Used to average A/B measurements over code layouts.
 	{
 		int pad = (jit_feature >> RXJIT_FEATURE_PAD_SHIFT) & 7;
 		for (int i = 0; i < pad; i++) {
-			WI32_CONST(0);
+			ARENA_BASE();
 			WI32_CONST(0);
 			I32_STORE_OFF(vm_state_ptr + RXJIT_ARENA_PAD_OFF + 4 * i);
 		}
@@ -1595,7 +1666,7 @@ static uint32_t emit_inner_dispatch_fn(uint32_t vm_state_ptr, uint32_t scratchpa
 	// vm_state pointer in LOC_tmp; many arms expect this (K_FDIV_M loads mask
 	// constants from it via the preloaded mask locals, but the addr load
 	// helpers don't reference LOC_tmp directly — they use LOCT_inst_ptr).
-	WI32_CONST(vm_state_ptr);
+	ARENA_PTR(vm_state_ptr);
 	LS(LOC_tmp);
 	// Preload v128 mask constants (used by K_FDIV_M arm).
 	LG(LOC_tmp);
@@ -1618,6 +1689,11 @@ static uint32_t emit_main_loop_body(uint32_t vm_state_ptr, uint32_t scratchpad_p
 	(void)program_slot_ptr; // consumed in emit_inner_dispatch
 	THUNK_BEGIN;
 
+	if (g_shared) { // shared_code: the arena base and scratchpad base, once per call
+		GG(TGLOB_arena);
+		LS(LOCT_arena);
+		p += emit_load_spb(p);
+	}
 	p += emit_prologue(vm_state_ptr, p);
 
 	// $ic = RANDOMX_PROGRAM_ITERATIONS
@@ -2224,7 +2300,7 @@ static uint32_t emit_arm_cbranch(int k, uint8_t *buf) {
 	I32_LOAD8U_OFF(g_ro + g_d_aux);
 	WI32_CONST(4);
 	I32_SHL();
-	WI32_CONST(g_slot);
+	ARENA_PTR(g_slot);
 	I32_ADD();
 	LS(LOCT_inst_ptr);
 	BR(ARM_BR_INNER(k) + 1); // +1 for the if block
@@ -2538,6 +2614,7 @@ uint32_t rxjit_generate_threaded_module(
 	int fuse_n,
 	int triples_n,
 	int kind16,
+	int shared_code,
 	uint8_t *buf)
 {
 	// Per-thread module-gen flags. VM_R0_OFFSET is 0, so r_file_base == vm_state_ptr.
@@ -2557,6 +2634,16 @@ uint32_t rxjit_generate_threaded_module(
 	g_fuse_n           = fuse_n;
 	g_kind16           = kind16;
 	g_d_aux            = kind16 ? 2 : 1;
+	g_shared           = shared_code != 0;
+	if (g_shared) {
+		// Arena-relative from here on (vm_state is the arena base); the
+		// scratchpad base comes from the arena's SPB slot, the dataset from
+		// vm_state (ds_ptr), so neither is baked.
+		vm_state_ptr     = RXJIT_ARENA_VM_OFF;
+		program_slot_ptr = RXJIT_ARENA_SLOT_OFF;
+		scratchpad_ptr   = 0;
+		dataset_ptr      = 0;
+	}
 	g_r_file_base      = vm_state_ptr + VM_R0_OFFSET;
 	g_slot             = program_slot_ptr;
 
@@ -2609,16 +2696,26 @@ uint32_t rxjit_generate_threaded_module(
 		});
 	});
 
-	// global section: 1 mutable i32 (fprc) init 0
+	// global section: 1 mutable i32 (fprc) init 0; shared_code adds the
+	// mutable i32 arena base (TGLOB_arena) init 0
 	WASM_SECTION(WASM_SECTION_GLOBAL, {
-		WASM_U8_THUNK({1, WASM_TYPE_I32, 0x01, 0x41, 0x00, 0x0b});
+		WASM_U8(g_shared ? 2 : 1);
+		WASM_U8_THUNK({WASM_TYPE_I32, 0x01, 0x41, 0x00, 0x0b});
+		if (g_shared) { // (WASM_U8_THUNK is two statements)
+			WASM_U8_THUNK({WASM_TYPE_I32, 0x01, 0x41, 0x00, 0x0b});
+		}
 	});
 
-	// export section: just "d" → main_loop (index depends on split)
+	// export section: "d" → main_loop (index depends on split); shared_code
+	// also exports global "a" (TGLOB_arena) for rxjit_js_run_threaded to set
 	WASM_SECTION(WASM_SECTION_EXPORT, {
-		WASM_U8(1);
+		WASM_U8(g_shared ? 2 : 1);
 		WASM_U8(1); WASM_U8('d'); WASM_U8(0x00);
 		WASM_U8(fn_main_loop_idx);
+		if (g_shared) {
+			WASM_U8(1); WASM_U8('a'); WASM_U8(0x03);
+			WASM_U8(TGLOB_arena);
+		}
 	});
 
 	// element section: populate the 5 tables (same as static module)

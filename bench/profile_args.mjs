@@ -4,11 +4,13 @@
 //   --fuse-n N               fused pairs, overrides the profile's
 //   --triples-n N            fused triples, overrides the profile's
 //   --unroll2 [0|1]          2x dispatch replication (bare = 1), overrides the profile's
+//   --shared-code 0|1        no per-thread pointer in the module bytes (one V8
+//                            machine-code copy for all threads), overrides the profile's
 //
 //   const prof = parseProfileArgs(args);
 //   ... _rxjit_set_feature(...) ...
 //   applyProfile(Module, prof);  // after the last set_feature, before the first hash
-//   profileHeader(Module, prof)  // 'profile=x86 (auto) fuse_n=200 triples_n=0 unroll2=0 kind16=0'
+//   profileHeader(Module, prof)  // 'profile=x86 (auto) fuse_n=800 triples_n=0 unroll2=0 kind16=1 shared=1'
 
 export const PROFILE_NAMES = ['arm', 'x86']; // index = RXJIT_PROFILE_*
 
@@ -25,12 +27,15 @@ export function parseProfileArgs(args) {
   };
   const u = args.indexOf('--unroll2'); // bare flag = 1; an optional 0|1 value follows
   const uv = u < 0 ? -1 : (args[u + 1] === '0' || args[u + 1] === '1') ? Number(args[u + 1]) : 1;
+  const sc = arg('--shared-code');
+  if (sc !== '' && sc !== '0' && sc !== '1') bad(`--shared-code wants 0|1, got '${sc}'`);
   return {
     name: req === 'auto' ? (process.arch === 'x64' ? 'x86' : 'arm') : req,
     mode: req === 'auto' ? 'auto' : 'forced',
     fuseN: knob('--fuse-n'),
     triplesN: knob('--triples-n'),
     unroll2: uv,
+    sharedCode: sc === '' ? -1 : Number(sc),
   };
 }
 
@@ -39,13 +44,23 @@ export function applyProfile(Module, prof) {
   Module._rxjit_set_fuse_n(prof.fuseN);
   Module._rxjit_set_triples_n(prof.triplesN);
   Module._rxjit_set_unroll2(prof.unroll2);
+  Module._rxjit_set_shared_code(prof.sharedCode);
 }
 
 // Effective values read back from C (the feature's NO_FUSE bit included).
 export function profileHeader(Module, prof) {
   return `profile=${PROFILE_NAMES[Module._rxjit_get_profile()]} (${prof.mode})` +
     ` fuse_n=${Module._rxjit_effective_fuse_n()} triples_n=${Module._rxjit_effective_triples_n()}` +
-    ` unroll2=${Module._rxjit_effective_unroll2()} kind16=${Module._rxjit_effective_kind16()}`;
+    ` unroll2=${Module._rxjit_effective_unroll2()} kind16=${Module._rxjit_effective_kind16()}` +
+    ` shared=${Module._rxjit_effective_shared_code()}`;
+}
+
+// Module-bytes identity: every generated threaded module is FNV-1a hashed; with
+// shared_code every thread's bytes must equal the first (mismatch=0).
+export function moduleHashLine(Module) {
+  const h = (Module._rxjit_stat_module_hash() >>> 0).toString(16).padStart(8, '0');
+  return `module bytes fnv1a=${h} same=${Module._rxjit_stat_module_hash_same() >>> 0}` +
+    ` mismatch=${Module._rxjit_stat_module_hash_mismatch() >>> 0}`;
 }
 
 // Static dispatches/op: dispatch records per decoded 256-op program.

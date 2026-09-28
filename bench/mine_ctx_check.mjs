@@ -3,12 +3,15 @@
 // the reported share's nonce lies in the call's range and its hash equals the
 // JIT-off (portable C) recomputation; with an all-0x00 target nothing is found.
 // Usage: node bench/mine_ctx_check.mjs [--threads 10] [--init-threads 10]
-//          [--profile auto|arm|x86] [--fuse-n N] [--triples-n N] [--unroll2 [0|1]]   (bench/profile_args.mjs)
+//          [--profile auto|arm|x86] [--fuse-n N] [--triples-n N] [--unroll2 [0|1]]
+//          [--shared-code 0|1]   (bench/profile_args.mjs)
+// Also prints the module-bytes identity stat: with shared_code, every
+// thread's module must equal the first (mismatch=0), else the gate fails.
 
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { parseProfileArgs, applyProfile, profileHeader } from './profile_args.mjs';
+import { parseProfileArgs, applyProfile, profileHeader, moduleHashLine } from './profile_args.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -88,6 +91,9 @@ for (const s of shares) {
   if (ref !== s.hash) fail(`call ${s.ci}: nonce ${s.nonce} hash ${s.hash} != ref ${ref}`);
 }
 const gen = profileHeader(M, PROF);
+console.log(moduleHashLine(M));
+if (M._rxjit_effective_shared_code() && (M._rxjit_stat_module_hash_mismatch() >>> 0))
+  fail('shared_code: threads generated different module bytes');
 if (bad) { console.error(`FAIL mine_ctx_check (${THREADS}T ${gen}): ${bad} problems`); process.exit(1); }
 console.log(`OK mine_ctx_check (${THREADS}T ${gen}): ${counts.length * 2} calls returned nonceCount, ${shares.length} shares match the portable interpreter`);
 process.exit(0);

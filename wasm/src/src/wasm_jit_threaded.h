@@ -52,6 +52,11 @@ extern "C" {
 //   triples_n       fused triple kinds, after the pairs (X2)
 //   kind16          record head width (rxjit_kind16); the decoder must be
 //                   called with the same fuse_n, triples_n and kind16
+//   shared_code     no per-thread pointer in the bytes (wasm_jit_profile.h):
+//                   the four pointers are ignored, the module exports a
+//                   mutable i32 global "a" that must be set to the arena
+//                   base (vm_state) before "d" runs, and every address is
+//                   arena-relative (the scratchpad base from +SPB_OFF)
 //   buf             output buffer (caller-owned), rxjit_threaded_buf_need() bytes
 //                   in wasm_jit_run.cpp; ~40 KiB at 200 pairs, far more
 //                   with every pair and triple.
@@ -64,7 +69,7 @@ uint32_t rxjit_generate_threaded_module(uint32_t vm_state_ptr, uint32_t scratchp
                                         uint32_t mem_min_pages, uint32_t mem_max_pages,
                                         int jit_feature, int regs_in_memory,
                                         int split_inner_dispatch, int fuse_n, int triples_n,
-                                        int kind16, uint8_t *buf);
+                                        int kind16, int shared_code, uint8_t *buf);
 
 #ifdef __cplusplus
 }

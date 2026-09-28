@@ -58,6 +58,16 @@ std::atomic<uint32_t> g_rxjit_run_us{0};
 std::atomic<uint64_t> g_rxjit_dispatches{0};
 std::atomic<uint64_t> g_rxjit_decoded_programs{0};
 
+// Module-bytes identity (the shared_code proof): FNV-1a 32 over every
+// generated threaded module. The first generation records (knob key << 32 |
+// hash) with a CAS from 0; each later one with the same knob key counts as
+// same (equal bytes) or mismatch (other bytes: some per-thread pointer is
+// baked, as expected without shared_code). Generations with another knob key
+// are not compared. Not cleared by rxjit_stat_reset.
+std::atomic<uint64_t> g_rxjit_modhash_first{0};
+std::atomic<uint32_t> g_rxjit_modhash_same{0};
+std::atomic<uint32_t> g_rxjit_modhash_mismatch{0};
+
 // Shared last-error buffer. Pthread workers write into this when JS catches
 // an exception during JIT module compile/instantiate; the main thread polls
 // it and surfaces to the UI. Last-write-wins is fine for diagnostics.
@@ -95,13 +105,14 @@ thread_local uint32_t g_jit_threaded_size = 0;
 // vm_state == arena base (the pointer to free), program slot at +1024.
 thread_local uint8_t *g_jit_threaded_program_slot = nullptr;
 thread_local rxjit_vm_state_t *g_jit_threaded_vm_state = nullptr;
-thread_local uint32_t g_jit_threaded_baked_sp = 0; // scratchpad baked into the module
+thread_local uint32_t g_jit_threaded_baked_sp = 0; // scratchpad in the arena SPB slot (and baked, unless shared_code)
 // The module's generation key besides the scratchpad: the decoder must use
 // exactly the fuse_n / triples_n / kind16 the module was generated with.
 thread_local int g_jit_threaded_feature = 0;
 thread_local int g_jit_threaded_fuse_n = 0;    // fused pair kinds the module was generated with
 thread_local int g_jit_threaded_triples_n = 0; // fused triple kinds (after the pairs)
 thread_local int g_jit_threaded_kind16 = 0; // record head width (rxjit_kind16)
+thread_local int g_jit_threaded_shared = 0; // shared_code: no pointers baked (wasm_jit_profile.h)
 thread_local bool g_jit_threaded_initted = false;
 thread_local bool g_jit_threaded_failed = false;
 
@@ -364,7 +375,7 @@ static int rxjit_js_run_superscalar(int, int, int, int, int) {
 #endif
 
 #ifdef __EMSCRIPTEN__
-EM_JS(int, rxjit_js_run_threaded, (int thrPtr, int thrLen), {
+EM_JS(int, rxjit_js_run_threaded, (int thrPtr, int thrLen, int arena), {
 	var ctx = (typeof self !== 'undefined') ? self
 	        : (typeof globalThis !== 'undefined') ? globalThis
 	        : {};
@@ -400,6 +411,9 @@ EM_JS(int, rxjit_js_run_threaded, (int thrPtr, int thrLen), {
 			buf.set(new Uint8Array(mem.buffer, thrPtr >>> 0, thrLen));
 			var mod = new WebAssembly.Module(buf);
 			var inst = new WebAssembly.Instance(mod, { e: { m: mem } });
+			// shared_code module: no pointer is baked, it reads this thread's
+			// arena base (vm_state) from its exported global "a".
+			if (inst.exports.a) inst.exports.a.value = arena;
 			ctx._rxjit_threaded = { inst: inst };
 			t1 = performance.now();
 			initUs = Math.round((t1 - t0) * 1000);
@@ -441,7 +455,7 @@ EM_JS(int, rxjit_js_run_threaded, (int thrPtr, int thrLen), {
 	}
 });
 #else
-static int rxjit_js_run_threaded(int, int) {
+static int rxjit_js_run_threaded(int, int, int) {
 	return 0;
 }
 #endif
@@ -616,6 +630,17 @@ EMSCRIPTEN_KEEPALIVE double rxjit_stat_dispatches(void) {
 EMSCRIPTEN_KEEPALIVE double rxjit_stat_decoded_programs(void) {
 	return (double)g_rxjit_decoded_programs.load(std::memory_order_relaxed);
 }
+// Module-bytes identity (g_rxjit_modhash_*): the first module's FNV-1a, and
+// how many later modules with the same knob key had equal / other bytes.
+EMSCRIPTEN_KEEPALIVE uint32_t rxjit_stat_module_hash(void) {
+	return (uint32_t)g_rxjit_modhash_first.load(std::memory_order_relaxed);
+}
+EMSCRIPTEN_KEEPALIVE uint32_t rxjit_stat_module_hash_same(void) {
+	return g_rxjit_modhash_same.load(std::memory_order_relaxed);
+}
+EMSCRIPTEN_KEEPALIVE uint32_t rxjit_stat_module_hash_mismatch(void) {
+	return g_rxjit_modhash_mismatch.load(std::memory_order_relaxed);
+}
 EMSCRIPTEN_KEEPALIVE void rxjit_stat_reset(void) {
 	g_rxjit_runs.store(0, std::memory_order_relaxed);
 	g_rxjit_fails.store(0, std::memory_order_relaxed);
@@ -663,6 +688,7 @@ static std::atomic<int> g_rxjit_profile{RXJIT_PROFILE_ARM};
 static std::atomic<int> g_rxjit_fuse_n_override{-1};    // -1: the profile's fuse_n
 static std::atomic<int> g_rxjit_triples_n_override{-1}; // -1: the profile's triples_n
 static std::atomic<int> g_rxjit_unroll2_override{-1};   // -1: the profile's unroll2 | bit 128
+static std::atomic<int> g_rxjit_shared_code_override{-1}; // -1: the profile's shared_code
 
 EMSCRIPTEN_KEEPALIVE
 void rxjit_set_profile(int id) {
@@ -687,6 +713,20 @@ void rxjit_set_triples_n(int n) {
 EMSCRIPTEN_KEEPALIVE
 void rxjit_set_unroll2(int on) {
 	g_rxjit_unroll2_override.store(on < 0 ? -1 : on != 0, std::memory_order_relaxed);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void rxjit_set_shared_code(int on) {
+	g_rxjit_shared_code_override.store(on < 0 ? -1 : on != 0, std::memory_order_relaxed);
+}
+
+// shared_code (no per-thread pointer in the module bytes, so V8 compiles one
+// copy for every thread): the rxjit_set_shared_code override (>= 0), else the
+// profile's. Part of the module regen key.
+static int rxjit_shared_code(void) {
+	int s = g_rxjit_shared_code_override.load(std::memory_order_relaxed);
+	if (s < 0) s = rxjit_profiles[g_rxjit_profile.load(std::memory_order_relaxed)].shared_code;
+	return s != 0;
 }
 
 int rxjit_fuse_n_for_feature(int jit_feature) {
@@ -742,6 +782,11 @@ int rxjit_effective_unroll2(void) {
 }
 
 EMSCRIPTEN_KEEPALIVE
+int rxjit_effective_shared_code(void) {
+	return rxjit_shared_code();
+}
+
+EMSCRIPTEN_KEEPALIVE
 uint32_t rxjit_test_generate(void *program256, void *vm_state, void *scratchpad, void *dataset,
                              uint64_t dataset_offset, uint32_t rr0, uint32_t rr1, uint32_t rr2,
                              uint32_t rr3, uint32_t mem_min_pages, uint32_t mem_max_pages,
@@ -762,6 +807,28 @@ uint32_t rxjit_test_generate_static(uint32_t mem_min_pages, uint32_t mem_max_pag
 } // extern "C"
 
 namespace randomx {
+
+// FNV-1a 32 (the g_rxjit_modhash_* module-bytes identity stat).
+static uint32_t rxjit_fnv1a(const void *data, size_t n) {
+	const uint8_t *b = (const uint8_t *)data;
+	uint32_t h = 2166136261u;
+	for (size_t i = 0; i < n; i++)
+		h = (h ^ b[i]) * 16777619u;
+	return h;
+}
+
+// Record a generated module's hash under its knob key (g_rxjit_modhash_*).
+static void rxjit_note_module_hash(const uint8_t *bytes, uint32_t n, const int *knobs,
+                                   size_t nknobs) {
+	const uint32_t key = rxjit_fnv1a(knobs, nknobs * sizeof(int)) | 1; // 0 = nothing recorded
+	const uint64_t mine = (uint64_t)key << 32 | rxjit_fnv1a(bytes, n);
+	uint64_t first = 0;
+	if (g_rxjit_modhash_first.compare_exchange_strong(first, mine, std::memory_order_relaxed))
+		return;
+	if ((uint32_t)(first >> 32) != key) return;
+	(first == mine ? g_rxjit_modhash_same : g_rxjit_modhash_mismatch)
+	    .fetch_add(1, std::memory_order_relaxed);
+}
 
 // ---------------- Threaded-interpreter path ----------------
 //
@@ -832,18 +899,22 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 		g_rxjit_threaded_phase.store(3, std::memory_order_relaxed);
 	}
 
-	// 2) generate the threaded module bytes (with per-thread pointers baked):
-	// once per thread, and again whenever the scratchpad moves (a new VM on
-	// this pthread) or the feature (incl. the effective UNROLL2 bit) / fuse_n /
-	// triples_n / record head width changes. The JS side sees thrLen > 0 and
-	// recompiles.
+	// 2) generate the threaded module bytes (with per-thread pointers baked,
+	// unless shared_code): once per thread, and again whenever the scratchpad
+	// moves (a new VM on this pthread; not with shared_code, whose module reads
+	// the base from the arena) or the feature (incl. the effective UNROLL2 bit)
+	// / fuse_n / triples_n / record head width / shared_code changes. The JS
+	// side sees thrLen > 0 and recompiles.
 	const int feature = rxjit_threaded_gen_feature(g_rxjit_feature.load(std::memory_order_relaxed));
 	const int fuse_n = rxjit_fuse_n_for_feature(feature);
 	const int triples_n = rxjit_triples_n_for_feature(feature);
 	const int kind16 = rxjit_kind16(fuse_n, triples_n);
-	if (!g_jit_threaded_initted || (uint32_t)(uintptr_t)scratchpad != g_jit_threaded_baked_sp ||
+	const int shared = rxjit_shared_code();
+	const uint32_t sp = (uint32_t)(uintptr_t)scratchpad;
+	if (!g_jit_threaded_initted || (!shared && sp != g_jit_threaded_baked_sp) ||
 	    feature != g_jit_threaded_feature || fuse_n != g_jit_threaded_fuse_n ||
-	    triples_n != g_jit_threaded_triples_n || kind16 != g_jit_threaded_kind16) {
+	    triples_n != g_jit_threaded_triples_n || kind16 != g_jit_threaded_kind16 ||
+	    shared != g_jit_threaded_shared) {
 		int regs_in_mem = g_rxjit_regs_in_memory.load(std::memory_order_relaxed);
 		int split_id = g_rxjit_split_inner_dispatch.load(std::memory_order_relaxed);
 		const size_t need = rxjit_threaded_buf_need(feature, kind16);
@@ -856,7 +927,7 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 		    (uint32_t)(uintptr_t)g_jit_threaded_vm_state, (uint32_t)(uintptr_t)scratchpad,
 		    (uint32_t)(uintptr_t)dataset, (uint32_t)(uintptr_t)g_jit_threaded_program_slot, 1,
 		    g_jit_max_memory_pages, feature, regs_in_mem, split_id, fuse_n, triples_n, kind16,
-		    g_jit_threaded_buf) : 0;
+		    shared, g_jit_threaded_buf) : 0;
 		g_rxjit_threaded_module_size.store(sz, std::memory_order_relaxed);
 		if (sz == 0 || sz > g_jit_threaded_buf_cap) {
 			g_rxjit_threaded_phase.store(103, std::memory_order_relaxed);
@@ -870,20 +941,27 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 			g_jit_threaded_failed = true;
 			return 0;
 		}
+		{
+			const int knobs[] = {feature,     fuse_n,   triples_n, kind16,
+			                     regs_in_mem, split_id, shared,    (int)g_jit_max_memory_pages};
+			rxjit_note_module_hash(g_jit_threaded_buf, sz, knobs, sizeof knobs / sizeof knobs[0]);
+		}
 		g_jit_threaded_size = sz;
-		g_jit_threaded_baked_sp = (uint32_t)(uintptr_t)scratchpad;
 		g_jit_threaded_feature = feature;
 		g_jit_threaded_fuse_n = fuse_n;
 		g_jit_threaded_triples_n = triples_n;
 		g_jit_threaded_kind16 = kind16;
-		// Step 9: inner_dispatch loads the scratchpad base from the arena into an
-		// opaque local (a baked i32.const would be rematerialised in every arm).
-		{
-			uint32_t spb = (uint32_t)(uintptr_t)scratchpad;
-			memcpy((uint8_t *)g_jit_threaded_vm_state + RXJIT_ARENA_SPB_OFF, &spb, 4);
-		}
+		g_jit_threaded_shared = shared;
 		g_jit_threaded_initted = true;
 		g_rxjit_threaded_phase.store(10, std::memory_order_relaxed);
+	}
+	// Step 9: inner_dispatch (with shared_code also main_loop) loads the
+	// scratchpad base from the arena into an opaque local (a baked i32.const
+	// would be rematerialised in every arm). Without shared_code a moved
+	// scratchpad also regenerated the module above (step 2 bakes it).
+	if (sp != g_jit_threaded_baked_sp) {
+		memcpy((uint8_t *)g_jit_threaded_vm_state + RXJIT_ARENA_SPB_OFF, &sp, 4);
+		g_jit_threaded_baked_sp = sp;
 	}
 
 	// Per-call: write inputs into vm_state.
@@ -921,8 +999,9 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 	if (first_js_call) {
 		g_rxjit_static_init_attempts.fetch_add(1, std::memory_order_relaxed);
 	}
-	int ok = rxjit_js_run_threaded((int)(uintptr_t)g_jit_threaded_buf,
-	                               (int)(first_js_call ? g_jit_threaded_size : 0));
+	int ok = rxjit_js_run_threaded(
+	    (int)(uintptr_t)g_jit_threaded_buf, (int)(first_js_call ? g_jit_threaded_size : 0),
+	    (int)(uintptr_t)((uint8_t *)g_jit_threaded_vm_state - RXJIT_ARENA_VM_OFF));
 	if (first_js_call) g_jit_threaded_size = 0; // bytes consumed; module is JS-side now
 	if (!ok) {
 		g_rxjit_fails.fetch_add(1, std::memory_order_relaxed);
