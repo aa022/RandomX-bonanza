@@ -325,12 +325,15 @@ static inline void rxjit_pack_v2(const rxjit_dec_idx_t *t, decoded_inst_t *o, ui
 		o->dst_addr = EA_d;
 		o->src_addr = AA_s;
 		break;
-	case RXJIT_K_FADD_M:
-	case RXJIT_K_FSUB_M:
+	case RXJIT_K_FADD_M_L1:
+	case RXJIT_K_FADD_M_L2:
+	case RXJIT_K_FSUB_M_L1:
+	case RXJIT_K_FSUB_M_L2:
 		o->dst_addr = FA_d;
 		o->src_addr = RA_s;
 		break;
-	case RXJIT_K_FDIV_M:
+	case RXJIT_K_FDIV_M_L1:
+	case RXJIT_K_FDIV_M_L2:
 		o->dst_addr = EA_d;
 		o->src_addr = RA_s;
 		break;
@@ -352,6 +355,9 @@ static inline void rxjit_pack_v2(const rxjit_dec_idx_t *t, decoded_inst_t *o, ui
 		break;
 	}
 }
+
+// L1/L2 kind split: MOD_MEM != 0 selects the L1 mask (RandomX level rule).
+#define L12(k1, k2) ((inst->mod & 3) ? (k1) : (k2))
 
 void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[256], uint32_t vm) {
 	int register_usage[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
@@ -381,7 +387,8 @@ void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[2
 		if (opcode < rxjit_ceil_IADD_M) {
 			o->dst = (uint8_t)(inst->dst % 8);
 			o->src = (uint8_t)(inst->src % 8);
-			o->opcode_kind = (o->src == o->dst) ? RXJIT_K_IADD_M_DIRECT : RXJIT_K_IADD_M_RR;
+			o->opcode_kind = (o->src == o->dst) ? RXJIT_K_IADD_M_DIRECT
+			                                    : L12(RXJIT_K_IADD_M_L1, RXJIT_K_IADD_M_L2);
 			register_usage[o->dst] = pc;
 			continue;
 		}
@@ -395,7 +402,8 @@ void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[2
 		if (opcode < rxjit_ceil_ISUB_M) {
 			o->dst = (uint8_t)(inst->dst % 8);
 			o->src = (uint8_t)(inst->src % 8);
-			o->opcode_kind = (o->src == o->dst) ? RXJIT_K_ISUB_M_DIRECT : RXJIT_K_ISUB_M_RR;
+			o->opcode_kind = (o->src == o->dst) ? RXJIT_K_ISUB_M_DIRECT
+			                                    : L12(RXJIT_K_ISUB_M_L1, RXJIT_K_ISUB_M_L2);
 			register_usage[o->dst] = pc;
 			continue;
 		}
@@ -409,7 +417,8 @@ void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[2
 		if (opcode < rxjit_ceil_IMUL_M) {
 			o->dst = (uint8_t)(inst->dst % 8);
 			o->src = (uint8_t)(inst->src % 8);
-			o->opcode_kind = (o->src == o->dst) ? RXJIT_K_IMUL_M_DIRECT : RXJIT_K_IMUL_M_RR;
+			o->opcode_kind = (o->src == o->dst) ? RXJIT_K_IMUL_M_DIRECT
+			                                    : L12(RXJIT_K_IMUL_M_L1, RXJIT_K_IMUL_M_L2);
 			register_usage[o->dst] = pc;
 			continue;
 		}
@@ -423,7 +432,8 @@ void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[2
 		if (opcode < rxjit_ceil_IMULH_M) {
 			o->dst = (uint8_t)(inst->dst % 8);
 			o->src = (uint8_t)(inst->src % 8);
-			o->opcode_kind = (o->src == o->dst) ? RXJIT_K_IMULH_M_DIRECT : RXJIT_K_IMULH_M_RR;
+			o->opcode_kind = (o->src == o->dst) ? RXJIT_K_IMULH_M_DIRECT
+			                                    : L12(RXJIT_K_IMULH_M_L1, RXJIT_K_IMULH_M_L2);
 			register_usage[o->dst] = pc;
 			continue;
 		}
@@ -437,7 +447,8 @@ void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[2
 		if (opcode < rxjit_ceil_ISMULH_M) {
 			o->dst = (uint8_t)(inst->dst % 8);
 			o->src = (uint8_t)(inst->src % 8);
-			o->opcode_kind = (o->src == o->dst) ? RXJIT_K_ISMULH_M_DIRECT : RXJIT_K_ISMULH_M_RR;
+			o->opcode_kind = (o->src == o->dst) ? RXJIT_K_ISMULH_M_DIRECT
+			                                    : L12(RXJIT_K_ISMULH_M_L1, RXJIT_K_ISMULH_M_L2);
 			register_usage[o->dst] = pc;
 			continue;
 		}
@@ -469,7 +480,8 @@ void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[2
 		if (opcode < rxjit_ceil_IXOR_M) {
 			o->dst = (uint8_t)(inst->dst % 8);
 			o->src = (uint8_t)(inst->src % 8);
-			o->opcode_kind = (o->src == o->dst) ? RXJIT_K_IXOR_M_DIRECT : RXJIT_K_IXOR_M_RR;
+			o->opcode_kind = (o->src == o->dst) ? RXJIT_K_IXOR_M_DIRECT
+			                                    : L12(RXJIT_K_IXOR_M_L1, RXJIT_K_IXOR_M_L2);
 			register_usage[o->dst] = pc;
 			continue;
 		}
@@ -521,7 +533,7 @@ void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[2
 		if (opcode < rxjit_ceil_FADD_M) {
 			o->dst = (uint8_t)(inst->dst % 4);
 			o->src = (uint8_t)(inst->src % 8);
-			o->opcode_kind = RXJIT_K_FADD_M;
+			o->opcode_kind = L12(RXJIT_K_FADD_M_L1, RXJIT_K_FADD_M_L2);
 			continue;
 		}
 		if (opcode < rxjit_ceil_FSUB_R) {
@@ -533,7 +545,7 @@ void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[2
 		if (opcode < rxjit_ceil_FSUB_M) {
 			o->dst = (uint8_t)(inst->dst % 4);
 			o->src = (uint8_t)(inst->src % 8);
-			o->opcode_kind = RXJIT_K_FSUB_M;
+			o->opcode_kind = L12(RXJIT_K_FSUB_M_L1, RXJIT_K_FSUB_M_L2);
 			continue;
 		}
 		if (opcode < rxjit_ceil_FSCAL_R) {
@@ -550,7 +562,7 @@ void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[2
 		if (opcode < rxjit_ceil_FDIV_M) {
 			o->dst = (uint8_t)(inst->dst % 4);
 			o->src = (uint8_t)(inst->src % 8);
-			o->opcode_kind = RXJIT_K_FDIV_M;
+			o->opcode_kind = L12(RXJIT_K_FDIV_M_L1, RXJIT_K_FDIV_M_L2);
 			continue;
 		}
 		if (opcode < rxjit_ceil_FSQRT_R) {
@@ -587,7 +599,9 @@ void rxjit_decode_for_interp(const rxjit_inst_t insts[256], decoded_inst_t out[2
 		if (opcode < rxjit_ceil_ISTORE) {
 			o->dst = (uint8_t)(inst->dst % 8);
 			o->src = (uint8_t)(inst->src % 8);
-			o->opcode_kind = (MOD_COND(inst->mod) < 14) ? RXJIT_K_ISTORE_L12 : RXJIT_K_ISTORE_L3;
+			o->opcode_kind = (MOD_COND(inst->mod) < 14)
+			                     ? L12(RXJIT_K_ISTORE_L1, RXJIT_K_ISTORE_L2)
+			                     : RXJIT_K_ISTORE_L3;
 			continue;
 		}
 		o->opcode_kind = RXJIT_K_NOP;

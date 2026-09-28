@@ -731,6 +731,12 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 		}
 		g_jit_threaded_size = sz;
 		g_jit_threaded_baked_sp = (uint32_t)(uintptr_t)scratchpad;
+		// Step 9: inner_dispatch loads the scratchpad base from the arena into an
+		// opaque local (a baked i32.const would be rematerialised in every arm).
+		{
+			uint32_t spb = (uint32_t)(uintptr_t)scratchpad;
+			memcpy((uint8_t *)g_jit_threaded_vm_state + RXJIT_ARENA_SPB_OFF, &spb, 4);
+		}
 		g_jit_threaded_initted = true;
 		g_rxjit_threaded_phase.store(10, std::memory_order_relaxed);
 	}

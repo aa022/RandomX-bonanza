@@ -74,27 +74,27 @@ enum {
 	RXJIT_K_NOP = 0,
 	RXJIT_K_IADD_RS,       // dst != REGISTER_NEEDS_DISPLACEMENT
 	RXJIT_K_IADD_RS_DISPL, // dst == REGISTER_NEEDS_DISPLACEMENT (5)
-	RXJIT_K_IADD_M_RR,     // src != dst (L1/L2 with reg offset)
+	RXJIT_K_IADD_M_L2, // src != dst, MOD_MEM == 0 (L2 mask)
 	RXJIT_K_IADD_M_DIRECT, // src == dst (L3, no reg offset)
 	RXJIT_K_ISUB_R,        // src != dst
 	RXJIT_K_ISUB_R_IMM,    // src == dst (use imm32)
-	RXJIT_K_ISUB_M_RR,
+	RXJIT_K_ISUB_M_L2, // src != dst, MOD_MEM == 0 (L2 mask)
 	RXJIT_K_ISUB_M_DIRECT,
 	RXJIT_K_IMUL_R,
 	RXJIT_K_IMUL_R_IMM,
-	RXJIT_K_IMUL_M_RR,
+	RXJIT_K_IMUL_M_L2, // src != dst, MOD_MEM == 0 (L2 mask)
 	RXJIT_K_IMUL_M_DIRECT,
 	RXJIT_K_IMULH_R,
-	RXJIT_K_IMULH_M_RR,
+	RXJIT_K_IMULH_M_L2, // src != dst, MOD_MEM == 0 (L2 mask)
 	RXJIT_K_IMULH_M_DIRECT,
 	RXJIT_K_ISMULH_R,
-	RXJIT_K_ISMULH_M_RR,
+	RXJIT_K_ISMULH_M_L2, // src != dst, MOD_MEM == 0 (L2 mask)
 	RXJIT_K_ISMULH_M_DIRECT,
 	RXJIT_K_IMUL_RCP,
 	RXJIT_K_INEG_R,
 	RXJIT_K_IXOR_R,
 	RXJIT_K_IXOR_R_IMM,
-	RXJIT_K_IXOR_M_RR,
+	RXJIT_K_IXOR_M_L2, // src != dst, MOD_MEM == 0 (L2 mask)
 	RXJIT_K_IXOR_M_DIRECT,
 	RXJIT_K_IROR_R,
 	RXJIT_K_IROR_R_IMM,
@@ -104,17 +104,28 @@ enum {
 	RXJIT_K_FSWAP_R_F, // dst < 4 (F register)
 	RXJIT_K_FSWAP_R_E, // dst >= 4 (E register; dst byte stores low 2 bits)
 	RXJIT_K_FADD_R,
-	RXJIT_K_FADD_M,
+	RXJIT_K_FADD_M_L2, // MOD_MEM == 0 (L2 mask)
 	RXJIT_K_FSUB_R,
-	RXJIT_K_FSUB_M,
+	RXJIT_K_FSUB_M_L2, // MOD_MEM == 0 (L2 mask)
 	RXJIT_K_FSCAL_R,
 	RXJIT_K_FMUL_R,
-	RXJIT_K_FDIV_M,
+	RXJIT_K_FDIV_M_L2, // MOD_MEM == 0 (L2 mask)
 	RXJIT_K_FSQRT_R,
 	RXJIT_K_CBRANCH,
 	RXJIT_K_CFROUND,
-	RXJIT_K_ISTORE_L12, // MOD_COND < 14 (L1 or L2 by MOD_MEM)
+	RXJIT_K_ISTORE_L2,  // MOD_COND < 14, MOD_MEM == 0
 	RXJIT_K_ISTORE_L3,  // MOD_COND >= 14
+	// L1 variants (MOD_MEM != 0): same arms as *_L2 with the L1 mask baked in.
+	RXJIT_K_IADD_M_L1,
+	RXJIT_K_ISUB_M_L1,
+	RXJIT_K_IMUL_M_L1,
+	RXJIT_K_IMULH_M_L1,
+	RXJIT_K_ISMULH_M_L1,
+	RXJIT_K_IXOR_M_L1,
+	RXJIT_K_FADD_M_L1,
+	RXJIT_K_FSUB_M_L1,
+	RXJIT_K_FDIV_M_L1,
+	RXJIT_K_ISTORE_L1,  // MOD_COND < 14, MOD_MEM != 0
 	RXJIT_K_EXIT,       // sentinel record #256 (never emitted by the decoder)
 	RXJIT_K_COUNT,      // marker; not a real kind
 };

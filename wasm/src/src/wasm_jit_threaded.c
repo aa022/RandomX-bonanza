@@ -650,25 +650,36 @@ static uint32_t emit_ld_src(uint8_t *buf) {
 		V128_LOAD_OFF(0);  \
 	} while (0)
 
-// L1/L2 address: ((u32)imm32 + (u32)r[reg]) & mask + scratchpad_base
-// (i32 math == low half of the i64 sum). mask is L1 if aux bit 2 set, else L2.
-// reg_local holds the address of the register.
-static uint32_t emit_addr_l1l2(uint32_t scratchpad_base, int reg_local, uint8_t *buf) {
+// Scratchpad base. Step 9: an opaque i32 local (LOCT_spb), loaded once per
+// inner_dispatch call from arena +RXJIT_ARENA_SPB_OFF (written by
+// wasm_jit_run.cpp), so each memory arm does one `add` instead of
+// rematerialising the constant (movz/movk/add). The scratchpad_base
+// parameters of the address helpers are kept for the signature only.
+static uint32_t emit_load_spb(uint8_t *buf) {
 	THUNK_BEGIN;
+	WI32_CONST(0);
+	I32_LOAD_OFF(g_r_file_base + RXJIT_ARENA_SPB_OFF);
+	LS(LOCT_spb);
+	THUNK_END;
+}
+#define SP_BASE() LG(LOCT_spb)
+
+// L1/L2 address: ((u32)imm32 + (u32)r[reg]) & mask + scratchpad_base
+// (i32 math == low half of the i64 sum). Step 5: mask (SCRATCHPAD_L1_MASK or
+// SCRATCHPAD_L2_MASK) is baked per kind; both are ARM64 logical immediates.
+// reg_local holds the address of the register.
+static uint32_t emit_addr_l1l2(uint32_t scratchpad_base, uint32_t mask, int reg_local,
+                               uint8_t *buf) {
+	THUNK_BEGIN;
+	(void)scratchpad_base;
 	LG(LOCT_inst_ptr);
 	I32_LOAD_OFF(g_ro + D_IMM32);
 	LG(reg_local);
 	I32_LOAD_OFF(0); // low 32 bits of r[reg] (little-endian)
 	I32_ADD();
-	WI32_CONST(SCRATCHPAD_L1_MASK);
-	WI32_CONST(SCRATCHPAD_L2_MASK);
-	LG(LOCT_inst_ptr);
-	I32_LOAD8U_OFF(g_ro + D_AUX);
-	WI32_CONST(RXJIT_FLAG_MEM_L1);
+	WI32_CONST(mask);
 	I32_AND();
-	SELECT_NUM();
-	I32_AND();
-	WI32_CONST(scratchpad_base);
+	SP_BASE();
 	I32_ADD();
 	THUNK_END;
 }
@@ -680,7 +691,8 @@ static uint32_t emit_addr_l3_direct(uint32_t scratchpad_base, uint8_t *buf) {
 	I32_LOAD_OFF(g_ro + D_IMM32);
 	WI32_CONST(SCRATCHPAD_L3_MASK);
 	I32_AND();
-	WI32_CONST(scratchpad_base);
+	(void)scratchpad_base;
+	SP_BASE();
 	I32_ADD();
 	THUNK_END;
 }
@@ -695,7 +707,8 @@ static uint32_t emit_addr_l3_reg(uint32_t scratchpad_base, int reg_local, uint8_
 	I32_ADD();
 	WI32_CONST(SCRATCHPAD_L3_MASK);
 	I32_AND();
-	WI32_CONST(scratchpad_base);
+	(void)scratchpad_base;
+	SP_BASE();
 	I32_ADD();
 	THUNK_END;
 }
@@ -1268,6 +1281,7 @@ static uint32_t emit_inner_pc_loop(uint32_t scratchpad_ptr, uint32_t program_slo
 	// no shared join); the EXIT sentinel at record #256 does `br $exit`.
 	if (rxjit_inline_round_on(jit_feature))
 		p += emit_load_round_masks(p); // once per call (256 ops); CFROUND reloads
+	p += emit_load_spb(p);             // step 9: opaque scratchpad base
 	WI32_CONST(program_slot_ptr);
 	I32_LOAD_OFF(RXJIT_ARENA_SENT_OFF - RXJIT_ARENA_SLOT_OFF + 12);
 	LS(LOCT_inst_ptr);
@@ -1499,13 +1513,14 @@ static uint32_t emit_arm_iadd_rs_displ(int k, uint8_t *buf) {
 }
 
 // Generic "r[dst] = r[dst] OP scratchpad[L1/L2 addr]" memory load arm
-static uint32_t emit_arm_alu_mem_l1l2(uint32_t scratchpad_ptr, uint8_t op, int k, uint8_t *buf) {
+static uint32_t emit_arm_alu_mem_l1l2(uint32_t scratchpad_ptr, uint32_t mask, uint8_t op, int k,
+                                      uint8_t *buf) {
 	THUNK_BEGIN;
 	p += emit_ld_dst(p);
 	p += emit_ld_src(p);
 	LG(LOCT_dst_byte);
 	RD64(LOCT_dst_byte);
-	p += emit_addr_l1l2(scratchpad_ptr, LOCT_src_byte, p);
+	p += emit_addr_l1l2(scratchpad_ptr, mask, LOCT_src_byte, p);
 	I64_LOAD_OFF(0);
 	WASM_U8(op);
 	I64_STORE_OFF(0);
@@ -1555,7 +1570,85 @@ static uint32_t emit_arm_alu_imm(uint8_t op, int k, uint8_t *buf) {
 	THUNK_END;
 }
 
+// Inline 64x64 -> high 64 multiply (step 6). Stack [a, b] -> [hi].
+// Unsigned (Hacker's Delight mulhu, 4 multiplies, no overflow anywhere):
+//   t  = aH*bL + ((aL*bL) >> 32)
+//   w1 = aL*bH + (t & M)
+//   hi = aH*bH + (t >> 32) + (w1 >> 32)
+// Signed: hi -= ((a >> 63) & b) + ((b >> 63) & a) (arithmetic shifts).
+// Uses LOCT_m0..m2 (40..42, i64); never LOC_m0..m3 (i32 collisions).
+// V8 does not inline the call-based stubs, so this makes the arm call-free.
+#define I64_SHR_S() WASM_U8(0x87)
+#define I64_SHR_U() WASM_U8(0x88)
+static uint32_t emit_mulh_inline(int is_signed, uint8_t *buf) {
+	THUNK_BEGIN;
+	LS(LOCT_m1); // b
+	LS(LOCT_m0); // a
+	// t = aH*bL + ((aL*bL) >> 32)
+	LG(LOCT_m0);
+	WI64_CONST(32);
+	I64_SHR_U();
+	LG(LOCT_m1);
+	WI64_CONST(0xffffffffLL);
+	I64_AND();
+	I64_MUL();
+	LG(LOCT_m0);
+	WI64_CONST(0xffffffffLL);
+	I64_AND();
+	LG(LOCT_m1);
+	WI64_CONST(0xffffffffLL);
+	I64_AND();
+	I64_MUL();
+	WI64_CONST(32);
+	I64_SHR_U();
+	I64_ADD();
+	LS(LOCT_m2);
+	// (aL*bH + (t & M)) >> 32
+	LG(LOCT_m0);
+	WI64_CONST(0xffffffffLL);
+	I64_AND();
+	LG(LOCT_m1);
+	WI64_CONST(32);
+	I64_SHR_U();
+	I64_MUL();
+	LG(LOCT_m2);
+	WI64_CONST(0xffffffffLL);
+	I64_AND();
+	I64_ADD();
+	WI64_CONST(32);
+	I64_SHR_U();
+	// + aH*bH + (t >> 32)
+	LG(LOCT_m0);
+	WI64_CONST(32);
+	I64_SHR_U();
+	LG(LOCT_m1);
+	WI64_CONST(32);
+	I64_SHR_U();
+	I64_MUL();
+	I64_ADD();
+	LG(LOCT_m2);
+	WI64_CONST(32);
+	I64_SHR_U();
+	I64_ADD();
+	if (is_signed) {
+		LG(LOCT_m0);
+		WI64_CONST(63);
+		I64_SHR_S();
+		LG(LOCT_m1);
+		I64_AND();
+		I64_SUB();
+		LG(LOCT_m1);
+		WI64_CONST(63);
+		I64_SHR_S();
+		LG(LOCT_m0);
+		I64_AND();
+		I64_SUB();
+	}
+	THUNK_END;
+}
+
 // K_IMULH_R / K_ISMULH_R: r[dst] = mulh(r[dst], r[src])
+// fn_idx: TFN_MULH = unsigned (IMULH), TFN_IMULH = signed (ISMULH).
 static uint32_t emit_arm_mulh_r(uint32_t fn_idx, int k, uint8_t *buf) {
 	THUNK_BEGIN;
 	p += emit_ld_dst(p);
@@ -1563,24 +1656,23 @@ static uint32_t emit_arm_mulh_r(uint32_t fn_idx, int k, uint8_t *buf) {
 	LG(LOCT_dst_byte);
 	RD64(LOCT_dst_byte);
 	RD64(LOCT_src_byte);
-	WASM_U8(0x10);
-	WASM_U32(fn_idx); // call <fn>
+	p += emit_mulh_inline(fn_idx == TFN_IMULH, p);
 	I64_STORE_OFF(0);
 	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
 }
 
 // K_IMULH_M_RR / K_ISMULH_M_RR: r[dst] = mulh(r[dst], mem_l1l2_load)
-static uint32_t emit_arm_mulh_m_rr(uint32_t scratchpad_ptr, uint32_t fn_idx, int k, uint8_t *buf) {
+static uint32_t emit_arm_mulh_m_rr(uint32_t scratchpad_ptr, uint32_t mask, uint32_t fn_idx, int k,
+                                   uint8_t *buf) {
 	THUNK_BEGIN;
 	p += emit_ld_dst(p);
 	p += emit_ld_src(p);
 	LG(LOCT_dst_byte);
 	RD64(LOCT_dst_byte);
-	p += emit_addr_l1l2(scratchpad_ptr, LOCT_src_byte, p);
+	p += emit_addr_l1l2(scratchpad_ptr, mask, LOCT_src_byte, p);
 	I64_LOAD_OFF(0);
-	WASM_U8(0x10);
-	WASM_U32(fn_idx);
+	p += emit_mulh_inline(fn_idx == TFN_IMULH, p);
 	I64_STORE_OFF(0);
 	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
@@ -1595,8 +1687,7 @@ static uint32_t emit_arm_mulh_m_direct(uint32_t scratchpad_ptr, uint32_t fn_idx,
 	RD64(LOCT_dst_byte);
 	p += emit_addr_l3_direct(scratchpad_ptr, p);
 	I64_LOAD_OFF(0);
-	WASM_U8(0x10);
-	WASM_U32(fn_idx);
+	p += emit_mulh_inline(fn_idx == TFN_IMULH, p);
 	I64_STORE_OFF(0);
 	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
@@ -1652,17 +1743,16 @@ static uint32_t emit_arm_fswap_r(int k, int jit_feature, uint8_t *buf) {
 	p += emit_ld_dst(p);
 	LG(LOCT_dst_byte);
 	RDV(LOCT_dst_byte);
-	// v128.const i8x16 [8..15, 0..7] — the swizzle indices that swap halves.
+	// Step 5: constant i8x16.shuffle [8..15, 0..7] (all lanes from the first
+	// operand; the second is a dummy zero). V8 lowers it to one `ext #8`
+	// instead of v128.const + swizzle (about 10 instructions).
+	(void)jit_feature;
+	V128_ZERO();
 	WASM_U8_THUNK({
-		0xfd, 0x0c,
+		0xfd, 0x0d, // i8x16.shuffle (lane bytes are raw, not LEB)
 		8, 9, 10, 11, 12, 13, 14, 15,
 		0, 1, 2, 3, 4, 5, 6, 7,
 	});
-	if (jit_feature & RXJIT_FEATURE_RELAXED_SIMD) {
-		WASM_U8_THUNK({0xfd, 0x80, 0x02}); // i8x16.relaxed_swizzle
-	} else {
-		WASM_U8_THUNK({0xfd, 0x0e}); // i8x16.swizzle
-	}
 	V128_STORE_OFF(0);
 	p += emit_arm_exit(k, 1, 0, p);
 	THUNK_END;
@@ -1750,11 +1840,13 @@ static uint32_t emit_arm_fbin_r(uint32_t tbl_idx, uint8_t native_op, int k, int 
 	THUNK_END;
 }
 
-// K_FADD_M / K_FSUB_M: F(dst) = op(F(dst), load_F_from_mem)
-// K_FDIV_M (mask=1):   E(dst) = div(E(dst), masked load_F_from_mem)
+// K_FADD_M_L1/L2 / K_FSUB_M_L1/L2: F(dst) = op(F(dst), load_F_from_mem)
+// K_FDIV_M_L1/L2 (emask=1):         E(dst) = div(E(dst), masked load_F_from_mem)
 //   load_F_from_mem = f64x2.convert_low_i32x4_s(v128.load64_zero(addr))
-static uint32_t emit_arm_fbin_m(uint32_t scratchpad_ptr, uint32_t tbl_idx, uint8_t native_op,
-                                int mask, int k, int jit_feature, uint8_t *buf) {
+//   mask = scratchpad L1/L2 address mask (baked per kind)
+static uint32_t emit_arm_fbin_m(uint32_t scratchpad_ptr, uint32_t mask, uint32_t tbl_idx,
+                                uint8_t native_op, int emask, int k, int jit_feature,
+                                uint8_t *buf) {
 	THUNK_BEGIN;
 	p += emit_ld_dst(p);
 	p += emit_ld_src(p);
@@ -1763,10 +1855,10 @@ static uint32_t emit_arm_fbin_m(uint32_t scratchpad_ptr, uint32_t tbl_idx, uint8
 	const int inl = rxjit_inline_round_on(jit_feature);
 	if (inl)
 		LS(LOCT_fa);
-	p += emit_addr_l1l2(scratchpad_ptr, LOCT_src_byte, p);
+	p += emit_addr_l1l2(scratchpad_ptr, mask, LOCT_src_byte, p);
 	WASM_U8_THUNK({0xfd, 0x5d, 3, 0});  // v128.load64_zero align=3 offset=0
 	WASM_U8_THUNK({0xfd, 0xfe, 0x01}); // f64x2.convert_low_i32x4_s
-	if (mask) {
+	if (emask) {
 		LG(LOC_mask_mant);
 		WASM_U8_THUNK({0xfd, 0x4e}); // v128.and
 		LG(LOC_mask_exp);
@@ -1893,13 +1985,13 @@ static uint32_t emit_arm_cfround(int k, int jit_feature, uint8_t *buf) {
 	THUNK_END;
 }
 
-// K_ISTORE_L12: store r[src] to scratchpad[(imm + r[dst]) & (L1|L2 mask)]
+// K_ISTORE_L1 / K_ISTORE_L2: store r[src] to scratchpad[(imm + r[dst]) & mask]
 //   Note: here dst is the address-source register, src is the value-source.
-static uint32_t emit_arm_istore_l12(uint32_t scratchpad_ptr, int k, uint8_t *buf) {
+static uint32_t emit_arm_istore_l12(uint32_t scratchpad_ptr, uint32_t mask, int k, uint8_t *buf) {
 	THUNK_BEGIN;
 	p += emit_ld_dst(p);
 	p += emit_ld_src(p);
-	p += emit_addr_l1l2(scratchpad_ptr, LOCT_dst_byte, p);
+	p += emit_addr_l1l2(scratchpad_ptr, mask, LOCT_dst_byte, p);
 	RD64(LOCT_src_byte);
 	I64_STORE_OFF(0);
 	p += emit_arm_exit(k, 1, 0, p);
@@ -1950,8 +2042,11 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 		case RXJIT_K_IADD_RS_DISPL:
 			p += emit_arm_iadd_rs_displ(k, p);
 			break;
-		case RXJIT_K_IADD_M_RR:
-			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, 0x7c /*add*/, k, p);
+		case RXJIT_K_IADD_M_L1:
+			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L1_MASK, 0x7c /*add*/, k, p);
+			break;
+		case RXJIT_K_IADD_M_L2:
+			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L2_MASK, 0x7c /*add*/, k, p);
 			break;
 		case RXJIT_K_IADD_M_DIRECT:
 			p += emit_arm_alu_mem_l3(scratchpad_ptr, 0x7c, k, p);
@@ -1962,8 +2057,11 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 		case RXJIT_K_ISUB_R_IMM:
 			p += emit_arm_alu_imm(0x7d, k, p);
 			break;
-		case RXJIT_K_ISUB_M_RR:
-			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, 0x7d, k, p);
+		case RXJIT_K_ISUB_M_L1:
+			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L1_MASK, 0x7d, k, p);
+			break;
+		case RXJIT_K_ISUB_M_L2:
+			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L2_MASK, 0x7d, k, p);
 			break;
 		case RXJIT_K_ISUB_M_DIRECT:
 			p += emit_arm_alu_mem_l3(scratchpad_ptr, 0x7d, k, p);
@@ -1974,8 +2072,11 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 		case RXJIT_K_IMUL_R_IMM:
 			p += emit_arm_alu_imm(0x7e, k, p);
 			break;
-		case RXJIT_K_IMUL_M_RR:
-			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, 0x7e, k, p);
+		case RXJIT_K_IMUL_M_L1:
+			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L1_MASK, 0x7e, k, p);
+			break;
+		case RXJIT_K_IMUL_M_L2:
+			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L2_MASK, 0x7e, k, p);
 			break;
 		case RXJIT_K_IMUL_M_DIRECT:
 			p += emit_arm_alu_mem_l3(scratchpad_ptr, 0x7e, k, p);
@@ -1983,8 +2084,11 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 		case RXJIT_K_IMULH_R:
 			p += emit_arm_mulh_r(TFN_MULH, k, p);
 			break;
-		case RXJIT_K_IMULH_M_RR:
-			p += emit_arm_mulh_m_rr(scratchpad_ptr, TFN_MULH, k, p);
+		case RXJIT_K_IMULH_M_L1:
+			p += emit_arm_mulh_m_rr(scratchpad_ptr, SCRATCHPAD_L1_MASK, TFN_MULH, k, p);
+			break;
+		case RXJIT_K_IMULH_M_L2:
+			p += emit_arm_mulh_m_rr(scratchpad_ptr, SCRATCHPAD_L2_MASK, TFN_MULH, k, p);
 			break;
 		case RXJIT_K_IMULH_M_DIRECT:
 			p += emit_arm_mulh_m_direct(scratchpad_ptr, TFN_MULH, k, p);
@@ -1992,8 +2096,11 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 		case RXJIT_K_ISMULH_R:
 			p += emit_arm_mulh_r(TFN_IMULH, k, p);
 			break;
-		case RXJIT_K_ISMULH_M_RR:
-			p += emit_arm_mulh_m_rr(scratchpad_ptr, TFN_IMULH, k, p);
+		case RXJIT_K_ISMULH_M_L1:
+			p += emit_arm_mulh_m_rr(scratchpad_ptr, SCRATCHPAD_L1_MASK, TFN_IMULH, k, p);
+			break;
+		case RXJIT_K_ISMULH_M_L2:
+			p += emit_arm_mulh_m_rr(scratchpad_ptr, SCRATCHPAD_L2_MASK, TFN_IMULH, k, p);
 			break;
 		case RXJIT_K_ISMULH_M_DIRECT:
 			p += emit_arm_mulh_m_direct(scratchpad_ptr, TFN_IMULH, k, p);
@@ -2010,8 +2117,11 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 		case RXJIT_K_IXOR_R_IMM:
 			p += emit_arm_alu_imm(0x85, k, p);
 			break;
-		case RXJIT_K_IXOR_M_RR:
-			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, 0x85, k, p);
+		case RXJIT_K_IXOR_M_L1:
+			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L1_MASK, 0x85, k, p);
+			break;
+		case RXJIT_K_IXOR_M_L2:
+			p += emit_arm_alu_mem_l1l2(scratchpad_ptr, SCRATCHPAD_L2_MASK, 0x85, k, p);
 			break;
 		case RXJIT_K_IXOR_M_DIRECT:
 			p += emit_arm_alu_mem_l3(scratchpad_ptr, 0x85, k, p);
@@ -2040,14 +2150,20 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 		case RXJIT_K_FADD_R:
 			p += emit_arm_fbin_r(TBL_FADD, 0xf0 /* f64x2.add */, k, jit_feature, p);
 			break;
-		case RXJIT_K_FADD_M:
-			p += emit_arm_fbin_m(scratchpad_ptr, TBL_FADD, 0xf0, 0, k, jit_feature, p);
+		case RXJIT_K_FADD_M_L1:
+			p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L1_MASK, TBL_FADD, 0xf0, 0, k, jit_feature, p);
+			break;
+		case RXJIT_K_FADD_M_L2:
+			p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L2_MASK, TBL_FADD, 0xf0, 0, k, jit_feature, p);
 			break;
 		case RXJIT_K_FSUB_R:
 			p += emit_arm_fbin_r(TBL_FSUB, 0xf1 /* f64x2.sub */, k, jit_feature, p);
 			break;
-		case RXJIT_K_FSUB_M:
-			p += emit_arm_fbin_m(scratchpad_ptr, TBL_FSUB, 0xf1, 0, k, jit_feature, p);
+		case RXJIT_K_FSUB_M_L1:
+			p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L1_MASK, TBL_FSUB, 0xf1, 0, k, jit_feature, p);
+			break;
+		case RXJIT_K_FSUB_M_L2:
+			p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L2_MASK, TBL_FSUB, 0xf1, 0, k, jit_feature, p);
 			break;
 		case RXJIT_K_FSCAL_R:
 			p += emit_arm_fscal_r(k, p);
@@ -2055,8 +2171,11 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 		case RXJIT_K_FMUL_R:
 			p += emit_arm_fbin_r(TBL_FMUL, 0xf2 /* f64x2.mul */, k, jit_feature, p);
 			break;
-		case RXJIT_K_FDIV_M:
-			p += emit_arm_fbin_m(scratchpad_ptr, TBL_FDIV, 0xf3 /* f64x2.div */, 1, k, jit_feature, p);
+		case RXJIT_K_FDIV_M_L1:
+			p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L1_MASK, TBL_FDIV, 0xf3 /* f64x2.div */, 1, k, jit_feature, p);
+			break;
+		case RXJIT_K_FDIV_M_L2:
+			p += emit_arm_fbin_m(scratchpad_ptr, SCRATCHPAD_L2_MASK, TBL_FDIV, 0xf3 /* f64x2.div */, 1, k, jit_feature, p);
 			break;
 		case RXJIT_K_FSQRT_R:
 			p += emit_arm_fsqrt_r(k, jit_feature, p);
@@ -2067,8 +2186,11 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 		case RXJIT_K_CFROUND:
 			p += emit_arm_cfround(k, jit_feature, p);
 			break;
-		case RXJIT_K_ISTORE_L12:
-			p += emit_arm_istore_l12(scratchpad_ptr, k, p);
+		case RXJIT_K_ISTORE_L1:
+			p += emit_arm_istore_l12(scratchpad_ptr, SCRATCHPAD_L1_MASK, k, p);
+			break;
+		case RXJIT_K_ISTORE_L2:
+			p += emit_arm_istore_l12(scratchpad_ptr, SCRATCHPAD_L2_MASK, k, p);
 			break;
 		case RXJIT_K_ISTORE_L3:
 			p += emit_arm_istore_l3(scratchpad_ptr, k, p);
