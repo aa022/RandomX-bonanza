@@ -363,3 +363,74 @@ rx_vec_i128 soft_aesdec(rx_vec_i128 in, rx_vec_i128 key) {
 
 	return rx_xor_vec_i128(out, key);
 }
+
+// ---- SIMD AES (vpaes-style, soft_aes.h) ----
+extern "C" int g_rx_aes_simd = 0;
+
+#if defined(__wasm_simd128__)
+#include <emscripten.h>
+
+// Nibble tables: inv/inva/ipt_* and sbo_* (= OpenSSL vpaes .Lk_inv, .Lk_ipt,
+// .Lk_sbo); dipt_* = ipt o A^-1 with ipt(A^-1(0x63)) folded into dipt_lo;
+// dsbo_* = GF(2^8) inverse in the standard basis from (io, jo). Derived and
+// checked on all 256 bytes by bench/prof/x86/vpaes_derive.py.
+extern "C" alignas(16) const rx_aes_simd_k rx_aes_simd_tab = {
+	wasm_i8x16_const((int8_t)0x0f, (int8_t)0x0f, (int8_t)0x0f, (int8_t)0x0f, (int8_t)0x0f, (int8_t)0x0f, (int8_t)0x0f, (int8_t)0x0f, (int8_t)0x0f, (int8_t)0x0f, (int8_t)0x0f, (int8_t)0x0f, (int8_t)0x0f, (int8_t)0x0f, (int8_t)0x0f, (int8_t)0x0f), // m0f
+	wasm_i8x16_const((int8_t)0x1b, (int8_t)0x1b, (int8_t)0x1b, (int8_t)0x1b, (int8_t)0x1b, (int8_t)0x1b, (int8_t)0x1b, (int8_t)0x1b, (int8_t)0x1b, (int8_t)0x1b, (int8_t)0x1b, (int8_t)0x1b, (int8_t)0x1b, (int8_t)0x1b, (int8_t)0x1b, (int8_t)0x1b), // c1b
+	wasm_i8x16_const((int8_t)0x63, (int8_t)0x63, (int8_t)0x63, (int8_t)0x63, (int8_t)0x63, (int8_t)0x63, (int8_t)0x63, (int8_t)0x63, (int8_t)0x63, (int8_t)0x63, (int8_t)0x63, (int8_t)0x63, (int8_t)0x63, (int8_t)0x63, (int8_t)0x63, (int8_t)0x63), // c63
+	wasm_i8x16_const((int8_t)0x00, (int8_t)0x70, (int8_t)0x2a, (int8_t)0x5a, (int8_t)0x98, (int8_t)0xe8, (int8_t)0xb2, (int8_t)0xc2, (int8_t)0x08, (int8_t)0x78, (int8_t)0x22, (int8_t)0x52, (int8_t)0x90, (int8_t)0xe0, (int8_t)0xba, (int8_t)0xca), // ipt_lo
+	wasm_i8x16_const((int8_t)0x00, (int8_t)0x4d, (int8_t)0x7c, (int8_t)0x31, (int8_t)0x7d, (int8_t)0x30, (int8_t)0x01, (int8_t)0x4c, (int8_t)0x81, (int8_t)0xcc, (int8_t)0xfd, (int8_t)0xb0, (int8_t)0xfc, (int8_t)0xb1, (int8_t)0x80, (int8_t)0xcd), // ipt_hi
+	wasm_i8x16_const((int8_t)0xe8, (int8_t)0xb7, (int8_t)0xbc, (int8_t)0xe3, (int8_t)0xec, (int8_t)0xb3, (int8_t)0xb8, (int8_t)0xe7, (int8_t)0xf2, (int8_t)0xad, (int8_t)0xa6, (int8_t)0xf9, (int8_t)0xf6, (int8_t)0xa9, (int8_t)0xa2, (int8_t)0xfd), // dipt_lo
+	wasm_i8x16_const((int8_t)0x00, (int8_t)0x65, (int8_t)0x05, (int8_t)0x60, (int8_t)0xe6, (int8_t)0x83, (int8_t)0xe3, (int8_t)0x86, (int8_t)0x94, (int8_t)0xf1, (int8_t)0x91, (int8_t)0xf4, (int8_t)0x72, (int8_t)0x17, (int8_t)0x77, (int8_t)0x12), // dipt_hi
+	wasm_i8x16_const((int8_t)0x80, (int8_t)0x01, (int8_t)0x08, (int8_t)0x0d, (int8_t)0x0f, (int8_t)0x06, (int8_t)0x05, (int8_t)0x0e, (int8_t)0x02, (int8_t)0x0c, (int8_t)0x0b, (int8_t)0x0a, (int8_t)0x09, (int8_t)0x03, (int8_t)0x07, (int8_t)0x04), // inv
+	wasm_i8x16_const((int8_t)0x80, (int8_t)0x07, (int8_t)0x0b, (int8_t)0x0f, (int8_t)0x06, (int8_t)0x0a, (int8_t)0x04, (int8_t)0x01, (int8_t)0x09, (int8_t)0x08, (int8_t)0x05, (int8_t)0x02, (int8_t)0x0c, (int8_t)0x0e, (int8_t)0x0d, (int8_t)0x03), // inva
+	wasm_i8x16_const((int8_t)0x00, (int8_t)0xc7, (int8_t)0xbd, (int8_t)0x6f, (int8_t)0x17, (int8_t)0x6d, (int8_t)0xd2, (int8_t)0xd0, (int8_t)0x78, (int8_t)0xa8, (int8_t)0x02, (int8_t)0xc5, (int8_t)0x7a, (int8_t)0xbf, (int8_t)0xaa, (int8_t)0x15), // sbo_u
+	wasm_i8x16_const((int8_t)0x00, (int8_t)0x6a, (int8_t)0xbb, (int8_t)0x5f, (int8_t)0xa5, (int8_t)0x74, (int8_t)0xe4, (int8_t)0xcf, (int8_t)0xfa, (int8_t)0x35, (int8_t)0x2b, (int8_t)0x41, (int8_t)0xd1, (int8_t)0x90, (int8_t)0x1e, (int8_t)0x8e), // sbo_t
+	wasm_i8x16_const((int8_t)0x00, (int8_t)0x40, (int8_t)0xf9, (int8_t)0x7e, (int8_t)0x53, (int8_t)0xea, (int8_t)0x87, (int8_t)0x13, (int8_t)0x2d, (int8_t)0x3e, (int8_t)0x94, (int8_t)0xd4, (int8_t)0xb9, (int8_t)0x6d, (int8_t)0xaa, (int8_t)0xc7), // dsbo_u
+	wasm_i8x16_const((int8_t)0x00, (int8_t)0x1d, (int8_t)0x44, (int8_t)0x93, (int8_t)0x0f, (int8_t)0x56, (int8_t)0xd7, (int8_t)0x12, (int8_t)0x9c, (int8_t)0x8e, (int8_t)0xc5, (int8_t)0xd8, (int8_t)0x59, (int8_t)0x81, (int8_t)0x4b, (int8_t)0xca), // dsbo_t
+	wasm_i8x16_const(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // zero
+	wasm_i8x16_const(0, 5, 10, 15, 4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11), // ShiftRows
+	wasm_i8x16_const(0, 13, 10, 7, 4, 1, 14, 11, 8, 5, 2, 15, 12, 9, 6, 3), // InvShiftRows
+	wasm_i8x16_const(1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12), // rot1
+};
+
+static inline uint64_t rx_aes_st_next(uint64_t& s) {
+	s ^= s << 13; s ^= s >> 7; s ^= s << 17; return s;
+}
+
+// Self-test: SIMD vs T-table on n pseudo-random (state, key) pairs; dec = 0
+// tests aesenc, 1 aesdec. Returns the number of mismatching pairs.
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t rx_aes_selftest(uint32_t n, int dec) {
+	const rx_aes_simd_k K = rx_aes_simd_load();
+	uint64_t s = 0x9E3779B97F4A7C15ull ^ (uint64_t)dec;
+	uint32_t bad = 0;
+	for (uint32_t i = 0; i < n; ++i) {
+		const uint64_t a = rx_aes_st_next(s), b = rx_aes_st_next(s), c = rx_aes_st_next(s), d = rx_aes_st_next(s);
+		v128_t st = wasm_i64x2_make((int64_t)a, (int64_t)b);
+		if (i < 256) st = wasm_i8x16_splat((int8_t)i); // every byte value in every lane
+		const v128_t key = wasm_i64x2_make((int64_t)c, (int64_t)d);
+		const v128_t r0 = dec ? soft_aesdec(st, key) : soft_aesenc(st, key);
+		const v128_t r1 = dec ? simd_aesdec(K, st, key) : simd_aesenc(K, st, key);
+		bad += !wasm_i8x16_all_true(wasm_i8x16_eq(r0, r1));
+	}
+	return bad;
+}
+
+// Micro-bench helper: n chained rounds, mode bit0 = SIMD, bit1 = dec. Returns
+// a lane so the loop is not dead. Time it from JS.
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t rx_aes_bench(uint32_t n, int mode) {
+	const rx_aes_simd_k K = rx_aes_simd_load();
+	v128_t a = wasm_i32x4_make(1, 2, 3, (int)n), b = wasm_i32x4_make(5, 6, 7, 8);
+	v128_t c = wasm_i32x4_make(9, 10, 11, 12), d = wasm_i32x4_make(13, 14, 15, 16);
+	const v128_t k0 = wasm_i32x4_make(0x11, 0x22, 0x33, 0x44), k1 = wasm_i32x4_make(0x55, 0x66, 0x77, 0x88);
+	for (uint32_t i = 0; i < n; i += 4) {
+		switch (mode & 3) {
+		case 0: a = soft_aesenc(a, k0); b = soft_aesenc(b, k1); c = soft_aesenc(c, k0); d = soft_aesenc(d, k1); break;
+		case 1: a = simd_aesenc(K, a, k0); b = simd_aesenc(K, b, k1); c = simd_aesenc(K, c, k0); d = simd_aesenc(K, d, k1); break;
+		case 2: a = soft_aesdec(a, k0); b = soft_aesdec(b, k1); c = soft_aesdec(c, k0); d = soft_aesdec(d, k1); break;
+		default: a = simd_aesdec(K, a, k0); b = simd_aesdec(K, b, k1); c = simd_aesdec(K, c, k0); d = simd_aesdec(K, d, k1); break;
+		}
+	}
+	return wasm_i32x4_extract_lane(wasm_v128_xor(wasm_v128_xor(a, b), wasm_v128_xor(c, d)), 0);
+}
+#endif

@@ -689,10 +689,34 @@ static std::atomic<int> g_rxjit_fuse_n_override{-1};    // -1: the profile's fus
 static std::atomic<int> g_rxjit_triples_n_override{-1}; // -1: the profile's triples_n
 static std::atomic<int> g_rxjit_unroll2_override{-1};   // -1: the profile's unroll2 | bit 128
 static std::atomic<int> g_rxjit_shared_code_override{-1}; // -1: the profile's shared_code
+static std::atomic<int> g_rxjit_aes_simd_override{-1};    // -1: the profile's aes_simd
+
+extern "C" int g_rx_aes_simd; // soft_aes.cpp, read by aes_hash.cpp per call
+
+// aes_simd is not a module-gen knob: recompute the flag aes_hash.cpp reads
+// whenever the profile or the override changes (both run before any hashing;
+// both AES paths are bit-exact, so a late switch is harmless anyway).
+static void rxjit_sync_aes_simd(void) {
+	int a = g_rxjit_aes_simd_override.load(std::memory_order_relaxed);
+	if (a < 0) a = rxjit_profiles[g_rxjit_profile.load(std::memory_order_relaxed)].aes_simd;
+	g_rx_aes_simd = a != 0;
+}
 
 EMSCRIPTEN_KEEPALIVE
 void rxjit_set_profile(int id) {
 	if (id >= 0 && id < RXJIT_PROFILE_COUNT) g_rxjit_profile.store(id, std::memory_order_relaxed);
+	rxjit_sync_aes_simd();
+}
+
+EMSCRIPTEN_KEEPALIVE
+void rxjit_set_aes_simd(int on) {
+	g_rxjit_aes_simd_override.store(on < 0 ? -1 : on != 0, std::memory_order_relaxed);
+	rxjit_sync_aes_simd();
+}
+
+EMSCRIPTEN_KEEPALIVE
+int rxjit_effective_aes_simd(void) {
+	return g_rx_aes_simd;
 }
 
 EMSCRIPTEN_KEEPALIVE

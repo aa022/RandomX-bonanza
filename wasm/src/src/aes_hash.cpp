@@ -63,8 +63,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 	Hashing throughput: >20 GiB/s per CPU core with hardware AES
 */
-template<bool softAes>
-void hashAes1Rx4(const void *input, size_t inputSize, void *hash) {
+template<bool softAes, bool simdAes>
+static void hashAes1Rx4_impl(const void *input, size_t inputSize, void *hash) {
+	const rx_aes_simd_k K = simdAes ? rx_aes_simd_load() : rx_aes_simd_k{};
+	(void)K;
 	assert(inputSize % 64 == 0);
 
 #ifdef __riscv
@@ -98,10 +100,10 @@ void hashAes1Rx4(const void *input, size_t inputSize, void *hash) {
 		in2 = rx_load_vec_i128((rx_vec_i128*)inptr + 2);
 		in3 = rx_load_vec_i128((rx_vec_i128*)inptr + 3);
 
-		state0 = aesenc<softAes>(state0, in0);
-		state1 = aesdec<softAes>(state1, in1);
-		state2 = aesenc<softAes>(state2, in2);
-		state3 = aesdec<softAes>(state3, in3);
+		state0 = aesenc<softAes, simdAes>(K, state0, in0);
+		state1 = aesdec<softAes, simdAes>(K, state1, in1);
+		state2 = aesenc<softAes, simdAes>(K, state2, in2);
+		state3 = aesdec<softAes, simdAes>(K, state3, in3);
 
 		inptr += 64;
 	}
@@ -110,15 +112,15 @@ void hashAes1Rx4(const void *input, size_t inputSize, void *hash) {
 	rx_vec_i128 xkey0 = rx_set_int_vec_i128(AES_HASH_1R_XKEY0);
 	rx_vec_i128 xkey1 = rx_set_int_vec_i128(AES_HASH_1R_XKEY1);
 
-	state0 = aesenc<softAes>(state0, xkey0);
-	state1 = aesdec<softAes>(state1, xkey0);
-	state2 = aesenc<softAes>(state2, xkey0);
-	state3 = aesdec<softAes>(state3, xkey0);
+	state0 = aesenc<softAes, simdAes>(K, state0, xkey0);
+	state1 = aesdec<softAes, simdAes>(K, state1, xkey0);
+	state2 = aesenc<softAes, simdAes>(K, state2, xkey0);
+	state3 = aesdec<softAes, simdAes>(K, state3, xkey0);
 
-	state0 = aesenc<softAes>(state0, xkey1);
-	state1 = aesdec<softAes>(state1, xkey1);
-	state2 = aesenc<softAes>(state2, xkey1);
-	state3 = aesdec<softAes>(state3, xkey1);
+	state0 = aesenc<softAes, simdAes>(K, state0, xkey1);
+	state1 = aesdec<softAes, simdAes>(K, state1, xkey1);
+	state2 = aesenc<softAes, simdAes>(K, state2, xkey1);
+	state3 = aesdec<softAes, simdAes>(K, state3, xkey1);
 
 	//output hash
 	rx_store_vec_i128((rx_vec_i128*)hash + 0, state0);
@@ -127,8 +129,6 @@ void hashAes1Rx4(const void *input, size_t inputSize, void *hash) {
 	rx_store_vec_i128((rx_vec_i128*)hash + 3, state3);
 }
 
-template void hashAes1Rx4<false>(const void *input, size_t inputSize, void *hash);
-template void hashAes1Rx4<true>(const void *input, size_t inputSize, void *hash);
 
 //AesGenerator1R:
 //key0, key1, key2, key3 = Blake2b-512("RandomX AesGenerator1R keys")
@@ -148,8 +148,10 @@ template void hashAes1Rx4<true>(const void *input, size_t inputSize, void *hash)
 	The modified state is written back to 'state' to allow multiple
 	calls to this function.
 */
-template<bool softAes>
-void fillAes1Rx4(void *state, size_t outputSize, void *buffer) {
+template<bool softAes, bool simdAes>
+static void fillAes1Rx4_impl(void *state, size_t outputSize, void *buffer) {
+	const rx_aes_simd_k K = simdAes ? rx_aes_simd_load() : rx_aes_simd_k{};
+	(void)K;
 	assert(outputSize % 64 == 0);
 
 #ifdef __riscv
@@ -170,10 +172,10 @@ void fillAes1Rx4(void *state, size_t outputSize, void *buffer) {
 	rx_vec_i128 state0, state1, state2, state3;
 	rx_vec_i128 key0, key1, key2, key3;
 
-	key0 = rx_set_int_vec_i128(AES_GEN_1R_KEY0);
-	key1 = rx_set_int_vec_i128(AES_GEN_1R_KEY1);
-	key2 = rx_set_int_vec_i128(AES_GEN_1R_KEY2);
-	key3 = rx_set_int_vec_i128(AES_GEN_1R_KEY3);
+	key0 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_1R_KEY0));
+	key1 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_1R_KEY1));
+	key2 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_1R_KEY2));
+	key3 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_1R_KEY3));
 
 	state0 = rx_load_vec_i128((rx_vec_i128*)state + 0);
 	state1 = rx_load_vec_i128((rx_vec_i128*)state + 1);
@@ -181,10 +183,10 @@ void fillAes1Rx4(void *state, size_t outputSize, void *buffer) {
 	state3 = rx_load_vec_i128((rx_vec_i128*)state + 3);
 
 	while (outptr < outputEnd) {
-		state0 = aesdec<softAes>(state0, key0);
-		state1 = aesenc<softAes>(state1, key1);
-		state2 = aesdec<softAes>(state2, key2);
-		state3 = aesenc<softAes>(state3, key3);
+		state0 = aesdec<softAes, simdAes>(K, state0, key0);
+		state1 = aesenc<softAes, simdAes>(K, state1, key1);
+		state2 = aesdec<softAes, simdAes>(K, state2, key2);
+		state3 = aesenc<softAes, simdAes>(K, state3, key3);
 
 		rx_store_vec_i128((rx_vec_i128*)outptr + 0, state0);
 		rx_store_vec_i128((rx_vec_i128*)outptr + 1, state1);
@@ -200,8 +202,6 @@ void fillAes1Rx4(void *state, size_t outputSize, void *buffer) {
 	rx_store_vec_i128((rx_vec_i128*)state + 3, state3);
 }
 
-template void fillAes1Rx4<true>(void *state, size_t outputSize, void *buffer);
-template void fillAes1Rx4<false>(void *state, size_t outputSize, void *buffer);
 
 //AesGenerator4R:
 //key0, key1, key2, key3 = Blake2b-512("RandomX AesGenerator4R keys 0-3")
@@ -216,8 +216,10 @@ template void fillAes1Rx4<false>(void *state, size_t outputSize, void *buffer);
 #define AES_GEN_4R_KEY6 0xf63befa7, 0x2ba9660a, 0xf765a38b, 0xf273c9e7
 #define AES_GEN_4R_KEY7 0xc0b0762d, 0x0c06d1fd, 0x915839de, 0x7a7cd609
 
-template<bool softAes>
-void fillAes4Rx4(void *state, size_t outputSize, void *buffer) {
+template<bool softAes, bool simdAes>
+static void fillAes4Rx4_impl(void *state, size_t outputSize, void *buffer) {
+	const rx_aes_simd_k K = simdAes ? rx_aes_simd_load() : rx_aes_simd_k{};
+	(void)K;
 	assert(outputSize % 64 == 0);
 
 #ifdef __riscv
@@ -238,14 +240,14 @@ void fillAes4Rx4(void *state, size_t outputSize, void *buffer) {
 	rx_vec_i128 state0, state1, state2, state3;
 	rx_vec_i128 key0, key1, key2, key3, key4, key5, key6, key7;
 
-	key0 = rx_set_int_vec_i128(AES_GEN_4R_KEY0);
-	key1 = rx_set_int_vec_i128(AES_GEN_4R_KEY1);
-	key2 = rx_set_int_vec_i128(AES_GEN_4R_KEY2);
-	key3 = rx_set_int_vec_i128(AES_GEN_4R_KEY3);
-	key4 = rx_set_int_vec_i128(AES_GEN_4R_KEY4);
-	key5 = rx_set_int_vec_i128(AES_GEN_4R_KEY5);
-	key6 = rx_set_int_vec_i128(AES_GEN_4R_KEY6);
-	key7 = rx_set_int_vec_i128(AES_GEN_4R_KEY7);
+	key0 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_4R_KEY0));
+	key1 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_4R_KEY1));
+	key2 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_4R_KEY2));
+	key3 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_4R_KEY3));
+	key4 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_4R_KEY4));
+	key5 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_4R_KEY5));
+	key6 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_4R_KEY6));
+	key7 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_4R_KEY7));
 
 	state0 = rx_load_vec_i128((rx_vec_i128*)state + 0);
 	state1 = rx_load_vec_i128((rx_vec_i128*)state + 1);
@@ -253,25 +255,25 @@ void fillAes4Rx4(void *state, size_t outputSize, void *buffer) {
 	state3 = rx_load_vec_i128((rx_vec_i128*)state + 3);
 
 	while (outptr < outputEnd) {
-		state0 = aesdec<softAes>(state0, key0);
-		state1 = aesenc<softAes>(state1, key0);
-		state2 = aesdec<softAes>(state2, key4);
-		state3 = aesenc<softAes>(state3, key4);
+		state0 = aesdec<softAes, simdAes>(K, state0, key0);
+		state1 = aesenc<softAes, simdAes>(K, state1, key0);
+		state2 = aesdec<softAes, simdAes>(K, state2, key4);
+		state3 = aesenc<softAes, simdAes>(K, state3, key4);
 
-		state0 = aesdec<softAes>(state0, key1);
-		state1 = aesenc<softAes>(state1, key1);
-		state2 = aesdec<softAes>(state2, key5);
-		state3 = aesenc<softAes>(state3, key5);
+		state0 = aesdec<softAes, simdAes>(K, state0, key1);
+		state1 = aesenc<softAes, simdAes>(K, state1, key1);
+		state2 = aesdec<softAes, simdAes>(K, state2, key5);
+		state3 = aesenc<softAes, simdAes>(K, state3, key5);
 
-		state0 = aesdec<softAes>(state0, key2);
-		state1 = aesenc<softAes>(state1, key2);
-		state2 = aesdec<softAes>(state2, key6);
-		state3 = aesenc<softAes>(state3, key6);
+		state0 = aesdec<softAes, simdAes>(K, state0, key2);
+		state1 = aesenc<softAes, simdAes>(K, state1, key2);
+		state2 = aesdec<softAes, simdAes>(K, state2, key6);
+		state3 = aesenc<softAes, simdAes>(K, state3, key6);
 
-		state0 = aesdec<softAes>(state0, key3);
-		state1 = aesenc<softAes>(state1, key3);
-		state2 = aesdec<softAes>(state2, key7);
-		state3 = aesenc<softAes>(state3, key7);
+		state0 = aesdec<softAes, simdAes>(K, state0, key3);
+		state1 = aesenc<softAes, simdAes>(K, state1, key3);
+		state2 = aesdec<softAes, simdAes>(K, state2, key7);
+		state3 = aesenc<softAes, simdAes>(K, state3, key7);
 
 		rx_store_vec_i128((rx_vec_i128*)outptr + 0, state0);
 		rx_store_vec_i128((rx_vec_i128*)outptr + 1, state1);
@@ -282,11 +284,11 @@ void fillAes4Rx4(void *state, size_t outputSize, void *buffer) {
 	}
 }
 
-template void fillAes4Rx4<true>(void *state, size_t outputSize, void *buffer);
-template void fillAes4Rx4<false>(void *state, size_t outputSize, void *buffer);
 
-template<bool softAes>
-void hashAndFillAes1Rx4(void *scratchpad, size_t scratchpadSize, void *hash, void* fill_state) {
+template<bool softAes, bool simdAes>
+static void hashAndFillAes1Rx4_impl(void *scratchpad, size_t scratchpadSize, void *hash, void* fill_state) {
+	const rx_aes_simd_k K = simdAes ? rx_aes_simd_load() : rx_aes_simd_k{};
+	(void)K;
 #ifdef __riscv
 	if (!softAes) {
 		hashAndFillAes1Rx4_zvkned(scratchpad, scratchpadSize, hash, fill_state);
@@ -308,10 +310,10 @@ void hashAndFillAes1Rx4(void *scratchpad, size_t scratchpadSize, void *hash, voi
 	rx_vec_i128 hash_state2 = rx_set_int_vec_i128(AES_HASH_1R_STATE2);
 	rx_vec_i128 hash_state3 = rx_set_int_vec_i128(AES_HASH_1R_STATE3);
 
-	const rx_vec_i128 key0 = rx_set_int_vec_i128(AES_GEN_1R_KEY0);
-	const rx_vec_i128 key1 = rx_set_int_vec_i128(AES_GEN_1R_KEY1);
-	const rx_vec_i128 key2 = rx_set_int_vec_i128(AES_GEN_1R_KEY2);
-	const rx_vec_i128 key3 = rx_set_int_vec_i128(AES_GEN_1R_KEY3);
+	const rx_vec_i128 key0 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_1R_KEY0));
+	const rx_vec_i128 key1 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_1R_KEY1));
+	const rx_vec_i128 key2 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_1R_KEY2));
+	const rx_vec_i128 key3 = rx_aes_key<simdAes>(K, rx_set_int_vec_i128(AES_GEN_1R_KEY3));
 
 	rx_vec_i128 fill_state0 = rx_load_vec_i128((rx_vec_i128*)fill_state + 0);
 	rx_vec_i128 fill_state1 = rx_load_vec_i128((rx_vec_i128*)fill_state + 1);
@@ -325,15 +327,15 @@ void hashAndFillAes1Rx4(void *scratchpad, size_t scratchpadSize, void *hash, voi
 	for (int i = 0; i < 2; ++i) {
 		//process 64 bytes at a time in 4 lanes
 		while (scratchpadPtr < scratchpadEnd) {
-			hash_state0 = aesenc<softAes>(hash_state0, rx_load_vec_i128((rx_vec_i128*)scratchpadPtr + 0));
-			hash_state1 = aesdec<softAes>(hash_state1, rx_load_vec_i128((rx_vec_i128*)scratchpadPtr + 1));
-			hash_state2 = aesenc<softAes>(hash_state2, rx_load_vec_i128((rx_vec_i128*)scratchpadPtr + 2));
-			hash_state3 = aesdec<softAes>(hash_state3, rx_load_vec_i128((rx_vec_i128*)scratchpadPtr + 3));
+			hash_state0 = aesenc<softAes, simdAes>(K, hash_state0, rx_load_vec_i128((rx_vec_i128*)scratchpadPtr + 0));
+			hash_state1 = aesdec<softAes, simdAes>(K, hash_state1, rx_load_vec_i128((rx_vec_i128*)scratchpadPtr + 1));
+			hash_state2 = aesenc<softAes, simdAes>(K, hash_state2, rx_load_vec_i128((rx_vec_i128*)scratchpadPtr + 2));
+			hash_state3 = aesdec<softAes, simdAes>(K, hash_state3, rx_load_vec_i128((rx_vec_i128*)scratchpadPtr + 3));
 
-			fill_state0 = aesdec<softAes>(fill_state0, key0);
-			fill_state1 = aesenc<softAes>(fill_state1, key1);
-			fill_state2 = aesdec<softAes>(fill_state2, key2);
-			fill_state3 = aesenc<softAes>(fill_state3, key3);
+			fill_state0 = aesdec<softAes, simdAes>(K, fill_state0, key0);
+			fill_state1 = aesenc<softAes, simdAes>(K, fill_state1, key1);
+			fill_state2 = aesdec<softAes, simdAes>(K, fill_state2, key2);
+			fill_state3 = aesenc<softAes, simdAes>(K, fill_state3, key3);
 
 			rx_store_vec_i128((rx_vec_i128*)scratchpadPtr + 0, fill_state0);
 			rx_store_vec_i128((rx_vec_i128*)scratchpadPtr + 1, fill_state1);
@@ -358,15 +360,15 @@ void hashAndFillAes1Rx4(void *scratchpad, size_t scratchpadSize, void *hash, voi
 	rx_vec_i128 xkey0 = rx_set_int_vec_i128(AES_HASH_1R_XKEY0);
 	rx_vec_i128 xkey1 = rx_set_int_vec_i128(AES_HASH_1R_XKEY1);
 
-	hash_state0 = aesenc<softAes>(hash_state0, xkey0);
-	hash_state1 = aesdec<softAes>(hash_state1, xkey0);
-	hash_state2 = aesenc<softAes>(hash_state2, xkey0);
-	hash_state3 = aesdec<softAes>(hash_state3, xkey0);
+	hash_state0 = aesenc<softAes, simdAes>(K, hash_state0, xkey0);
+	hash_state1 = aesdec<softAes, simdAes>(K, hash_state1, xkey0);
+	hash_state2 = aesenc<softAes, simdAes>(K, hash_state2, xkey0);
+	hash_state3 = aesdec<softAes, simdAes>(K, hash_state3, xkey0);
 
-	hash_state0 = aesenc<softAes>(hash_state0, xkey1);
-	hash_state1 = aesdec<softAes>(hash_state1, xkey1);
-	hash_state2 = aesenc<softAes>(hash_state2, xkey1);
-	hash_state3 = aesdec<softAes>(hash_state3, xkey1);
+	hash_state0 = aesenc<softAes, simdAes>(K, hash_state0, xkey1);
+	hash_state1 = aesdec<softAes, simdAes>(K, hash_state1, xkey1);
+	hash_state2 = aesenc<softAes, simdAes>(K, hash_state2, xkey1);
+	hash_state3 = aesdec<softAes, simdAes>(K, hash_state3, xkey1);
 
 	//output hash
 	rx_store_vec_i128((rx_vec_i128*)hash + 0, hash_state0);
@@ -375,5 +377,37 @@ void hashAndFillAes1Rx4(void *scratchpad, size_t scratchpadSize, void *hash, voi
 	rx_store_vec_i128((rx_vec_i128*)hash + 3, hash_state3);
 }
 
-template void hashAndFillAes1Rx4<false>(void *scratchpad, size_t scratchpadSize, void *hash, void* fill_state);
+// Public entry points: the soft path picks the SIMD rounds (vpaes, soft_aes.h)
+// or the T-tables per call from g_rx_aes_simd (the profile's aes_simd).
+
+template<bool softAes>
+void hashAes1Rx4(const void *input, size_t inputSize, void *hash) {
+	if (softAes && g_rx_aes_simd) hashAes1Rx4_impl<true, true>(input, inputSize, hash);
+	else hashAes1Rx4_impl<softAes, false>(input, inputSize, hash);
+}
+template void hashAes1Rx4<true>(const void *input, size_t inputSize, void *hash);
+template void hashAes1Rx4<false>(const void *input, size_t inputSize, void *hash);
+
+template<bool softAes>
+void fillAes1Rx4(void *state, size_t outputSize, void *buffer) {
+	if (softAes && g_rx_aes_simd) fillAes1Rx4_impl<true, true>(state, outputSize, buffer);
+	else fillAes1Rx4_impl<softAes, false>(state, outputSize, buffer);
+}
+template void fillAes1Rx4<true>(void *state, size_t outputSize, void *buffer);
+template void fillAes1Rx4<false>(void *state, size_t outputSize, void *buffer);
+
+template<bool softAes>
+void fillAes4Rx4(void *state, size_t outputSize, void *buffer) {
+	if (softAes && g_rx_aes_simd) fillAes4Rx4_impl<true, true>(state, outputSize, buffer);
+	else fillAes4Rx4_impl<softAes, false>(state, outputSize, buffer);
+}
+template void fillAes4Rx4<true>(void *state, size_t outputSize, void *buffer);
+template void fillAes4Rx4<false>(void *state, size_t outputSize, void *buffer);
+
+template<bool softAes>
+void hashAndFillAes1Rx4(void *scratchpad, size_t scratchpadSize, void *hash, void* fill_state) {
+	if (softAes && g_rx_aes_simd) hashAndFillAes1Rx4_impl<true, true>(scratchpad, scratchpadSize, hash, fill_state);
+	else hashAndFillAes1Rx4_impl<softAes, false>(scratchpad, scratchpadSize, hash, fill_state);
+}
 template void hashAndFillAes1Rx4<true>(void *scratchpad, size_t scratchpadSize, void *hash, void* fill_state);
+template void hashAndFillAes1Rx4<false>(void *scratchpad, size_t scratchpadSize, void *hash, void* fill_state);
