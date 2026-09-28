@@ -64,6 +64,7 @@ EXPORTED_FUNCTIONS='[
   "_rxjit_get_profile",
   "_rxjit_set_fuse_n",
   "_rxjit_set_triples_n",
+  "_rxjit_set_unroll2",
   "_rxjit_effective_fuse_n",
   "_rxjit_effective_kind16",
   "_rxjit_effective_triples_n",

@@ -29,6 +29,7 @@
 //   node bench/bench_webui.mjs --feature-base 0         # no relaxed SIMD / FMA (Safari's feature set)
 //   node bench/bench_webui.mjs --profile arm            # generator profile auto|arm|x86 (default auto)
 //   node bench/bench_webui.mjs --fuse-n 800 --stats     # knob override; --stats adds dispatches/op
+//   node bench/bench_webui.mjs --unroll2                # 2x dispatch replication (--unroll2 0: off)
 
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
@@ -56,7 +57,7 @@ const NO_THREADED  = flag('--no-threaded');
 // Probe: --regs locals → threaded interp with regs/F/E/A in wasm locals
 // (regs_in_memory=0, split_inner_dispatch=0) instead of the JSC-tuned default.
 const REGS_MODE    = arg('--regs', 'mem');
-const PROF         = parseProfileArgs(args); // --profile auto|arm|x86, --fuse-n, --triples-n
+const PROF         = parseProfileArgs(args); // --profile auto|arm|x86, --fuse-n, --triples-n, --unroll2
 if (REGS_MODE === 'locals') console.error('note: --regs locals is retired (perf step 2); the threaded interpreter always uses split + registers-in-memory.');
 
 const RANDOMX_FLAG_FULL_MEM = 4;

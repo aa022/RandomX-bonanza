@@ -3,12 +3,14 @@
 // Threaded-interpreter generator profiles: one set of module-gen parameters
 // per target microarchitecture. The wasm build is arch-neutral; JS picks a
 // profile by id (rxjit_set_profile) before the first threaded module is
-// generated, and explicit knobs (rxjit_set_fuse_n, rxjit_set_triples_n)
-// override single fields. The C-side default is arm.
+// generated, and explicit knobs (rxjit_set_fuse_n, rxjit_set_triples_n,
+// rxjit_set_unroll2) override single fields. The C-side default is arm.
 //
 //   fuse_n     fused pair kinds, the top-fuse_n prefix of wasm_jit_fuse_table.h
 //              (RXJIT_FEATURE_NO_FUSE forces 0)
-//   unroll2    2x dispatch replication (not implemented yet)
+//   unroll2    2x dispatch replication, two br_table sites (X3): sets
+//              RXJIT_FEATURE_UNROLL2 on the generated module (feature bit 128
+//              also turns it on); about doubles the module
 //   triples_n  fused triple kinds after the pairs, the top-triples_n prefix of
 //              wasm_jit_fuse_table.h (RXJIT_FEATURE_NO_FUSE forces 0)
 //

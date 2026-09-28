@@ -30,7 +30,7 @@ const KEY = arg('--key', 'gh-distro bench key');
 const OUT = arg('--out', '');
 const FULL_MEM = 4;
 if (!OUT) {
-  console.error('usage: dump_module.mjs [--feature-base N] [--feature-extra N] [--profile auto|arm|x86] [--fuse-n N] [--triples-n N] --out F.wasm');
+  console.error('usage: dump_module.mjs [--feature-base N] [--feature-extra N] [--profile auto|arm|x86] [--fuse-n N] [--triples-n N] [--unroll2 [0|1]] --out F.wasm');
   process.exit(2);
 }
 const PROF = parseProfileArgs(args);

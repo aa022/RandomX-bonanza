@@ -3,7 +3,7 @@
 // the reported share's nonce lies in the call's range and its hash equals the
 // JIT-off (portable C) recomputation; with an all-0x00 target nothing is found.
 // Usage: node bench/mine_ctx_check.mjs [--threads 10] [--init-threads 10]
-//          [--profile auto|arm|x86] [--fuse-n N] [--triples-n N]   (bench/profile_args.mjs)
+//          [--profile auto|arm|x86] [--fuse-n N] [--triples-n N] [--unroll2 [0|1]]   (bench/profile_args.mjs)
 
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';

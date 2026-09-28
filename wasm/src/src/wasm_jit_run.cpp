@@ -73,9 +73,9 @@ thread_local bool g_jit_static_failed = false;
 
 // Threaded-interpreter path: per-thread module buffer + per-thread state.
 // The threaded module is ~40 KiB with the arm profile's 200 fused pairs and
-// grows with fuse_n and triples_n (all pairs + 1000 triples: 0.7-0.85 MiB); the
-// generator writes unchecked (the size check runs after the fact), so keep
-// ample headroom. Heap-allocated once per mining thread: a thread_local array
+// grows with fuse_n and triples_n (all pairs + 1000 triples: 0.7-0.85 MiB;
+// unroll2 about doubles it, max 1.62 MiB at feature 4/5); the generator writes
+// unchecked (the size check runs after the fact), so keep ample headroom. Heap-allocated once per mining thread: a thread_local array
 // would be emitted as zeros into the .wasm TLS data segment and copied into
 // every pthread's TLS block (1 KiB of buffer = 1 KiB of randomx.wasm).
 constexpr size_t RXJIT_THREADED_BUF_SIZE = 1 << 21;
@@ -652,6 +652,7 @@ void rxjit_set_feature(int feature) {
 static std::atomic<int> g_rxjit_profile{RXJIT_PROFILE_ARM};
 static std::atomic<int> g_rxjit_fuse_n_override{-1};    // -1: the profile's fuse_n
 static std::atomic<int> g_rxjit_triples_n_override{-1}; // -1: the profile's triples_n
+static std::atomic<int> g_rxjit_unroll2_override{-1};   // -1: the profile's unroll2 | bit 128
 
 EMSCRIPTEN_KEEPALIVE
 void rxjit_set_profile(int id) {
@@ -673,6 +674,11 @@ void rxjit_set_triples_n(int n) {
 	g_rxjit_triples_n_override.store(n < 0 ? -1 : n, std::memory_order_relaxed);
 }
 
+EMSCRIPTEN_KEEPALIVE
+void rxjit_set_unroll2(int on) {
+	g_rxjit_unroll2_override.store(on < 0 ? -1 : on != 0, std::memory_order_relaxed);
+}
+
 int rxjit_fuse_n_for_feature(int jit_feature) {
 	if (jit_feature & RXJIT_FEATURE_NO_FUSE) return 0;
 	int n = g_rxjit_fuse_n_override.load(std::memory_order_relaxed);
@@ -688,6 +694,18 @@ static int rxjit_triples_n_for_feature(int jit_feature) {
 	int n = g_rxjit_triples_n_override.load(std::memory_order_relaxed);
 	if (n < 0) n = rxjit_profiles[g_rxjit_profile.load(std::memory_order_relaxed)].triples_n;
 	return n > RXJIT_TRIPLE_NMAX ? RXJIT_TRIPLE_NMAX : n;
+}
+
+// The feature the threaded module is generated with: RXJIT_FEATURE_UNROLL2
+// (X3, 2x dispatch replication) = the rxjit_set_unroll2 override (>= 0), else
+// the profile's unroll2 OR'd with the set feature's bit 128 (?jit_exp=unroll2,
+// --feature-extra 128). Part of the module regen key via the feature.
+static int rxjit_threaded_gen_feature(int feature) {
+	int u = g_rxjit_unroll2_override.load(std::memory_order_relaxed);
+	if (u < 0)
+		u = rxjit_profiles[g_rxjit_profile.load(std::memory_order_relaxed)].unroll2 ||
+		    (feature & RXJIT_FEATURE_UNROLL2);
+	return u ? feature | RXJIT_FEATURE_UNROLL2 : feature & ~RXJIT_FEATURE_UNROLL2;
 }
 
 // Status getters (bench headers, the worker's status line): what the next
@@ -707,11 +725,10 @@ int rxjit_effective_kind16(void) {
 	return rxjit_kind16(rxjit_effective_fuse_n(), rxjit_effective_triples_n());
 }
 
-// 2x dispatch replication is not generated yet: reads 0 until the generator
-// uses it.
 EMSCRIPTEN_KEEPALIVE
 int rxjit_effective_unroll2(void) {
-	return 0;
+	const int f = rxjit_threaded_gen_feature(g_rxjit_feature.load(std::memory_order_relaxed));
+	return (f & RXJIT_FEATURE_UNROLL2) != 0;
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -811,9 +828,10 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 
 	// 2) generate the threaded module bytes (with per-thread pointers baked):
 	// once per thread, and again whenever the scratchpad moves (a new VM on
-	// this pthread) or the feature / fuse_n / triples_n / record head width
-	// changes. The JS side sees thrLen > 0 and recompiles.
-	const int feature = g_rxjit_feature.load(std::memory_order_relaxed);
+	// this pthread) or the feature (incl. the effective UNROLL2 bit) / fuse_n /
+	// triples_n / record head width changes. The JS side sees thrLen > 0 and
+	// recompiles.
+	const int feature = rxjit_threaded_gen_feature(g_rxjit_feature.load(std::memory_order_relaxed));
 	const int fuse_n = rxjit_fuse_n_for_feature(feature);
 	const int triples_n = rxjit_triples_n_for_feature(feature);
 	const int kind16 = rxjit_kind16(fuse_n, triples_n);

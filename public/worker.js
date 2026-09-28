@@ -280,8 +280,9 @@ async function init(options = {}) {
           postMessage({ type: 'status', message: `JIT feature: opt-out bits ${optOut} set` });
         }
         // Module-gen profile (wasm_jit_profile.h): ?jit_profile=auto|arm|x86,
-        // with fine overrides in jit_exp: fuse_n=N, triples_n=N, unroll2
-        // (feature bit 128). 'auto' is arm until the x86 probe lands.
+        // with fine overrides in jit_exp: fuse_n=N, triples_n=N, unroll2 or
+        // unroll2=0|1 (2x dispatch replication). 'auto' is arm until the x86
+        // probe lands.
         if (Module._rxjit_set_profile) {
           const PROFILE_NAMES = ['arm', 'x86']; // index = RXJIT_PROFILE_*
           let req = String(options.jitProfile || 'auto').trim().toLowerCase();
@@ -293,13 +294,11 @@ async function init(options = {}) {
             const t = jitExp.find((s) => s.startsWith(k + '='));
             return t && /^\d+$/.test(t.slice(k.length + 1)) ? Number(t.slice(k.length + 1)) : -1;
           };
-          if (hasExp('unroll2') && Module._rxjit_set_feature) {
-            jitFeature |= 128; // RXJIT_FEATURE_UNROLL2
-            Module._rxjit_set_feature(jitFeature);
-          }
           Module._rxjit_set_profile(PROFILE_NAMES.indexOf(req === 'auto' ? 'arm' : req));
           Module._rxjit_set_fuse_n(expNum('fuse_n'));
           Module._rxjit_set_triples_n(expNum('triples_n'));
+          // unroll2 (= unroll2=1) or unroll2=0 overrides the profile's
+          Module._rxjit_set_unroll2(hasExp('unroll2') ? 1 : expNum('unroll2'));
           postMessage({
             type: 'status',
             message: `JIT profile: ${PROFILE_NAMES[Module._rxjit_get_profile()]} (${req === 'auto' ? 'auto' : 'forced'})` +

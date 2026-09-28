@@ -3,6 +3,7 @@
 //   --profile auto|arm|x86   default auto = x86 on process.arch x64, else arm
 //   --fuse-n N               fused pairs, overrides the profile's
 //   --triples-n N            fused triples, overrides the profile's
+//   --unroll2 [0|1]          2x dispatch replication (bare = 1), overrides the profile's
 //
 //   const prof = parseProfileArgs(args);
 //   ... _rxjit_set_feature(...) ...
@@ -22,11 +23,14 @@ export function parseProfileArgs(args) {
     if (!/^\d+$/.test(s)) bad(`${n} wants a non-negative integer, got '${s}'`);
     return Number(s);
   };
+  const u = args.indexOf('--unroll2'); // bare flag = 1; an optional 0|1 value follows
+  const uv = u < 0 ? -1 : (args[u + 1] === '0' || args[u + 1] === '1') ? Number(args[u + 1]) : 1;
   return {
     name: req === 'auto' ? (process.arch === 'x64' ? 'x86' : 'arm') : req,
     mode: req === 'auto' ? 'auto' : 'forced',
     fuseN: knob('--fuse-n'),
     triplesN: knob('--triples-n'),
+    unroll2: uv,
   };
 }
 
@@ -34,6 +38,7 @@ export function applyProfile(Module, prof) {
   Module._rxjit_set_profile(PROFILE_NAMES.indexOf(prof.name));
   Module._rxjit_set_fuse_n(prof.fuseN);
   Module._rxjit_set_triples_n(prof.triplesN);
+  Module._rxjit_set_unroll2(prof.unroll2);
 }
 
 // Effective values read back from C (the feature's NO_FUSE bit included).

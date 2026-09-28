@@ -71,7 +71,7 @@ enum {
 	// Threaded interpreter opt-out / opt-in bits (A/B knobs).
 	RXJIT_FEATURE_NO_INLINE_ROUND = 32, // old float path (call_indirect stubs)
 	RXJIT_FEATURE_NO_FUSE = 64,         // no fused pair superinstructions
-	RXJIT_FEATURE_UNROLL2 = 128,        // 2x unrolled dispatch loop
+	RXJIT_FEATURE_UNROLL2 = 128,        // 2x dispatch replication (also profile / rxjit_set_unroll2)
 };
 // Bits 256, 512, 1024: debug layout-pad count 0..7 for the threaded
 // inner_dispatch (each pad is one dummy i32.store at function entry, which

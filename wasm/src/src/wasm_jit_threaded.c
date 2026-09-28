@@ -202,6 +202,10 @@ static _Thread_local int g_fuse_n = 0;
 // offset (CBRANCH: target_pc; others: MOD_SHIFT | RXJIT_FLAG_MEM_L1).
 static _Thread_local int g_kind16 = 0;
 static _Thread_local uint32_t g_d_aux = 1;
+// X3 (RXJIT_FEATURE_UNROLL2): set while emitting copy 0 of the two dispatch
+// copies in $L. Its arm exits advance ip by nrec-1 records and leave through
+// copy 0's $end_dispatch (the join adds the last 16) instead of `br $L`.
+static _Thread_local int g_unroll_c0 = 0;
 
 // ---------------- Small helpers (operate on `uint8_t *p`) ----------------
 
@@ -1510,6 +1514,19 @@ static uint32_t emit_inner_pc_loop(uint32_t scratchpad_ptr, uint32_t program_slo
 	BLOCK_VOID(); // $exit
 	LOOP_VOID();  // $L
 	{
+		// X3 (RXJIT_FEATURE_UNROLL2): a second br_table site. Copy 0 sits
+		// directly in $L like copy 1, so the CBRANCH-taken (br $L) and EXIT
+		// (br $exit) depths are the same in both; its other exits and its
+		// br_table default land here, at the join (ip += 16, into copy 1).
+		if (jit_feature & RXJIT_FEATURE_UNROLL2) {
+			g_unroll_c0 = 1;
+			p += emit_inner_dispatch(scratchpad_ptr, jit_feature, p);
+			g_unroll_c0 = 0;
+			LG(LOCT_inst_ptr);
+			WI32_CONST(16);
+			I32_ADD();
+			LS(LOCT_inst_ptr);
+		}
 		// dispatch via br_table over opcode_kind (arms load their own fields)
 		p += emit_inner_dispatch(scratchpad_ptr, jit_feature, p);
 
@@ -1672,16 +1689,21 @@ static uint32_t emit_main_loop_body(uint32_t vm_state_ptr, uint32_t scratchpad_p
 
 // Arm tail: advance the walk pointer by nrec records and branch straight back
 // to the loop header $L (tail-duplicated back-edge). `extra` = number of
-// blocks the caller has open inside the arm.
+// blocks the caller has open inside the arm. X3 copy 0 (g_unroll_c0): advance
+// by nrec-1 records and branch to its $end_dispatch; the join after it adds
+// the last 16 and falls into copy 1.
 static uint32_t emit_arm_exit(int k, int nrec, int extra, uint8_t *buf) {
 	if (g_no_exit)
 		return 0; // inside a fused arm: the fused arm emits one exit (ip += 32 or 48)
 	THUNK_BEGIN;
-	LG(LOCT_inst_ptr);
-	WI32_CONST(16 * nrec);
-	I32_ADD();
-	LS(LOCT_inst_ptr);
-	BR(ARM_BR_INNER(k) + (uint32_t)extra);
+	const int adv = g_unroll_c0 ? nrec - 1 : nrec;
+	if (adv) {
+		LG(LOCT_inst_ptr);
+		WI32_CONST(16 * adv);
+		I32_ADD();
+		LS(LOCT_inst_ptr);
+	}
+	BR((g_unroll_c0 ? ARM_BR_END(k) : ARM_BR_INNER(k)) + (uint32_t)extra);
 	THUNK_END;
 }
 
@@ -2530,6 +2552,7 @@ uint32_t rxjit_generate_threaded_module(
 	g_emit_regs_in_mem = 1;
 	g_ro               = 0;
 	g_no_exit          = 0;
+	g_unroll_c0        = 0;
 	g_k_total          = RXJIT_K_COUNT + fuse_n + triples_n;
 	g_fuse_n           = fuse_n;
 	g_kind16           = kind16;
