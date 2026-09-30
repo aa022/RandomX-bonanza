@@ -29,11 +29,7 @@ const noSab = params.get('sab') === '0' || window.crossOriginIsolated !== true;
 // ?fb_full=K (0..2, no SAB only): K of those workers become full-dataset
 // replicas (a private ~2.3 GB dataset each), built cooperatively by all workers
 // (fb_full.js); a worker that can't allocate one stays in light mode.
-// Default 1 (about the SAB path's full-mode footprint; +7% at 12 workers, +34%
-// at 6 on Zen 3), 0 with ?light=1 or when navigator.deviceMemory reports < 8 GB.
-const fbDefault = params.get('light') === '1' || navigator.deviceMemory < 8 ? 0 : 1;
-const fbParam = params.get('fb_full');
-const fbFull = noSab ? Math.max(0, Math.min(2, Math.floor(fbParam === null ? fbDefault : Number(fbParam) || 0))) : 0;
+const fbFull = noSab ? Math.max(0, Math.min(2, Math.floor(Number(params.get('fb_full')) || 0))) : 0;
 // Full-memory mode is the default. Opt out with ?light=1 (or legacy ?full=0).
 const fullMemory = !noSab && params.get('light') !== '1' && params.get('full') !== '0';
 // JIT defaults: on for all engines. The threaded-interpreter + V2-minimal
