@@ -170,8 +170,8 @@ Getters `rxjit_effective_*` read back what is actually used. The C-side default 
 
 **Gates** (all must print OK):
 - `node bench/full_mode_check.mjs --count 32` at `--feature-base 3`, `0`, `1`, and `0 --feature-extra 32`, for `--profile arm` and `x86`;
-- `node bench/light_mode_check.mjs` at `--feature-base 3`, `0`, `1`, for `--profile arm` and `x86`, on both builds (`RX_BUILD=st` for `randomx_st`);
-- `node bench/supjit_check.mjs`, both builds (the full-mode gates can't see a broken superscalar kernel, since both of their sides read the kernel-built dataset);
+- `node bench/light_mode_check.mjs` at `--feature-base 3`, `0`, `1`, for `--profile arm` and `x86`, on both builds (`RX_BUILD=st` for `randomx_st`), and with `--light-mlp 0`, `1`, `2` (§9.2);
+- `node bench/supjit_check.mjs`, both builds (the full-mode gates can't see a broken superscalar kernel, since both of their sides read the kernel-built dataset), and with `--kernel-k 1` to `4` (§9.2);
 - `node bench/mine_ctx_check.mjs`;
 - `node bench/fb_full_check.mjs` (no-SAB full replicas, §9.1);
 - the ARM identity check;
@@ -239,10 +239,49 @@ t_item breakdown: ~0.4 µs of dependent cache misses (1.04 µs with the cache in
 **Open levers:**
 1. Measure 1/6/12 workers in Chromium (Node numbers above).
 2. ~~Multi-VM lockstep~~ tried and reverted (above); slower on Zen 3 at 1/6/12 workers. Branch `nosab/light-2vm` for an arm trial.
-3. ~~A lower-latency mulh~~ tried (branch `nosab/mulh-lat`, not merged): 4 independent partial products cut the chain from ~11 to ~8 ops but add ~3 ops per mulh, and it was ~5% slower per item and ~3% slower in light H/s on Zen 3. The item is throughput-bound, not latency-bound, so only fewer ops per mulh would help. Might still be worth trying on arm.
+3. ~~A lower-latency mulh~~ tried (branch `nosab/mulh-lat`, not merged): 4 independent partial products cut the chain from ~11 to ~8 ops but add ~3 ops per mulh, and it was ~5% slower per item and ~3% slower in light H/s on Zen 3. The item is throughput-bound, not latency-bound, so only fewer ops per mulh would help. Might still be worth trying on arm. Fewer ops per mulh: done in §9.2 (signed shifts, squares).
 4. ~~Opt-in full replicas~~ **Done** (`?fb_full=K`, see §9.1); opt-in, default K = 0 (see `NOSAB_KNOBS.md`).
 5. One cache build broadcast to all workers.
 6. OPFS persistence.
+7. **Item MLP** (§9.2): `light_mlp=2` and `kernel_k` are in, off by default; measure 6/12 workers and the SAB init on an idle box, then set the x86 profile.
+
+### 9.2 Superscalar item MLP (`light_mlp`, `kernel_k`, 2026-10-01)
+Branch `nosab/x-item-mlp`. The item is throughput-bound plus 8 dependent cache misses (~0.4 µs of ~1.1 µs). Moving a miss earlier within one item does not help: a load at the ROB head blocks retirement wherever it sits. Having **two independent misses in flight** does. The only independent addresses are other items: in light mode, `mx` after step 5 is exactly the next iteration's `ma`, so item(i + 1) is known at step 7 of iteration i (a depth of 2 is the ceiling; item(i + 2) needs i + 1's registers). In the dataset-init kernel every item is independent.
+
+**Changes** (`wasm_jit_superscalar.cpp`, `wasm_jit_threaded.c`, `wasm_jit_run.cpp`):
+- **shd + early** (`a08f146`, always on): ISMULH_R uses arithmetic shifts for aH, bH and the two t-derived shifts, which gives mulhs directly, so the 10-op sign correction is gone. Qword 0 of each mix block is loaded right after the address, before the program.
+- **Square mulh** (`3306b97`, always on): for src == dst, `aL*bH` is emitted as `aH*bL`, the same expression `t` uses, and TurboFan's value numbering folds them. The jitdump shows 43 fewer `imul` and 43 fewer instructions per item for the bench key (2045 → 2002).
+- **`emit_itemK_compute`** (`ItemLocals` per item, ported from `nosab/light-2vm`): K items as blocks. Per program it emits the K mix addresses, the K early loads back to back, then each item's program, xor and next registerValue in turn. It does not interleave op by op, because that spilled in 2-VM lockstep. K = 1 emits the old bytes exactly; the light fn and kernel were diffed.
+- **`kernel_k`** (1..4, `rxjit_set_kernel_k`, profile field): the supjit kernel does K items per loop trip. A short last trip clamps item k to `endItem - 1` with a `select` and rewrites the last item's 64 bytes, so there is no tail loop. `out_k` wraps like `out` (`rxInitItemsInto`). The kernel buffer is now 512 KiB. The generator checks a conservative size bound first (≤ 90 B per mulh, ≤ 16 B per other op) and falls back to K = 1.
+- **`light_mlp`** (0..2, `rxjit_set_light_mlp`, profile field), step 7 of the light module:
+  - `1` (probe): before the call, the next item's first cache line is loaded into arena ITEM qword 0. The store keeps V8 from dropping the load.
+  - `2` (item pairing): 2048 iterations per `main_loop` call, and `ic` counts down, so on even iterations (ic even) `item_pair(ds+ma/64, ds+mx/64, arena ITEM)` computes both items as one 2-item block. The second item goes to arena +5184 (`RXJIT_ARENA_ITEM2_OFF`). The xor then reads `ITEM + (ic & 1) * 4224` without a branch, so an odd iteration uses the line the even one left.
+  - Type 4 becomes `(i32, i32, i32) -> ()`. The pair fn has no baked arena pointer, so `shared_code` still gives identical bytes.
+  - The light fn's regen key includes the mode. The pair fn falls back to the one-item fn if its size bound exceeds the light fn cap (now 256 KiB).
+- **Defaults: unchanged** (arm and x86 `{light_mlp 0, kernel_k 1}`). The arm full-mode module is byte-identical under every knob value.
+
+**Measured** (Zen 3, Node, x86 profile. The box was **not idle**: other engineers were compiling, load 1–3. These are sanity numbers, not a sign-off):
+
+| | value |
+|---|---|
+| supjit µs/item, 1T st (step 0 / +square) | 1.082 / 1.070 |
+| supjit `kernel_k` 2 / 3 / 4 | 0.953 / 0.915 / 0.905 (−11% / −14% / −15%) |
+| light 1T `light_mlp` 0 / 1 / 2 (`nosab_bench`, 10 s, ABAB) | 36.2 / 36.0 / **43.5 H/s (+20%)** |
+| SAB full-dataset init, 10 threads, `kernel_k` 1 / 2 / 3 / 4 (one run each) | 5.27 / 4.71 / 4.61 / 4.46 s |
+| `fb_full_check` build (3 workers, K = 2), `kernel_k` 1 / 2 | 14.9 / 12.8 s |
+
+- The probe does nothing (−0.6%), like `touch_line0` before it, but pairing gives +20%, about twice the estimate. Part of that is fewer item calls and main-loop steps per item. The ROB-exposure model holds only for true MLP.
+- **Not measured:** 6 and 12 workers, SAB 12T H/s with `kernel_k`, THP off, Chromium.
+  - 12 workers is the risk: the pair fn is ~71 KB of x64 (vs 35 KB), which SMT siblings share.
+  - Rule for flipping x86 defaults: `light_mlp=2` if it wins at 1 **and** 12 workers (12 must not lose beyond noise); `kernel_k` = the best K if it wins on both builds' supjit_check and doesn't slow the SAB 12T init.
+- **jitdump** of the pair fn: 17.6k instructions, 4004 `imul`, 536 `rbp` spill ops (2 × 92 in the one-item fn; ~22 extra per block switch, as expected for 10 idle live values). The two early loads are adjacent at the top of each program pair.
+- **Finding for later:** V8 emits every mix-block qword load **twice**: a dead `mov r15, [addr]` (the protected load, kept) and the same load folded into the `xor`. The early qword-0 load works as a prefetch only; the xor reloads it. That's ~64 redundant loads per item.
+
+**Gates added:**
+- `light_mode_check --light-mlp 0|1|2` (all profiles and features, both builds). After the second key it also flips `light_mlp` 0 ↔ 2 on the same cache (regen key).
+- `supjit_check --kernel-k K`, with extra short ranges (counts 2, 5, 7) so that count % K ≠ 0.
+- `fb_full_check --light-mlp 2 --kernel-k 2`.
+- The arm identity under light_mlp/kernel_k combinations.
 
 ### 9.1 Full replicas (`?fb_full=K`, K = 0–2, default 0)
 **Default: K = 0, opt-in.** One replica wins in the Node benches (+7% at 12 workers, +34% at 6; K = 2 +18% at 12), but costs ~2.3 GB and a ~7.5 s build per seed, so it stays a knob (a default of 1 was tried in `3f7ec77` and reverted). The URL parameters and how they combine are in `NOSAB_KNOBS.md`.

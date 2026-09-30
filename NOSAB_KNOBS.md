@@ -26,6 +26,8 @@ The build is chosen by the worker's URL (`build=st`), not by the init message, b
 | `?fb_full=K` (0–2) | **0** | Makes workers 0..K-1 full-dataset replicas; the rest stay light | +~2.3 GB per replica |
 | `?jit_profile=auto\|arm\|x86` | `auto` | Generator profile, per worker (same as the isolated path) | |
 | `?jit_exp=…` | – | Codegen overrides, e.g. `fuse_n=N`, `shared_code=0\|1`, `aes_relaxed=0\|1`, `no_supjit` (same as the isolated path) | |
+| `?jit_exp=light_mlp=N` (0–2) | profile (0) | Light workers, step 7: `1` loads the next item's first cache line early (probe, no gain); `2` computes this and the next iteration's item together on even iterations (item pairing, +20% at 1T, 12 workers unmeasured) | ~36 KB more x64 code (the pair fn) |
+| `?jit_exp=kernel_k=N` (1–4) | profile (1) | Dataset-build kernel items per loop trip (`fb_full` builds, and the isolated path's full-mode init); 2–4 build ~11–15% faster at 1T | |
 | `?nojit=1` / `?jit=0` | JIT on | Portable interpreter (~3 H/s per worker, debugging only) | |
 
 - **`?light=1` / `?full=0`** do nothing on the no-SAB path: a worker is always light unless `fb_full` makes it a replica. The light workers use the JIT (threaded interpreter plus the embedded superscalar item function).
@@ -61,7 +63,7 @@ The SAB full mode gets ~678 H/s at 12 threads on the same box. SMT adds only ~25
 | Low RAM or a shared machine | `?threads=<physical cores>` |
 
 ## 6. Node equivalents (benchmarks and checks)
-- `node bench/nosab_bench.mjs --workers N [--full K] [--secs 15 --warmup 4] [--profile …]` uses the same protocol over `worker_threads` (`bench/nosab_pool.mjs` + `public/fb_full.js`).
+- `node bench/nosab_bench.mjs --workers N [--full K] [--secs 15 --warmup 4] [--profile …] [--light-mlp N] [--kernel-k N]` uses the same protocol over `worker_threads` (`bench/nosab_pool.mjs` + `public/fb_full.js`). The last two match `jit_exp=light_mlp=N` and `kernel_k=N` (`appendix_handoff.md` §9.2).
 - `node bench/fb_full_check.mjs [--workers 3 --full 2]` checks that the replicas' full-mode hashes match the reference, across a seed change.
 - `RX_BUILD=st node bench/<check>.mjs` runs any check on `randomx_st`.
 
