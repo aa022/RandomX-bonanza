@@ -16,6 +16,7 @@
 //   6   r0..r7         (i64 ×8) → indices 6..13
 //   14  registerValue  (i64)
 //   15  tmp64          (i64) scratch
+//   16  mt             (i64) inline mulh temp
 #include "wasm_jit_superscalar.h"
 #include "wasm_jit_macros.h"
 #include "superscalar.hpp"
@@ -55,6 +56,7 @@ constexpr int LK_mixBlock = 5;
 constexpr int LK_r0 = 6; // r0..r7 = 6..13
 constexpr int LK_registerVal = 14;
 constexpr int LK_tmp64 = 15;
+constexpr int LK_mt = 16; // inline mulh temp (t)
 
 // Function indices in the kernel module.
 constexpr int FN_MULH = 0;
@@ -106,6 +108,8 @@ static inline int RREG(int idx) {
 #define I64_SHL()       WASM_U8(0x86)
 #define I64_ROTR()      WASM_U8(0x8a)
 #define I64_EXT_I32_U() WASM_U8(0xad)
+#define I64_SHR_S()     WASM_U8(0x87)
+#define I64_SHR_U()     WASM_U8(0x88)
 #define LOOP_VOID()                 \
 	do {                            \
 		WASM_U8_THUNK({0x03, 0x40}); \
@@ -130,6 +134,77 @@ static inline int RREG(int idx) {
 	} while (0)
 
 // ---------- Per-instruction emission ----------
+
+// Inline 64x64 -> high 64 multiply of locals a, b; pushes hi. Hacker's
+// Delight mulhu as in wasm_jit_threaded.c emit_mulh_inline:
+//   t  = aH*bL + ((aL*bL) >> 32)
+//   hi = aH*bH + (t >> 32) + ((aL*bH + (t & M)) >> 32)
+// Signed: hi -= ((a >> 63) & b) + ((b >> 63) & a). V8 does not inline the
+// call-based stubs; the calls were ~40% of the item time (1T, x64).
+static uint32_t emit_mulh_inline(int a, int b, bool is_signed, uint8_t *buf) {
+	THUNK_BEGIN;
+	// t = aH*bL + ((aL*bL) >> 32)
+	LG(a);
+	WI64_CONST(32);
+	I64_SHR_U();
+	LG(b);
+	WI64_CONST(0xffffffffLL);
+	I64_AND();
+	I64_MUL();
+	LG(a);
+	WI64_CONST(0xffffffffLL);
+	I64_AND();
+	LG(b);
+	WI64_CONST(0xffffffffLL);
+	I64_AND();
+	I64_MUL();
+	WI64_CONST(32);
+	I64_SHR_U();
+	I64_ADD();
+	LS(LK_mt);
+	// (aL*bH + (t & M)) >> 32
+	LG(a);
+	WI64_CONST(0xffffffffLL);
+	I64_AND();
+	LG(b);
+	WI64_CONST(32);
+	I64_SHR_U();
+	I64_MUL();
+	LG(LK_mt);
+	WI64_CONST(0xffffffffLL);
+	I64_AND();
+	I64_ADD();
+	WI64_CONST(32);
+	I64_SHR_U();
+	// + aH*bH + (t >> 32)
+	LG(a);
+	WI64_CONST(32);
+	I64_SHR_U();
+	LG(b);
+	WI64_CONST(32);
+	I64_SHR_U();
+	I64_MUL();
+	I64_ADD();
+	LG(LK_mt);
+	WI64_CONST(32);
+	I64_SHR_U();
+	I64_ADD();
+	if (is_signed) {
+		LG(a);
+		WI64_CONST(63);
+		I64_SHR_S();
+		LG(b);
+		I64_AND();
+		I64_SUB();
+		LG(b);
+		WI64_CONST(63);
+		I64_SHR_S();
+		LG(a);
+		I64_AND();
+		I64_SUB();
+	}
+	THUNK_END;
+}
 
 // Emit code for one decoded SuperscalarHash instruction.
 //   Side effect on the operand stack: none (each emit is balanced).
@@ -189,17 +264,11 @@ static uint32_t emit_super_inst(const randomx::DecodedSuperscalarInst &d, uint8_
 		LS(rd);
 		break;
 	case ST::IMULH_R:
-		LG(rd);
-		LG(rs);
-		WASM_U8(0x10);
-		WASM_U32(FN_MULH); // call $mulh
+		p += emit_mulh_inline(rd, rs, false, p);
 		LS(rd);
 		break;
 	case ST::ISMULH_R:
-		LG(rd);
-		LG(rs);
-		WASM_U8(0x10);
-		WASM_U32(FN_SMULH); // call $smulh
+		p += emit_mulh_inline(rd, rs, true, p);
 		LS(rd);
 		break;
 	case ST::IMUL_RCP:
@@ -326,13 +395,13 @@ static uint32_t emit_item_compute(const randomx::DecodedSuperscalarProgram progr
 // Kernel locals declaration (groups after the 2 i32 params):
 //   4 i32 (item, endItem, out, mixBlock)   indices 2..5
 //   8 i64 (r0..r7)                         indices 6..13
-//   2 i64 (registerValue, tmp64)           indices 14..15
+//   3 i64 (registerValue, tmp64, mt)       indices 14..16
 #define EMIT_KERNEL_LOCALS()           \
 	WASM_U8_THUNK({                    \
 		3,                             \
 		4, WASM_TYPE_I32,              \
 		8, WASM_TYPE_I64,              \
-		2, WASM_TYPE_I64,              \
+		3, WASM_TYPE_I64,              \
 	})
 
 // Emit the body of the kernel function (no locals declaration, no end byte).
