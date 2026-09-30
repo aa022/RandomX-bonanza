@@ -138,7 +138,8 @@ URL parameters:
 - `?sab=0` — force the no-SharedArrayBuffer fallback (used automatically when
   the page is not `crossOriginIsolated`): N single-thread light-mode workers
   on `randomx_st.wasm`, ~300 MB each; `?threads=N` sets N
-- `?fb_full=K` (K = 0–2, no-SAB only) — K of those workers mine in full mode
+- `?fb_full=K` (K = 0–2, no-SAB only; default 1, or 0 with `?light=1` or
+  under 8 GB `navigator.deviceMemory`) — K of those workers mine in full mode
   on a private dataset replica (~2.3 GB each), which all workers build
   together per seed; a worker that can't allocate one stays in light mode
 - `?light_vms=2` — light mode (incl. the no-SAB fallback): two VMs per mining
