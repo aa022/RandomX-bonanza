@@ -18,7 +18,7 @@ import { execFileSync } from 'child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
-const createRandomX = require(join(__dirname, '..', 'public', 'randomx.js'));
+const createRandomX = require(join(__dirname, '..', 'public', process.env.RX_BUILD === 'st' ? 'randomx_st.js' : 'randomx.js'));
 
 const args = process.argv.slice(2);
 const arg = (n, d) => { const i = args.indexOf(n); return i < 0 ? d : args[i + 1]; };

@@ -1,7 +1,7 @@
 // Phase D: SuperscalarHash WASM kernel generator.
 //
 // The generated module:
-//   imports     e.m  (shared memory)
+//   imports     e.m  (shared memory; non-shared in randomx_st, RXJIT_MEM_FLAG)
 //   functions   0   mulh   (stub from jit_stubs/mulh.h, i64,i64 -> i64)
 //               1   smulh  (stub)
 //               2   k      (the kernel; (i32,i32) -> () exported as "k")
@@ -392,7 +392,7 @@ extern "C" uint32_t rxjit_generate_superscalar_kernel(
 
 	// import section: memory only
 	WASM_SECTION(WASM_SECTION_IMPORT, {
-		WASM_U8_THUNK({1, 1, 'e', 1, 'm', 0x02, 0x03});
+		WASM_U8_THUNK({1, 1, 'e', 1, 'm', 0x02, RXJIT_MEM_FLAG});
 		WASM_U32(mem_min_pages);
 		WASM_U32(mem_max_pages);
 	});

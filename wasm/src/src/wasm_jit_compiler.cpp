@@ -318,8 +318,9 @@ static void *initDatasetRangeThreadProgress(void *arg) {
 	initDatasetRangeWithProgress(static_cast<DatasetThreadJob *>(arg));
 	return nullptr;
 }
+#endif
 
-// JIT pthread worker — calls the wasm SuperscalarHash kernel in 16384-item
+// JIT range worker (pthread, or inline in randomx_st) — calls the wasm SuperscalarHash kernel in 16384-item
 // chunks (so progress updates remain ~150ms-scale even with 8× per-program
 // speedup). Falls back to the interpreter for any chunk where the JS bridge
 // returns 0 (compile failure, runtime exception, etc.) and disables the
@@ -342,6 +343,7 @@ static void initDatasetRangeWithJit(DatasetThreadJob *job) {
 	}
 }
 
+#ifdef __EMSCRIPTEN_PTHREADS__
 static void *initDatasetRangeThreadJit(void *arg) {
 	initDatasetRangeWithJit(static_cast<DatasetThreadJob *>(arg));
 	return nullptr;
@@ -474,8 +476,10 @@ int rxInitDatasetStart(randomx_cache *cache, randomx_dataset *dataset, uint32_t 
 	}
 	g_init_thread_count = threadCount;
 #else
+	// single-thread build (randomx_st): synchronous, but still on the supjit kernel
 	DatasetThreadJob job = {cache, dataset->memory, startItem, startItem + itemCount};
-	initDatasetRangeWithProgress(&job);
+	if (useSupjit) initDatasetRangeWithJit(&job);
+	else initDatasetRangeWithProgress(&job);
 #endif
 
 	return 1;

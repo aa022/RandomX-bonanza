@@ -4,7 +4,7 @@ const require = createRequire(import.meta.url);
 // (aes_relaxed 1) on single hashes and a first/next/last chain (hashAndFill).
 // FAILs on any mismatch, a canonical-vector miss, or 0 side-module calls in
 // the relaxed run (= silent fallback). Usage: node bench/aes_check.mjs
-const createRandomX = require('../public/randomx.js');
+const createRandomX = require(process.env.RX_BUILD === 'st' ? '../public/randomx_st.js' : '../public/randomx.js');
 const M = await createRandomX();
 M._rxjit_set_feature(7); // relaxed allowed
 const t0 = Date.now();

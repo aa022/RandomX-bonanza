@@ -3,9 +3,13 @@
 public/randomx.js
 public/randomx.wasm
 public/randomx.worker.js
+public/randomx_st.js
+public/randomx_st.wasm
 wasm/randomx.js
 wasm/randomx.wasm
 wasm/randomx.worker.js
+wasm/randomx_st.js
+wasm/randomx_st.wasm
 
 # Node — `ws` is vendored under vendor/, so node_modules should never appear.
 # Listed defensively in case someone runs `npm i` by reflex.

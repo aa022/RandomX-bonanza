@@ -3,7 +3,7 @@
 //      step 7 of the VM main loop is replaced with an inline scan of 8 i64s
 //      from absolute (dataset + dataset_offset + ma) — this works because
 //      we always run in FULL_MEM mode where the dataset is precomputed.
-//   2. The memory import declares shared+max limits so it can be linked
+//   2. The memory import declares shared+max limits (RXJIT_MEM_FLAG) so it can be linked
 //      against the Emscripten pthreads SharedArrayBuffer-backed memory.
 //
 // Architecture: split into a STATIC module (compiled once per pthread,
@@ -470,7 +470,7 @@ uint32_t rxjit_generate_static_module(
 
 	// import section: memory only
 	WASM_SECTION(WASM_SECTION_IMPORT, {
-		WASM_U8_THUNK({1, 1, 'e', 1, 'm', 0x02, 0x03});
+		WASM_U8_THUNK({1, 1, 'e', 1, 'm', 0x02, RXJIT_MEM_FLAG});
 		WASM_U32(mem_min_pages);
 		WASM_U32(mem_max_pages);
 	});
@@ -578,7 +578,7 @@ uint32_t rxjit_generate_dynamic_module(
 			9,
 			1, 'e', 4, 'm', 'u', 'l', 'h',   0x00, 1,
 			1, 'e', 5, 'i', 'm', 'u', 'l', 'h',  0x00, 1,
-			1, 'e', 1, 'm',  0x02, 0x03,
+			1, 'e', 1, 'm',  0x02, RXJIT_MEM_FLAG,
 		});
 		WASM_U32(mem_min_pages);
 		WASM_U32(mem_max_pages);

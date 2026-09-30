@@ -2657,7 +2657,7 @@ uint32_t rxjit_generate_threaded_module(
 
 	// import section: memory only
 	WASM_SECTION(WASM_SECTION_IMPORT, {
-		WASM_U8_THUNK({1, 1, 'e', 1, 'm', 0x02, 0x03});
+		WASM_U8_THUNK({1, 1, 'e', 1, 'm', 0x02, RXJIT_MEM_FLAG});
 		WASM_U32(mem_min_pages);
 		WASM_U32(mem_max_pages);
 	});

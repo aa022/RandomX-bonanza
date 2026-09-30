@@ -20,7 +20,7 @@ import { dirname, join } from 'path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require   = createRequire(import.meta.url);
-const createRandomX = require(join(__dirname, '..', 'public', 'randomx.js'));
+const createRandomX = require(join(__dirname, '..', 'public', process.env.RX_BUILD === 'st' ? 'randomx_st.js' : 'randomx.js'));
 
 const args = process.argv.slice(2);
 function arg(name, dflt) {
