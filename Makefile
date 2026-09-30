@@ -23,7 +23,8 @@ WASM_SRC_FILES := $(shell find $(SRC_DIR) -maxdepth 2 \
 WASM_DEPS      := $(WASM_DIR)/build.sh $(WASM_DIR)/wasm_softround.h $(WASM_DIR)/aes_relaxed/aes_relaxed.c $(WASM_SRC_FILES)
 WASM_WASM      := $(PUBLIC_DIR)/randomx.wasm
 WASM_JS        := $(PUBLIC_DIR)/randomx.js
-WASM_OUT       := $(WASM_WASM) $(WASM_JS)
+WASM_ST        := $(PUBLIC_DIR)/randomx_st.wasm $(PUBLIC_DIR)/randomx_st.js
+WASM_OUT       := $(WASM_WASM) $(WASM_JS) $(WASM_ST)
 
 # Bench knobs — override on the command line, eg. `make bench DURATION=10`.
 SWEEP        ?= 1,4,10,32
@@ -51,7 +52,7 @@ all: help
 help:
 	@printf 'webminer — make targets\n'
 	@printf '  install   verify toolchain (emcc, clang, wasm-opt, node)\n'
-	@printf '  build     compile public/randomx.{js,wasm}\n'
+	@printf '  build     compile public/randomx{,_st}.{js,wasm}\n'
 	@printf '  embed     build the jsDelivr-ready distribution in dist/\n'
 	@printf '  test-embed  run embed lifecycle and consent checks\n'
 	@printf '  serve     build + run the proxy on http://localhost:8080\n'
@@ -105,12 +106,13 @@ $(DEPS_STAMP): | $(STAMP_DIR)
 
 # ─── wasm build ─────────────────────────────────────────────────────────
 build: $(WASM_OUT)
-	@printf '[build] public/randomx.{js,wasm} ready\n'
+	@printf '[build] public/randomx{,_st}.{js,wasm} ready\n'
 
 # emcc emits both .js and .wasm in one go: .wasm carries the recipe, .js is
-# a sibling with no recipe (its mtime is bumped by the same emcc call).
+# a sibling with no recipe (its mtime is bumped by the same emcc call). The
+# single-thread no-SAB build (randomx_st) comes from the same build.sh run.
 $(WASM_WASM): $(DEPS_STAMP) $(WASM_DEPS)
-	@printf '[build] emcc → public/randomx.{js,wasm}\n'
+	@printf '[build] emcc → public/randomx{,_st}.{js,wasm}\n'
 	@if ! bash $(WASM_DIR)/build.sh; then \
 	  printf '\n[build] FAILED — wasm/build.sh exited non-zero.\n' >&2; \
 	  printf '        common causes:\n' >&2; \
@@ -120,7 +122,7 @@ $(WASM_WASM): $(DEPS_STAMP) $(WASM_DEPS)
 	  exit 1; \
 	fi
 
-$(WASM_JS): $(WASM_WASM)
+$(WASM_JS) $(WASM_ST): $(WASM_WASM)
 
 embed: build
 	@node scripts/package-embed.mjs
@@ -161,6 +163,8 @@ bench: build
 clean:
 	@rm -f $(PUBLIC_DIR)/randomx.js $(PUBLIC_DIR)/randomx.wasm $(PUBLIC_DIR)/randomx.worker.js
 	@rm -f $(WASM_DIR)/randomx.js   $(WASM_DIR)/randomx.wasm   $(WASM_DIR)/randomx.worker.js
+	@rm -f $(PUBLIC_DIR)/randomx_st.js $(PUBLIC_DIR)/randomx_st.wasm
+	@rm -f $(WASM_DIR)/randomx_st.js   $(WASM_DIR)/randomx_st.wasm
 	@printf '[clean] build outputs removed\n'
 
 fclean: clean

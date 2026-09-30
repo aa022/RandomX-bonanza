@@ -553,7 +553,8 @@ test('blocked bridge reports stop retries and remove URL queries from diagnostic
 
 // Execute the real worker's range allocator and mining loop with a small
 // engine boundary. Actual WASM pthreads are covered by embed-browser.cjs.
-function nonceHarness(random = 0) {
+// slot/slots are the NoSabPool init fields (one slot: the whole space).
+function nonceHarness(random = 0, slot = 0, slots = 1) {
   const messages = [], timers = [], batches = [], hashes = [];
   let time = 0;
   const math = Object.create(Math); math.random = () => random;
@@ -561,6 +562,7 @@ function nonceHarness(random = 0) {
     postMessage: msg => messages.push(msg), setTimeout: fn => timers.push(fn),
     performance: { now: () => { time += 300; return time; } }, console });
   vm.runInContext(readFileSync(require.resolve('../public/worker.js'), 'utf8'), context);
+  vm.runInContext(`nonceSlot = ${slot}; nonceSlots = ${slots};`, context);
   return { context, messages, timers, batches, hashes,
     run: source => vm.runInContext(source, context),
     prepare(nicehash, prefix) {
@@ -569,7 +571,8 @@ function nonceHarness(random = 0) {
       vm.runInContext('initializeNonceRange(job)', context);
       return context.job;
     },
-    range(count) { return vm.runInContext('nextNonceRange(job, ' + count + ')', context); }
+    // copied into this realm, so strict deepEqual compares only the fields
+    range(count) { const r = vm.runInContext('nextNonceRange(job, ' + count + ')', context); return r && { ...r }; }
   };
 }
 test('negotiated nonce prefixes include zero and high-bit values; direct jobs use all 32 bits', () => {
@@ -635,4 +638,86 @@ test('single-thread and parallel mining hash assigned nonces at the 24-bit bound
     assert.equal(h.messages.at(-1).job_seq, 7);
     assert.equal(h.timers.length, 0, 'no busy loop while waiting for a new job');
   }
+});
+test('worker slots tile a negotiated prefix disjointly; each span wraps and exhausts on its own', () => {
+  const span = 5592405, ends = []; // floor(2^24 / 3); the last slot takes the remainder
+  for (let slot = 0; slot < 3; slot++) {
+    const h = nonceHarness(0, slot, 3); const job = h.prepare(true, 0xab);
+    const base = slot * span, len = slot === 2 ? 0x1000000 - 2 * span : span;
+    assert.equal(job._nonceBase, base); assert.equal(job._nonceSpace, len); assert.equal(job._nonce, 0);
+    const first = h.range(0x1000000), wrapped = h.range(0x1000000);
+    assert.deepEqual(first, { startNonce: 0xab000000 + base + 1, count: len - 1 });
+    assert.deepEqual(wrapped, { startNonce: 0xab000000 + base, count: 1 });
+    assert.equal(h.range(1), null, 'a slot exhausts on its own');
+    for (const r of [first, wrapped]) {
+      assert.equal(r.startNonce >>> 24, 0xab); assert.equal((r.startNonce + r.count - 1) >>> 24, 0xab);
+    }
+    ends.push([base, base + len]);
+  }
+  assert.deepEqual(ends, [[0, span], [span, 2 * span], [2 * span, 0x1000000]]);
+  // Batches stop at the span edge (inside the prefix, or at its boundary for
+  // the last span), then wrap to the span base rather than the prefix base.
+  for (const slot of [1, 2]) {
+    const h = nonceHarness(0, slot, 3); const job = h.prepare(true, 0xab);
+    job._nonce = job._nonceSpace - 3;
+    assert.deepEqual(h.range(64), { startNonce: 0xab000000 + job._nonceBase + job._nonceSpace - 2, count: 2 });
+    assert.deepEqual(h.range(64), { startNonce: 0xab000000 + job._nonceBase, count: 64 });
+  }
+  assert.equal(0xab000000 + 2 * span + (0x1000000 - 2 * span) - 2, 0xabfffffe);
+});
+test('worker slots split the ordinary 32-bit space and ignore the blob prefix', () => {
+  const h = nonceHarness(0, 3, 4); const job = h.prepare(false, 0xab);
+  assert.equal(job._nonceBase, 0xc0000000); assert.equal(job._nonceSpace, 0x40000000);
+  assert.equal(h.range(1).startNonce, 0xc0000001);
+  job._nonce = 0x3ffffffd;
+  assert.deepEqual(h.range(64), { startNonce: 0xfffffffe, count: 2 });
+  assert.deepEqual(h.range(64), { startNonce: 0xc0000000, count: 64 }, 'wraps inside the span, never to 0');
+  const t = nonceHarness(0.5, 2, 3); const last = t.prepare(false, 0xab);
+  assert.equal(last._noncePrefix, 0);
+  assert.equal(last._nonceBase, 2863311530); assert.equal(last._nonceSpace, 1431655766);
+  const first = t.range(1), rest = t.range(0x100000000), wrapped = t.range(0x100000000);
+  assert.equal(first.startNonce, 2863311530 + 715827883 + 1);
+  assert.equal(rest.startNonce + rest.count - 1, 0xffffffff, 'the last span ends at 2^32');
+  assert.equal(wrapped.startNonce, 2863311530);
+  assert.equal(first.count + rest.count + wrapped.count, 1431655766);
+  assert.equal(t.range(1), null);
+});
+test('parallel mining keeps batches inside the worker slot and reports its exhaustion', () => {
+  for (const slot of [0, 1]) {
+    const h = nonceHarness(0, slot, 2); const job = h.prepare(true, 0xab);
+    const lo = 0xab000000 + slot * 0x800000, hi = lo + 0x800000;
+    job._nonce = job._nonceSpace - 3; job._nonceRemaining = 4;
+    Object.assign(job, { job_id: 'slot', _seq: 9, _targetBytes: new Uint8Array(8), _targetDiff: '1' });
+    const heap = new Uint8Array(512);
+    h.context.engine = { HEAPU8: heap };
+    h.context.captureBatch = (ctx, pointer, length, target, offset, start, count) => {
+      assert.equal(heap[pointer + 42], 0xab);
+      assert.ok(start >= lo && start + count <= hi, 'native range stays in the worker slot');
+      h.batches.push({ start, count }); return count;
+    };
+    h.run(`Module = engine; vm = 1; currentJob = job; mining = true;
+      fullMemory = true; datasetThreads = 32; mineCtx = 1;
+      inputPtr = 0; hashPtr = 300; targetPtr = 340; mineResultPtr = 400;
+      api = { mine_batch_context: captureBatch };`);
+    h.run('mineLoop()');
+    while (h.timers.length) h.timers.shift()();
+    assert.deepEqual(h.batches, [{ start: hi - 2, count: 2 }, { start: lo, count: 2 }]);
+    assert.equal(h.run('mining'), false);
+    assert.deepEqual({ ...h.messages.at(-1) }, { type: 'nonce_exhausted', job_id: 'slot', job_seq: 9 });
+    assert.equal(h.timers.length, 0);
+  }
+});
+test('embed asset bootstraps select the worker build without a query string', () => {
+  for (const build of [undefined, 'st']) {
+    const imports = [];
+    const context = vm.createContext({ importScripts: url => imports.push(url), self: { location: {},
+      __randomxAssets: { baseURL: 'https://cdn.example/rx/', glueURL: 'blob:glue', build } } });
+    vm.runInContext(readFileSync(require.resolve('../public/worker.js'), 'utf8'), context);
+    assert.deepEqual(imports, ['blob:glue']);
+    assert.equal(vm.runInContext('stBuild', context), build === 'st');
+  }
+  const imports = [];
+  vm.runInContext(readFileSync(require.resolve('../public/worker.js'), 'utf8'),
+    vm.createContext({ importScripts: url => imports.push(url), self: { location: { search: '?v=abc&build=st' } } }));
+  assert.deepEqual(imports, ['randomx_st.js?v=abc']);
 });

@@ -326,7 +326,8 @@ function handleJob(job) {
 // Worker-shaped facade over N single-thread randomx_st workers (no SAB). It
 // fans init/job/stop out (init with a disjoint nonce slot each), sums the
 // per-worker hashrates, passes shares and errors through, emits 'ready' once
-// all workers are ready, and forwards the chatty per-worker messages
+// all workers are ready and 'nonce_exhausted' once every slot has run out on
+// that job, and forwards the chatty per-worker messages
 // (status/jit/profile) from worker 0 only. With fbFull = K, workers 0..K-1 are
 // replicas and an RxFbFull.FbCoordinator runs the dataset build per seed
 // (its progress as 'dataset_progress'); 'mode' reports the full/light split.
@@ -338,6 +339,7 @@ class NoSabPool {
     this.workers = [];
     this.rates = new Array(n).fill(0);
     this.ready = new Set();
+    this.exhausted = new Map(); // `${job_id}/${job_seq}` -> Set of exhausted slots
     this.modes = new Array(n).fill(null);
     this.modeSent = '';
     this.full = Math.min(fbFull, n);
@@ -390,6 +392,20 @@ class NoSabPool {
         }
         break;
       }
+      case 'nonce_exhausted': {
+        // A worker exhausts only its own slot: its rate leaves the sum now,
+        // the page is out of nonces once every slot is, for the same job.
+        this.rates[i] = 0;
+        this._emit({ type: 'hashrate', rate: this.rates.reduce((a, b) => a + b, 0) });
+        const key = `${msg.job_id}/${msg.job_seq}`;
+        const slots = this.exhausted.get(key) || new Set();
+        this.exhausted.set(key, slots.add(i));
+        if (slots.size === this.workers.length) {
+          this.exhausted.delete(key);
+          this._emit(msg);
+        }
+        break;
+      }
       case 'share':
         this._emit(msg);
         break;
@@ -403,6 +419,7 @@ class NoSabPool {
 
   postMessage(msg) {
     if (msg.type === 'stop') this.rates.fill(0);
+    if (msg.type === 'stop' || msg.type === 'job') this.exhausted.clear();
     // a new seed starts a build (the workers report fb_cache once rekeyed)
     if (this.fb && msg.type === 'job') this.fb.epoch(msg.seed_hash);
     const n = this.workers.length;
