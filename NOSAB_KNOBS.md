@@ -28,8 +28,8 @@ The build is chosen by the worker's URL (`build=st`), not by the init message, b
 | `?fb_full=K` (0–2) | **0** | Makes workers 0..K-1 full-dataset replicas; the rest stay light | +~2.3 GB per replica |
 | `?jit_profile=auto\|arm\|x86` | `auto` | Generator profile, per worker (same as the isolated path) | |
 | `?jit_exp=…` | – | Codegen overrides, e.g. `fuse_n=N`, `shared_code=0\|1`, `aes_relaxed=0\|1`, `no_supjit` (same as the isolated path) | |
-| `?jit_exp=light_mlp=N` (0–2) | profile (0) | Light workers, step 7: `1` loads the next item's first cache line early (probe, no gain); `2` computes this and the next iteration's item together on even iterations (item pairing, +20% at 1T, 12 workers unmeasured) | ~36 KB more x64 code (the pair fn) |
-| `?jit_exp=kernel_k=N` (1–4) | profile (1) | Dataset-build kernel items per loop trip (`fb_full` builds, and the isolated path's full-mode init); 2–4 build ~11–15% faster at 1T | |
+| `?jit_exp=light_mlp=N` (0–2) | profile (x86 **2**, arm 0) | Light workers, step 7: `0` one item per iteration; `1` loads the next item's first cache line early (probe, no gain); `2` computes this and the next iteration's item together on even iterations (item pairing: +21% at 1 worker, +4% at 12 over `0`) | ~36 KB more x64 code (the pair fn) |
+| `?jit_exp=kernel_k=N` (1–4) | profile (x86 **4**, arm 1); `fb_full` chunks 1 | Dataset-build kernel items per loop trip. The profile value applies to the isolated path's full-mode init (12T: 4.52 s at K = 1, 4.21 s at K = 4). The `fb_full` chunk kernels use 1 unless this knob is set, because larger K made the 12-worker build slower (6.7 s at K = 1, 10.5 s at K = 4) | |
 | `?nojit=1` / `?jit=0` | JIT on | Portable interpreter (~3 H/s per worker, debugging only) | |
 
 - **`?light=1` / `?full=0`** do nothing on the no-SAB path: a worker is always light unless `fb_full` makes it a replica. The light workers use the JIT (threaded interpreter plus the embedded superscalar item function).
@@ -37,7 +37,7 @@ The build is chosen by the worker's URL (`build=st`), not by the init message, b
 - **The status line and log** report the choice, e.g. `No SharedArrayBuffer: 12 single-thread light-mode workers …`, then `fb_full=1: 1 of them build and mine on a full dataset replica` and `fb_full: 1/1 replica(s) mining in full mode`.
 
 ## 2a. `?coi=1`: the COOP/COEP service worker
-Some deployments serve the page in a secure context but can't set COOP/COEP: static hosts, CDNs, or proxies that drop the headers. There the page lands on the no-SAB path (252 H/s at 12 workers on a 5600X, against ~678 for SAB full mode).
+Some deployments serve the page in a secure context but can't set COOP/COEP: static hosts, CDNs, or proxies that drop the headers. There the page lands on the no-SAB path (278 H/s at 12 workers on a 5600X, against ~630 for SAB full mode).
 
 With `?coi=1`, a same-origin service worker (`public/coi-sw.js`, the coi-serviceworker technique) re-serves every response with `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp` and `Cross-Origin-Resource-Policy: same-origin`. After one reload the page is `crossOriginIsolated`, and `miner.js` takes the normal SAB path with no other change. It stays opt-in; any default is a product decision.
 
@@ -53,25 +53,25 @@ With `?coi=1`, a same-origin service worker (`public/coi-sw.js`, the coi-service
   - Firefox private windows: no service workers;
   - deployments that already send the headers: already isolated, so the script does nothing (the proxy, `make serve`).
 - **COEP caveat:** `require-corp` blocks future cross-origin subresources that lack CORP or CORS. `index.html` has none today, and the fonts are local. If some are added, the escape hatch is `Cross-Origin-Embedder-Policy: credentialless` in `coi-sw.js` (Chromium/Firefox). The pool WebSocket is not subject to COEP.
-- **Expected:** where it applies, 12 threads go from no-SAB light 252 to SAB full ~678 H/s (2.7×), and 1 thread from ~34 to ~100. RAM goes from 3.6 GB to ~2.6 GB. The cost is one reload on the first visit plus the usual SAB dataset init. Nothing changes anywhere else.
+- **Measured:** where it applies, 12 threads go from no-SAB light to SAB full: 224 → 597 H/s in headless Chromium before item pairing, 263 → 548 after (`coi_e2e`, 20 s, noisy). In Node that is 278 → ~630, and 1 thread ~44 → ~100. RAM goes from 3.6 GB to ~2.6 GB. The cost is one reload on the first visit plus the usual SAB dataset init. Nothing changes anywhere else.
 - **Check:** `node bench/coi_e2e.mjs [--threads 2 --secs 8 --full 0|1]`. It serves `public/` over http://127.0.0.1 without headers and drives headless Chromium. The scenarios are: no param; `?coi=1` (one reload, then SAB light and full runs); reload without params; `?coi=0`; service workers stubbed away; registration failing while Start waits; `coi-sw.js` without the header injection. Shares are re-verified in Node.
 
 ## 3. How `fb_full=K` works
 - **Build:** after each seed change, all N workers build the replicas' datasets together. `public/fb_full.js` `FbCoordinator` hands out 2^16-item chunks of 4 MB, with at most 2N in flight. Each worker computes its chunk with `rxInitItemsInto` and the supjit kernel, then sends it as a transferable buffer. The replicas copy each chunk into their own dataset.
 - **After the build:** the replicas release their caches and mine in full mode (1 thread, JIT); the other workers keep mining light.
 - **Failure:** a replica that can't allocate its dataset demotes itself to light and mining continues.
-- **The build takes ~7.5 s at 12 workers** (8.8 s at 6) on a Ryzen 5600X, then repeats on each seed change.
+- **The build takes ~6.6 s at 12 workers** (8.2 s at 6) on a Ryzen 5600X, then repeats on each seed change.
 - Messages from an old seed are dropped.
 
 ## 4. Measured (Ryzen 5600X, Node `bench/nosab_bench.mjs`, `randomx_st`, x86 profile)
 
 | Workers | light only | `fb_full=1` | `fb_full=2` | RAM (light / K=1 / K=2) |
 |---|---|---|---|---|
-| 1 | 33.7 H/s | | | 0.3 GB |
-| 6 | 193 | 259 (+34%) | | 1.8 / 3.8 GB |
-| 12 | 252 | 270 (+7%) | 299 (+18%) | 3.6 / 5.9 / 8 GB |
+| 1 | 43.7 H/s | | | 0.3 GB |
+| 6 | 250.6 | 302.5 (+21%) | | 1.8 / 3.8 GB |
+| 12 | 278.2 | 308.5 (+11%) | 299 (+18%, before item pairing) | 3.6 / 5.9 / 8 GB |
 
-The SAB full mode gets ~678 H/s at 12 threads on the same box. SMT adds only ~25% for light workers, so on memory-tight machines `?threads=` equal to the number of physical cores keeps most of the hashrate at half the RAM.
+Measured 2026-10-01 with item pairing (`light_mlp=2`, x86 default), one 15 s run each. Before it (2026-09-30): light 33.7 / 193 / 252 and `fb_full=1` 259 / 270 at 1 / 6 / 12 workers. The SAB full mode gets ~630 H/s at 12 threads on the same box (`bench_webui --threads 12`, 15 s; 678 in an earlier session). SMT adds only ~11% for light workers (6 → 12), so on memory-tight machines `?threads=` equal to the number of physical cores keeps ~90% of the hashrate at half the RAM.
 
 **Why `fb_full` stays opt-in:** browsers don't report RAM reliably (`navigator.deviceMemory` is capped and missing in Firefox), and a tab killed for running out of memory loses everything. A replica also delays full speed by the build time on every seed.
 
@@ -80,6 +80,7 @@ The SAB full mode gets ~678 H/s at 12 threads on the same box. SMT adds only ~25
 | Situation | URL |
 |---|---|
 | Default (no knobs) | light workers on every thread |
+| HTTPS or localhost page without COOP/COEP | `?coi=1` once (the service worker persists; SAB full mode, ~2.2× at 12 threads, §2a) |
 | Plenty of RAM (≥ 16 GB), long session | `?fb_full=2` |
 | 8 GB machine | `?fb_full=1&threads=<physical cores>`, or no `fb_full` |
 | Low RAM or a shared machine | `?threads=<physical cores>` |
