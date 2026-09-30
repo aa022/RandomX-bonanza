@@ -2,7 +2,7 @@
 
 Updated: 2026-09-30.
 
-**Status: client compatibility with the corrected VPS contract is implemented and locally validated. Preparing the delivery branch `embed-v0.2.0-demo` and a minimal Netlify test directory. The operator confirmed the donation wallet in `config.js`; public endpoint acceptance testing is still pending.**
+**Status: the runtime is committed and pushed on `embed-v0.2.0-demo` at `2ea238ff993873097e18788b5892390f0d0fd803`. The minimal `netlify-demo/` directory is prepared with the operator-confirmed wallet and ready for upload. Public endpoint acceptance testing is still pending.**
 
 ## Completed
 
@@ -31,6 +31,8 @@ Updated: 2026-09-30.
 - Real Chrome failure fixtures passed missing isolation headers, denied Permissions Policy, blocked workers, blocked downloads and blocked WASM compilation. The widget rendered deployment details and the API emitted error events; preflight failures and all pre-consent checks started no engine work.
 - The exported snippet passed against an independent fixed-route proxy fixture: explicit NiceHash without advertised extensions, at least 100 WASM-generated shares with correct job prefixes and zero synthetic fixture rejections, required keepalive, changed jobs/prefixes, native pong, and 1012 reconnect with identical workers/cache. A wrong donation wallet produced a visible terminal error, no upstream mining login and no retry.
 - JavaScript syntax and whitespace checks passed. All five runtime distribution files matched their source copies and the manifest's SHA-256 hashes.
+- The published jsDelivr pin returned HTTP 200 for all five runtime assets, with matching SHA-256 hashes, correct JS/WASM types, wildcard CORS and cross-origin CORP.
+- Chrome loaded the actual Netlify test page against that public CDN pin with its isolation headers: browser support/isolation, wallet/proxy/modes and disclosure were correct. Pre-consent and unchecked Start produced no engine downloads, workers or WS connections. This did not start mining against the public proxy.
 
 These checks used a fixture pool. They do **not** establish acceptance by a real pool or a deployed XMRig Proxy binary.
 
@@ -50,10 +52,10 @@ The local reference `proxy/index.js` still supports configurable direct upstream
 
 ## Resume after VPS setup
 
-1. Obtain the actual operator donation wallet and confirm the supplied WSS endpoint/routing and admission policy.
+1. Deploy `netlify-demo/` to Netlify and record the final site URL. The donation wallet is confirmed; check the WSS endpoint's admission policy for the deployed origin.
 2. Test that endpoint with `nonceMode: 'nicehash'` and `keepalive: 'required'`: verify genuine pool-accepted shares, every submitted prefix, terminal rejection of other wallets, and reconnects without a same-seed dataset rebuild. The synthetic fixture's zero rejections do not establish real pool acceptance or independently validate each hash cryptographically.
-3. Publish the current distribution to a public pinned commit/release or npm version so jsDelivr can serve it. The builder's `@v0.2.0` URL remains a placeholder until publication.
-4. Deploy the Netlify test page with the isolation headers and configuration documented in `proxy_handoff.md`.
+3. Keep the test on the published full-commit jsDelivr pin; publish a new runtime commit for any runtime changes rather than mixing versions.
+4. Verify the actual Netlify HTML response has the isolation headers from the supplied `_headers` file.
 5. Verify the public Netlify → jsDelivr → VPS → pool path, consent/Stop behavior and reconnect recovery.
 
-The implementation and packaged assets are being published to the delivery branch, with the final status to be recorded after push. No npm release, VPS deployment or Netlify deployment has been performed. This progress file and `proxy_handoff.md` are explicitly included for sharing.
+The implementation and packaged assets are published on the delivery branch. The subsequent Netlify-directory commit retains the same runtime pin. No npm release, VPS deployment or Netlify deployment has been performed. This progress file and `proxy_handoff.md` are explicitly included for sharing.

@@ -47,6 +47,13 @@ waits for consent; **Clear** stops and removes it. Worker, memory mode and
 script URL, proxy routing, nonce mode and keepalive are under **Advanced**;
 host setup is under **Deployment / CORS**.
 
+For the public proxy test, deploy the contents of [netlify-demo](netlify-demo/README.md)
+directly to Netlify with no build step. It includes the operator-confirmed
+donation wallet, `wss://proxy.randomx.cc/embed-ws`, explicit NiceHash/required
+keepalive settings and isolation headers. The page and builder default pin
+the published runtime commit `2ea238ff993873097e18788b5892390f0d0fd803`
+from the `embed-v0.2.0-demo` delivery branch.
+
 ## jsDelivr embed
 
     make embed       # → dist/ with embed, worker, runtime, WASM and licenses
@@ -62,7 +69,7 @@ records file sizes, SHA-256 hashes and script integrity values.
 
 ```html
 <script
-  src="https://cdn.jsdelivr.net/gh/aa022/RandomX-bonanza@v0.2.0/dist/embed.js"
+  src="https://cdn.jsdelivr.net/gh/aa022/RandomX-bonanza@2ea238ff993873097e18788b5892390f0d0fd803/dist/embed.js"
   crossorigin="anonymous"
   data-wallet="YOUR_MONERO_ADDRESS"
   data-pool="pool.supportxmr.com"
@@ -124,7 +131,7 @@ and consent event. Light mode has no full dataset to initialize.
 <button id="mining-stop">Stop</button>
 <p id="mining-status" role="status"></p>
 <output id="mining-rate"></output>
-<script src="https://cdn.jsdelivr.net/gh/aa022/RandomX-bonanza@v0.2.0/dist/embed.js"
+<script src="https://cdn.jsdelivr.net/gh/aa022/RandomX-bonanza@2ea238ff993873097e18788b5892390f0d0fd803/dist/embed.js"
         crossorigin="anonymous" data-auto="false"></script>
 <script>
   const miner = RandomXEmbed.create({

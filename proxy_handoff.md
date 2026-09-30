@@ -1,10 +1,10 @@
 # RandomX embed: VPS bridge and public demo handoff
 
-Snapshot: 2026-09-30, embed version `0.2.0`, current working tree.
+Snapshot: 2026-09-30, embed version `0.2.0`, delivery branch `embed-v0.2.0-demo`.
 
 This describes the implementation in this checkout. The intended public demo is a Netlify page loading the embed from jsDelivr, connecting through a VPS WebSocket bridge to a Monero RandomX pool. The browser does the mining; the VPS only relays pool traffic.
 
-Local browser integration has exercised real full-memory initialization, share submission to a fixture pool, automatic NiceHash negotiation including a shortened native batch at the nonce boundary, ordinary → NiceHash → ordinary reconnects with the same workers and dataset, cross-origin assets, and the exported headless quickstart example. **The public VPS → real pool → Netlify/jsDelivr combination has not been verified yet.** The new embed, bridge changes, and `dist/` assets are currently working-tree changes; a fresh checkout of the existing remote will not necessarily contain them. The builder's `@v0.2.0` URL is a release placeholder, not evidence that this version is published.
+Local browser integration has exercised real full-memory initialization, share submission to a fixture pool, automatic NiceHash negotiation including a shortened native batch at the nonce boundary, ordinary → NiceHash → ordinary reconnects with the same workers and dataset, cross-origin assets, and the exported headless quickstart example. **The public VPS → real pool → Netlify/jsDelivr combination has not been verified yet.** The runtime, bridge changes and `dist/` assets are published on `embed-v0.2.0-demo` at commit `2ea238ff993873097e18788b5892390f0d0fd803`. All five runtime files at that jsDelivr pin returned HTTP 200 with matching hashes, JavaScript/WASM MIME types, wildcard CORS and cross-origin CORP. The builder defaults to this published pin; no npm version or release tag has been published.
 
 ## Deployment contract at a glance
 
@@ -330,7 +330,9 @@ Before deploying the test page, verify HTTP 200, JavaScript/WASM content types a
 
 ## Minimal Netlify test page
 
-Use a static publish directory with `index.html`, `demo.js` and `_headers`. Replace every placeholder below before deployment. These are examples for the next deployment step, not files already deployed by this handoff.
+The ready-to-upload [netlify-demo directory](netlify-demo/README.md) contains `index.html`, `demo.js` and `_headers`, uses the confirmed wallet from `config.js`, and pins the published runtime commit. Drag the entire directory into Netlify's manual deploy interface; its contents are the publish directory, with no build command. Chrome loaded that page using the actual pinned jsDelivr embed and these headers, confirmed isolation/support and the payout disclosure, and verified that pre-consent/unchecked Start created no engine downloads, workers or WS connections. The Netlify site itself has not been deployed by this session.
+
+The examples below describe a custom equivalent. Replace their placeholders before use; the ready-to-upload directory already has its real configuration.
 
 `index.html`:
 
