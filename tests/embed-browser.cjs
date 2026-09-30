@@ -219,6 +219,18 @@ async function waitUntil(check, timeout = 30000) {
     const residentWorkers = page.workers();
     const buildsBefore = await page.evaluate(() => window.cacheBuilds);
     assert.equal(buildsBefore, 1);
+    const backgroundLogins = logins, backgroundShares = submits;
+    const otherTab = await browser.newPage();
+    await otherTab.goto('about:blank'); await otherTab.bringToFront();
+    await page.waitForFunction(() => document.hidden, { polling: 100, timeout: 10000 });
+    await waitUntil(() => submits > backgroundShares);
+    assert.equal(logins, backgroundLogins, 'tabbing out does not close the pool connection');
+    for (const socket of poolSockets) socket.destroy();
+    await waitUntil(() => logins > backgroundLogins && submits > backgroundShares + 1);
+    assert.equal(await page.evaluate(() => window.cacheBuilds), buildsBefore);
+    assert.deepEqual(page.workers(), residentWorkers, 'background reconnect keeps all engine workers');
+    await otherTab.close(); await page.bringToFront();
+    console.log('PASS: mining and reconnects continue in a background tab without rebuilding the dataset');
     const loginsBefore = logins;
     advertisedNicehash = true;
     for (const socket of poolSockets) socket.destroy();

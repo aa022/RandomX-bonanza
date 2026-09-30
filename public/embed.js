@@ -6,7 +6,7 @@
   const script = document.currentScript;
   const defaultBase = new URL('.', script && script.src || location.href).href;
   const ownerKey = Symbol.for('randomx.bonanza.active-session');
-  const VERSION = '0.2.0';
+  const VERSION = '0.2.1';
   const MAX_WORKLOAD = 80;
 
   function number(value, fallback, label) {
@@ -255,7 +255,7 @@
         `at most ${budget.maxThreads}. Dataset initialization uses 32 threads. ` +
         (config.mode === 'full' ? 'Full mode needs about 2.5 GiB of RAM. ' : 'Light mode needs about 256 MiB of RAM. ') +
         'This uses electricity and can heat your device or drain its battery. Stop at any time. ' +
-        'Mining stops when this page is hidden; returning requires consent again.';
+        'Mining continues in background tabs until you stop it or leave this page; your browser may throttle or suspend it.';
     }
     function supportCheck() {
       if (!budget.maxThreads) throw new Error('This device has no mining threads within the configured core limit');
@@ -281,7 +281,7 @@
       pendingRequests.set(id, { kind, sentAt: Date.now() });
       send(s, { id, jsonrpc: '2.0', method, params });
     }
-    function clearConnection(s) {
+    function clearConnection(s, closeReason = 'Transport reset') {
       clearTimeout(s.connectTimer); clearTimeout(s.errorTimer); clearInterval(s.heartbeat);
       s.connectTimer = s.errorTimer = s.heartbeat = null;
       s.nicehash = false;
@@ -289,7 +289,7 @@
         const ws = s.ws;
         s.ws = null;
         ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
-        try { ws.close(); } catch (_) {}
+        try { ws.close(1000, closeReason); } catch (_) {}
       }
       minerId = null;
       lastJob = null;
@@ -325,7 +325,7 @@
       return true;
     }
     function connect(s) {
-      if (!isCurrent(s) || document.hidden) return;
+      if (!isCurrent(s)) return;
       clearConnection(s);
       update({ phase: 'connecting', status: 'Connecting to pool bridge…' });
       let ws;
@@ -512,7 +512,7 @@
       policyAttempt = null;
       if (s) {
         s.abort.abort();
-        clearConnection(s);
+        clearConnection(s, 'Session stopped');
         for (const child of s.children.values()) child.terminate();
         s.children.clear();
         if (s.worker) s.worker.terminate();
@@ -626,7 +626,9 @@
       removeQuickstart = () => { document.removeEventListener('click', handler); document.removeEventListener('keydown', handler); };
     }
     const onVisibility = () => {
-      if (document.hidden && (state.running || state.phase === 'consent')) stop('Page hidden — stopped; consent is required to restart');
+      // An approved session survives tab switches, including initialization
+      // and reconnects. A pending consent request cannot start while hidden.
+      if (document.hidden && state.phase === 'consent') stop('Page hidden — consent request cancelled');
     };
     const onPageHide = () => stop('Page closed — stopped');
     const onOffline = () => { if (session) reconnect(session, 'Network offline'); };

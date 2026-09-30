@@ -1,10 +1,10 @@
 {
-  "version": "0.2.0",
+  "version": "0.2.1",
   "files": {
     "embed.js": {
-      "bytes": 42110,
-      "sha256": "050bacd9e03754123bdc03d3575501874dba91d8716af8dd4cba48f9e97e1086",
-      "integrity": "sha384-VLIwwW7yEoDDVMVKyeKjWjvuTQqR3Fjv60x6ftyLxqgIMWuBqvqWd0GXzH0+T11C"
+      "bytes": 42324,
+      "sha256": "7d358d64fb934bc986edfdbe752131a0b62387a636ab61eae803c5f6621a0ad5",
+      "integrity": "sha384-hogRP0M9s+CZqFlLtWU/BAy6DFncAB54oLqAPY8kzlGK8M2D2CmuA4DzEKcW/akN"
     },
     "embed-worker.js": {
       "bytes": 1060,

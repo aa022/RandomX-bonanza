@@ -12,8 +12,8 @@ Updated: 2026-09-30.
 - Added the configuration form, exported drop-in script and local preview to the web UI served by `make serve`.
 - Kept consent session-only. Normal widget startup requires its checkbox and a trusted Start click. Quickstart has no built-in checkbox: the first qualifying interaction emits a consent request, and the deployer must explicitly accept it. No handler/acceptance means no mining.
 - Set mining limits to 80% of browser-reported cores globally, 50% for detected/inferred ARM, and at most 32 mining threads. Removed efficiency-core configuration. Full dataset initialization still requests 32 threads and is disclosed separately.
-- Implemented indefinite transport reconnect attempts during an approved, visible session, with 1–30 second backoff, login/response timeouts and prompt retry on `online`.
-- Preserved the engine workers, shared memory and same-seed dataset across reconnects. Full mode releases its cache after dataset construction; light mode retains its cache. Stop, hiding the page, effective workload changes and engine failure end the worker session and require fresh consent.
+- Implemented indefinite transport reconnect attempts during an approved session, with 1–30 second backoff, login/response timeouts and prompt retry on `online`.
+- Preserved the engine workers, shared memory and same-seed dataset across reconnects and tab switches. Full mode releases its cache after dataset construction; light mode retains its cache. Stop, page unload, effective workload changes and engine failure end the worker session and require fresh consent. Hiding cancels pending consent requests, but leaves approved mining running, subject to browser throttling/suspension.
 - Adopted ordinary Monero JSON-RPC login/job/submit messages. Pool routing uses the WS URL's `pool` and `port` query parameters. Native WS ping/pong and negotiated `keepalived` replace the new embed's former custom handshake/heartbeat requirements. The original demo's legacy handshake remains supported by the reference bridge.
 - Added automatic NiceHash/XMRig Proxy negotiation in both the embed and original demo. Login `result.extensions` containing `"nicehash"` enables assigned nonce prefixes; no UI switch is required. `instance.state.nicehash` exposes the negotiated mode.
 - Preserved each aggregated job's high nonce byte while searching its remaining 24 bits. Ordinary jobs search all 32 bits. Parallel batches stop before overflow into another prefix; a fully exhausted range waits for a fresh job rather than repeating work.
@@ -25,7 +25,7 @@ Updated: 2026-09-30.
 
 ## Validation completed
 
-- `make test-embed`: **37 tests passed**, covering consent, CPU limits, lifecycle, reconnects, automatic/explicit NiceHash, ordinary 32-bit mode, prefix boundaries/exhaustion, independent proxy routing, browser-scoped replies, opaque session tokens, frame sizes, required/negotiated keepalive, terminal errors and deployment diagnostics.
+- `make test-embed`: **38 tests passed**, covering consent, CPU limits, lifecycle, background initialization/mining/reconnects, automatic/explicit NiceHash, ordinary 32-bit mode, prefix boundaries/exhaustion, independent proxy routing, browser-scoped replies, opaque session tokens, frame sizes, required/negotiated keepalive, terminal errors and deployment diagnostics.
 - Real Chrome integration against a local fixture pool passed full-memory initialization, share submission, ordinary → NiceHash → ordinary reconnects, assigned nonce preservation, and a shortened native batch at the 24-bit boundary. The same worker objects remained resident and cache/dataset construction occurred only once across those reconnects.
 - The exported headless quickstart example passed with custom consent, custom controls and cross-origin assets.
 - Real Chrome failure fixtures passed missing isolation headers, denied Permissions Policy, blocked workers, blocked downloads and blocked WASM compilation. The widget rendered deployment details and the API emitted error events; preflight failures and all pre-consent checks started no engine work.
@@ -59,3 +59,39 @@ The local reference `proxy/index.js` still supports configurable direct upstream
 5. Verify the public Netlify → jsDelivr → VPS → pool path, consent/Stop behavior and reconnect recovery.
 
 The implementation and packaged assets are published on the delivery branch. The subsequent Netlify-directory commit retains the same runtime pin. No npm release, VPS deployment or Netlify deployment has been performed. This progress file and `proxy_handoff.md` are explicitly included for sharing.
+
+## Live debugging, 2026-09-30
+
+The user deployed https://fluffy-elf-267140.netlify.app/ and the VPS relay is
+operational. The actual HTML supplies COOP/COEP/Permissions Policy correctly.
+A clean Chrome 154 session with the published embed initialized full memory,
+received real jobs and 15-second keepalive replies, and mined for two minutes
+with zero reconnects/JIT errors. All five downloaded runtime assets matched
+the published manifest. This bounded run produced no submitted shares, so it
+does not establish real-pool acceptance. The observed target's difficulty was
+approximately 75,000; short runs without shares are expected at browser rates.
+
+Four-thread comparison used the identical real pool blob and seed in a local
+fixture, a 10-second warmup and 25-second sampling window, with sequential
+fresh Chrome instances. Median rates on this machine:
+
+| Assets / Chromium mode | H/s |
+| --- | ---: |
+| Local `public/` assets, normal optimizers | 620 |
+| Published jsDelivr assets, normal optimizers | 622 |
+| Published jsDelivr assets, `--js-flags=--disable-optimizing-compilers` | 286 |
+
+All three used four mining threads, full mode, the ARM engine profile and
+NiceHash nonce handling, with no JIT failures. This reproduces the reported
+speed gap and points to Chromium's per-site JavaScript optimizers permission;
+the user's actual permission has not been inspected. Safari performing well
+is consistent with that hypothesis. A checked runtime JIT flag alone does not
+confirm browser WASM tiering is enabled. See README's Chromium diagnostic.
+
+The background-stop bug is fixed in runtime 0.2.1: approved initialization,
+mining and reconnects survive tab switches without destroying the workers or
+dataset. The consent disclosure explains background continuation and possible
+browser throttling/suspension. Stop/unload still withdraw consent and terminate
+the engine. Intentional WS closes use code 1000 and an explicit short reason
+instead of an empty close frame. Publication and the new CDN pin follow after
+the real-browser regression suite passes.

@@ -17,12 +17,13 @@ login. The proxy must accept the deployed site's Origin if it restricts origins.
 
 The normal widget displays the payout, pool and resource disclosure. Mining
 requires a checked consent box and a trusted Start click; loading the page
-does not initialize the engine or connect to the proxy. Stop and page hiding
-end the session and require fresh consent. Default mining workload is 50%;
+does not initialize the engine or connect to the proxy. Stop and page unload
+end the session and require fresh consent. Approved mining continues in
+background tabs, subject to browser throttling or suspension. Default mining workload is 50%;
 full dataset initialization uses 32 threads and roughly 2.5 GiB of RAM.
 
 After deploying, check the widget, consent, hashrate and genuine pool-accepted
-shares. Test a proxy restart while the page remains visible: transport retries
+shares. Test a proxy restart, including while the tab is in the background: transport retries
 should reuse the same-seed dataset. Browser diagnostics are available in the
 widget's Deployment details and in `window.demoMiner.state` /
 `window.demoMiner.diagnostics`. The public VPS/pool path still needs this live

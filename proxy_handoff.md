@@ -1,6 +1,6 @@
 # RandomX embed: VPS bridge and public demo handoff
 
-Snapshot: 2026-09-30, embed version `0.2.0`, delivery branch `embed-v0.2.0-demo`.
+Snapshot: 2026-09-30, embed version `0.2.1`, delivery branch `embed-v0.2.0-demo`.
 
 This describes the implementation in this checkout. The intended public demo is a Netlify page loading the embed from jsDelivr, connecting through a VPS WebSocket bridge to a Monero RandomX pool. The browser does the mining; the VPS only relays pool traffic.
 
@@ -112,7 +112,7 @@ Useful integration methods/events:
 - `instance.stop()`, `.setWorkload(percentage)`, `.mount(container)` and `.destroy()` support custom integrations. Changing the effective workload stops the session and requires consent again.
 - `randomx:state` is dispatched on `document` with `detail.instance`. Data-attribute auto-initialization dispatches `randomx:ready` on **window**, with `detail.instance`; its configuration failures dispatch `randomx:error` on **document**.
 
-Only one embed instance on the same page can mine at once. Other tabs are not coordinated. Stop, hiding the page, `pagehide`, or destroy terminates the control worker and all pthreads, aborts a pending runtime download, closes WS, cancels retries and withdraws consent. Returning to the page requires a fresh Start/consent; quickstart does not automatically re-arm after its first interaction. A network hiccup alone preserves consent while the page remains visible.
+Only one embed instance on the same page can mine at once. Other tabs are not coordinated. Stop, `pagehide`, or destroy terminates the control worker and all pthreads, aborts a pending runtime download, closes WS, cancels retries and withdraws consent. Returning after navigation requires a fresh Start/consent; quickstart does not automatically re-arm after its first interaction. An approved session continues across tab switches, including initialization and reconnects, with its workers/dataset retained. Hiding the page cancels a pending consent request. Browsers may throttle or suspend background tabs; the embed cannot guarantee uninterrupted background execution.
 
 ### Deployment diagnostics
 
@@ -120,7 +120,7 @@ Only one embed instance on the same page can mine at once. Other tabs are not co
 
 `instance.diagnostics.error` and `instance.state.error` expose the latest failure. `instance.on('error', handler)` and document `randomx:error` events supply `{ code, message, hints, checks, stage }`; confirmed CSP violations also include `directive` and `resource` (query strings and credentials removed). Register a document listener before creating the embed, or inspect `.diagnostics.error` immediately afterward, to capture preflight failures. Generic download/worker errors list possible checks rather than asserting an unconfirmed cause. A delayed CSP report may replace a generic error for the same failed attempt.
 
-Relevant enforced CSP violations are captured from the page and owned workers, including denied blob workers, runtime fetches and WASM compilation. Report-only and unrelated violations are ignored. A confirmed policy failure ends the session instead of retrying a permanently blocked operation; normal transport hiccups still reconnect while approved/visible and preserve the dataset. Stop clears the error and suppresses late reports; destroy removes the listeners. If CSP blocks `embed.js` itself, only the browser console can explain that failure because the embed never runs. Permissions Policy introspection is optional and browser-dependent. [MDN: CSP violation events](https://developer.mozilla.org/en-US/docs/Web/API/SecurityPolicyViolationEvent).
+Relevant enforced CSP violations are captured from the page and owned workers, including denied blob workers, runtime fetches and WASM compilation. Report-only and unrelated violations are ignored. A confirmed policy failure ends the session instead of retrying a permanently blocked operation; normal transport hiccups still reconnect while approved and preserve the dataset. Stop clears the error and suppresses late reports; destroy removes the listeners. If CSP blocks `embed.js` itself, only the browser console can explain that failure because the embed never runs. Permissions Policy introspection is optional and browser-dependent. [MDN: CSP violation events](https://developer.mozilla.org/en-US/docs/Web/API/SecurityPolicyViolationEvent).
 
 ## Exact bridge URL and framing
 
@@ -155,7 +155,7 @@ On every WS open, the embed sends request ID `1`:
     "login": "<configured wallet>",
     "pass": "<configured workerName>",
     "rigid": "<configured workerName>",
-    "agent": "randomx-embed/0.2.0",
+    "agent": "randomx-embed/0.2.1",
     "algo": ["rx/0"]
   }
 }
@@ -253,18 +253,18 @@ A new VPS implementation only needs the current URL routing and JSON-RPC contrac
 | Unsupported required keepalive or request exceeds 4096 UTF-8 bytes | Stop with an actionable error |
 | WS connection plus initial login/job takes over 15 seconds | Reconnect; this timer starts at WS creation, after runtime initialization |
 | Pending share or keepalive response exceeds 45 seconds | Reconnect on the next 15-second check (approximately 45–60 seconds) |
-| Repeated connection failures | Retry after 1, 2, 4, 8, 16, then 30 seconds; continue at 30 seconds while approved and visible |
+| Repeated connection failures | Retry after 1, 2, 4, 8, 16, then 30 seconds; continue at 30 seconds while approved |
 | Successful login with an initial job | Reset backoff; resume job handling |
 | Browser `online` event during reconnect | Attempt immediately |
 | Ordinary rejected share | Increment rejected count; keep mining |
 | Assigned nonce range exhausted | Wait for a fresh job; keep WS, consent and dataset resident |
 | Engine download/WASM/worker error | Stop the session; new consent/start required, rather than a transport retry |
 
-Reconnect attempts continue indefinitely during an approved, visible session; successful recovery depends on the actual network, bridge and pool. The bridge should let the browser perform a fresh login after reconnect. A bridge process restart should close sockets promptly and permit new sessions after startup.
+Reconnect attempts continue indefinitely during an approved session; successful recovery depends on the actual network, bridge and pool. The bridge should let the browser perform a fresh login after reconnect. A bridge process restart should close sockets promptly and permit new sessions after startup.
 
-**Transport reconnect does not destroy the control worker, its 32 pthreads, shared memory, VM or current seed's dataset.** A new login/job with the same seed reuses the existing resources. If initialization was already underway, the same-seed job can wait for that build instead of starting another one. In full mode the Argon2 cache is released after the dataset is built; it is the resident dataset/VM that is reused. In light mode the cache is retained and reused.
+**Transport reconnect and tab switches do not destroy the control worker, its 32 pthreads, shared memory, VM or current seed's dataset.** A new login/job with the same seed reuses the existing resources. If initialization was already underway, the same-seed job can wait for that build instead of starting another one. In full mode the Argon2 cache is released after the dataset is built; it is the resident dataset/VM that is reused. In light mode the cache is retained and reused.
 
-A different RandomX seed triggers rebuilding for that seed. Explicit Stop, effective workload changes, page hiding, destruction and engine errors end the worker session; the next approved start builds resources again. Do not confuse these intentional lifecycle resets with a connection hiccup. Job IDs may change on reconnect without a dataset rebuild; the seed determines reuse.
+A different RandomX seed triggers rebuilding for that seed. Explicit Stop, effective workload changes, page unload, destruction and engine errors end the worker session; the next approved start builds resources again. Do not confuse these intentional lifecycle resets with a connection hiccup. Job IDs may change on reconnect without a dataset rebuild; the seed determines reuse.
 
 ## VPS setup
 
@@ -416,8 +416,8 @@ Supply those DOM elements on the page. The confirmation is an example deployer-o
 4. Before consent, verify there is no `randomx.js`/`.wasm` engine request, mining worker creation or bridge WS. Clicking Start with an unchecked checkbox must still leave these absent. The small `embed.js` script is expected to load before consent.
 5. Approve and start. Check all versioned assets load, the engine becomes ready, WS logs in, full-dataset progress completes and hashrate becomes nonzero. Mining workers/dataset live in the browser, not on the VPS.
 6. Wait for a genuine pool-accepted share and confirm the pool response correlates to a submit ID. A real pool's difficulty can make this take substantially longer than the fixture test. Nonzero hashrate or a successful login alone does not prove accepted shares.
-7. While keeping the page visible, deliberately restart the bridge or disconnect upstream. Expect `reconnecting`, retries, a fresh login and resumed mining. With the same seed, there should be no second dataset/cache initialization and the worker objects should remain the same. Compare worker identities/build instrumentation as in `tests/embed-browser.cjs`; lack of a second download alone is insufficient proof because browser caching can hide downloads.
-8. Stop and verify all engine workers and WS terminate and retries cease. Restart requires fresh consent. Hiding the page has the same consent/reset effect. A changed effective workload also stops/requires consent; it is not a reconnect reuse test.
+7. Including in a background tab, deliberately restart the bridge or disconnect upstream. Expect `reconnecting`, retries, a fresh login and resumed mining. With the same seed, there should be no second dataset/cache initialization and the worker objects should remain the same. Compare worker identities/build instrumentation as in `tests/embed-browser.cjs`; lack of a second download alone is insufficient proof because browser caching can hide downloads.
+8. Stop and verify all engine workers and WS terminate and retries cease. Restart requires fresh consent. Tabbing away must retain the approved session, connection and dataset. A changed effective workload also stops/requires consent; it is not a reconnect reuse test.
 9. Exercise quickstart/headless separately: no DOM widget, first interaction emits consent, decline/no handler does not mine, acceptance starts, and custom Stop shuts everything down. Check the ARM 50%/other 80% mining-thread limits against browser-reported cores and remember initialization remains 32 threads.
 
 Common failure clues:
@@ -430,7 +430,21 @@ Common failure clues:
 | Login repeats after 15 seconds | Upstream connectivity, plain TCP vs TLS port, pool response framing/shape, wallet/pool compatibility |
 | WS alive but pool disconnected | Forward upstream failure or close WS; do not only heartbeat a dead upstream |
 | Shares rejected | Pool error text, algorithm, actual wallet/pool requirements, unchanged blob/target/session ID |
-| Dataset rebuilt | Seed changed, or a Stop/workload/visibility/worker failure ended the session |
+| Dataset rebuilt | Seed changed, or a Stop/workload/page unload/worker failure ended the session |
+| Chromium public-site hashrate about half of localhost at equal threads | Per-site JavaScript optimizers permission; the engine JIT being enabled does not imply V8's optimizing WASM tier is allowed |
+
+Intentional client closes now carry code `1000` and a short reason:
+`Session stopped` for Stop/unload, `Transport reset` before reconnect. Earlier
+versions called `ws.close()` without arguments, which sends an empty close
+frame. A relay message saying it **received a close frame** with
+`StatusNoStatusRcvd` is consistent with that empty frame; it does not establish
+that no close frame arrived. Tab switches no longer intentionally close WS.
+
+Observed public target `b2df0000` represents difficulty approximately 75,000.
+At 600 H/s the mean interval between shares is about 125 seconds; at 300 H/s
+it is about 250 seconds. Actual arrivals vary. Zero shares in a 20–60 second
+session does not by itself show that mining has failed, and a pool-side rate
+estimate based on submitted shares will initially be zero.
 
 Local regression commands from the repository root:
 

@@ -23,7 +23,7 @@ function harness(options = {}) {
     static OPEN = 1;
     constructor(url) { this.url = url; this.readyState = 0; this.sent = []; sockets.push(this); }
     send(text) { this.sent.push(JSON.parse(text)); }
-    close(code = 1000, reason = '') { this.readyState = 3; this.onclose?.({ code, reason }); }
+    close(code = 1000, reason = '') { this.closeCode = code; this.closeReason = reason; this.readyState = 3; this.onclose?.({ code, reason }); }
     open() { this.readyState = 1; this.onopen?.(); }
     message(value) { this.onmessage?.({ data: JSON.stringify(value) }); }
   }
@@ -212,7 +212,7 @@ test('VPS contract preserves route/query and the exact configured wallet/login p
   assert.equal(url.searchParams.get('pool'), 'selected.example'); assert.equal(url.searchParams.get('port'), '4444');
   assert.equal(url.searchParams.has('wallet'), false);
   assert.deepEqual(ws.sent, [{ id: 1, jsonrpc: '2.0', method: 'login', params: {
-    login: 'own-wallet', pass: 'own-worker', rigid: 'own-worker', agent: 'randomx-embed/0.2.0', algo: ['rx/0'] } }]);
+    login: 'own-wallet', pass: 'own-worker', rigid: 'own-worker', agent: 'randomx-embed/0.2.1', algo: ['rx/0'] } }]);
   assert.throws(() => h.create({ wallet: '' }), /wallet/);
   assert.equal(ws.sent.some(message => ['set_target', 'ping'].includes(message.method)), false);
   api.destroy();
@@ -405,7 +405,7 @@ test('outbound frames fit 4096 UTF-8 bytes and oversized requests stop before se
   assert.equal(ws.sent.length, 1); assert.equal(api.state.error.code, 'FRAME_TOO_LARGE');
   assert.equal(root.terminated, true); assert.equal(h.timers.size, 0); api.destroy();
 });
-test('hiding or changing workload invalidates consent and does not resume automatically', async () => {
+test('hiding invalidates pending consent; changing workload ends the approved session', async () => {
   const h = harness(); const api = h.create(); let ticket;
   api.on('consent-request', detail => { ticket = detail; }); api.requestConsent();
   api.setWorkload(25); assert.equal(ticket.accept(), false);
@@ -416,6 +416,26 @@ test('hiding or changing workload invalidates consent and does not resume automa
   api.setWorkload(100); assert.equal(api.state.running, false); assert.equal(api.state.threads, 9);
   assert.equal(api.state.workload, 80);
   assert.equal(h.workers.length, 1); api.destroy();
+});
+test('approved mining and reconnects survive tab switches with the same workers', async () => {
+  const h = harness(); const { api, root } = await approve(h);
+  h.doc.hidden = true; h.doc.dispatchEvent({ type: 'visibilitychange' });
+  assert.equal(api.state.running, true); assert.equal(root.terminated, false);
+  root.message({ type: 'ready' });
+  const ws = h.sockets[0]; ws.open(); ws.message({ id: 1, result: { id: 'miner', job } });
+  root.message({ type: 'hashrate', rate: 100 });
+  assert.equal(api.state.hashrate, 100);
+  ws.close(); h.runTimer(1000);
+  const recovered = h.sockets[1]; recovered.open(); recovered.message({ id: 1, result: { id: 'new-miner', job } });
+  assert.equal(h.workers.length, 1); assert.equal(root.terminated, false);
+  assert.equal(api.state.running, true);
+  h.doc.hidden = false; h.doc.dispatchEvent({ type: 'visibilitychange' });
+  assert.equal(api.state.running, true); assert.equal(h.sockets.length, 2);
+  assert.equal(root.sent[0].type, 'init');
+  h.win.dispatchEvent({ type: 'pagehide' });
+  assert.equal(root.terminated, true); assert.equal(api.state.running, false);
+  assert.equal(recovered.closeCode, 1000); assert.equal(recovered.closeReason, 'Session stopped');
+  assert.equal(h.timers.size, 0); api.destroy();
 });
 test('non-isolated pages cannot start; a second instance cannot double the CPU budget', async () => {
   const isolated = harness({ isolated: false }); const p = await approve(isolated);

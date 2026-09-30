@@ -84,9 +84,11 @@ demo-style colors, a progress bar, hashrate, share counts, workload control,
 consent statement, Start/Stop controls and a collapsed view with Stop still
 available. Shadow DOM isolates its styling. No mining engine, dataset or
 pool connection is loaded before consent. Consent is session-only, never
-stored. Stop, hiding the document, navigation and destruction terminate
+stored. Stop, navigation and destruction terminate
 the engine and **every pthread**, including during dataset initialization.
-Returning to the page requires consent again.
+Approved mining continues across tab switches, including initialization and
+reconnects. Browsers may throttle or suspend background tabs; uninterrupted
+background execution cannot be guaranteed. Returning after navigation requires consent again.
 
 Configuration accepts the same keys through `RandomXEmbed.create({...})`;
 script attributes use kebab-case (for example `data-worker-name`).
@@ -235,7 +237,7 @@ This is an established XMRig protocol extension, not universal support for every
 Stratum variant. [XMRig Proxy nonce handling](https://github.com/xmrig/xmrig-proxy/blob/master/src/proxy/Miner.cpp).
 
 The embed retries disconnects, connection/login timeouts and uncorrelated pool errors
-indefinitely during an approved, visible session, with backoff from 1 second
+indefinitely during an approved session, with backoff from 1 second
 to 30 seconds. Re-login resets backoff. `online` events retry promptly.
 Stale shares are discarded. The bridge sends native WebSocket ping frames;
 browser implementations respond with pong automatically. The client sends
@@ -259,8 +261,8 @@ the login reply.
 Reconnects retain the worker, shared memory and current seed's dataset/VM
 (or cache in light mode). Jobs with the same RandomX seed hash reuse these
 resources, including after a new login. A new
-seed requires rebuilding the dataset; Stop, workload changes and page
-hiding end the session and release its workers.
+seed requires rebuilding the dataset; Stop, workload changes, navigation and
+engine errors end the session and release its workers.
 
 The operator-provided public donation endpoint uses these options:
 
@@ -386,6 +388,16 @@ Generic browser failures do not prove which header or restriction is wrong;
 the hints are checks, and Permissions Policy inspection is best effort. If CSP
 blocks `embed.js` itself, the embed cannot render an error: inspect the browser
 console. [MDN: CSP violation events](https://developer.mozilla.org/en-US/docs/Web/API/SecurityPolicyViolationEvent).
+
+If the same widget runs much slower on a public site than localhost at the
+same mining-thread count, check Chromium's per-site **JavaScript optimizers**
+permission (`chrome://settings/content/v8`). Disabling optimizing compilers
+also prevents WASM from using its optimizing tier, even when the engine's
+own JIT reports enabled and no compilation errors. Chrome can disable this
+permission on unfamiliar sites. Compare the same trusted site's allowed and
+blocked settings, reloading before each run; the embed cannot override browser
+security settings. [Chrome V8 settings](https://support.google.com/chrome/answer/10468685?co=GENIE.Platform%3DDesktop&hl=en),
+[V8 compiler flags](https://chromium.googlesource.com/v8/v8/+/e74bcecfb1b70a4aaa8f96feb818d02c668e5650/src/flags/flag-definitions.h).
 
 Sources: [jsDelivr URL conventions](https://github.com/jsdelivr/jsdelivr#usage-documentation),
 [Emscripten pthread requirements](https://emscripten.org/docs/porting/pthreads.html),
