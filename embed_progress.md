@@ -2,7 +2,7 @@
 
 Updated: 2026-09-30.
 
-**Status: the runtime is committed and pushed on `embed-v0.2.0-demo` at `2ea238ff993873097e18788b5892390f0d0fd803`. The minimal `netlify-demo/` directory is prepared with the operator-confirmed wallet and ready for upload. Public endpoint acceptance testing is still pending.**
+**Status: the runtime is committed and pushed on `embed-v0.2.0-demo` at `cdebaa57f2855d657c0424fe0e405c4aad8af839`. The user deployed `netlify-demo/` at https://fluffy-elf-267140.netlify.app/. Runtime 0.2.1 fixes background sessions; genuine public-pool share acceptance is still pending.**
 
 ## Completed
 
@@ -58,7 +58,7 @@ The local reference `proxy/index.js` still supports configurable direct upstream
 4. Verify the actual Netlify HTML response has the isolation headers from the supplied `_headers` file.
 5. Verify the public Netlify → jsDelivr → VPS → pool path, consent/Stop behavior and reconnect recovery.
 
-The implementation and packaged assets are published on the delivery branch. The subsequent Netlify-directory commit retains the same runtime pin. No npm release, VPS deployment or Netlify deployment has been performed. This progress file and `proxy_handoff.md` are explicitly included for sharing.
+The implementation and packaged assets are published on the delivery branch. The Netlify directory pins the runtime commit. The user deployed the VPS and Netlify site; no npm release has been performed. This progress file and `proxy_handoff.md` are explicitly included for sharing.
 
 ## Live debugging, 2026-09-30
 
@@ -93,5 +93,7 @@ mining and reconnects survive tab switches without destroying the workers or
 dataset. The consent disclosure explains background continuation and possible
 browser throttling/suspension. Stop/unload still withdraw consent and terminate
 the engine. Intentional WS closes use code 1000 and an explicit short reason
-instead of an empty close frame. Publication and the new CDN pin follow after
-the real-browser regression suite passes.
+instead of an empty close frame. All 38 deterministic checks and the real-browser
+regression suite passed, including hidden-tab shares/reconnects with identical
+workers and one cache/dataset build. Runtime 0.2.1 is published at the status
+commit above; all five CDN assets returned HTTP 200 and matching hashes.

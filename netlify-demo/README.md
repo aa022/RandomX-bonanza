@@ -5,7 +5,7 @@ are the site's publish directory; keep `_headers` beside `index.html`.
 No build command or dependency installation is needed.
 
 The page imports the embed and its runtime from jsDelivr, pinned to commit
-`2ea238ff993873097e18788b5892390f0d0fd803` on `embed-v0.2.0-demo`. The files
+`cdebaa57f2855d657c0424fe0e405c4aad8af839` on `embed-v0.2.0-demo`. The files
 in `dist/` are not uploaded to Netlify. All runtime assets resolve from the
 same pinned CDN directory.
 
