@@ -44,6 +44,8 @@ overrides wallet/pool per session (persisted in `localStorage`).
 - **Chromium / Firefox** — work out of the box over plain HTTP on localhost,
   since browsers treat `localhost` as a secure context (the proxy still
   sends the COOP/COEP headers SharedArrayBuffer / wasm pthreads need).
+  Served without those headers (or over plain-HTTP LAN), the miner falls
+  back to independent single-thread light-mode workers (see `?sab=0`).
 - **Safari** — refuses `SharedArrayBuffer` outside HTTPS even on localhost,
   so the local demo won't run there as shipped. Drop a self-signed cert in
   front of the proxy (e.g. `caddy reverse-proxy --to :8080` or any HTTPS
@@ -132,7 +134,10 @@ without a restart.
 
 URL parameters:
 
-- `?light=1` — light mode (256 MiB, instant start, low hashrate)
+- `?light=1` — light mode (256 MiB, instant start, lower hashrate; JIT'd)
+- `?sab=0` — force the no-SharedArrayBuffer fallback (used automatically when
+  the page is not `crossOriginIsolated`): N single-thread light-mode workers
+  on `randomx_st.wasm`, ~300 MB each; `?threads=N` sets N
 - `?nojit=1` — disable the C-side JIT
 - `?threads=N` — start with N mining threads (1–32)
 - `?init_threads=N` — dataset-init parallelism (default 32)

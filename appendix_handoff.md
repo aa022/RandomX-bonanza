@@ -170,6 +170,8 @@ Getters `rxjit_effective_*` read back what is actually used. The C-side default 
 
 **Gates** (all must print OK):
 - `node bench/full_mode_check.mjs --count 32` at `--feature-base 3`, `0`, `1`, and `0 --feature-extra 32`, for `--profile arm` and `x86`;
+- `node bench/light_mode_check.mjs` at `--feature-base 3`, `0`, `1`, for `--profile arm` and `x86`, on both builds (`RX_BUILD=st` for `randomx_st`);
+- `node bench/supjit_check.mjs`, both builds (the full-mode gates can't see a broken superscalar kernel, since both of their sides read the kernel-built dataset);
 - `node bench/mine_ctx_check.mjs`;
 - the ARM identity check;
 - `node bench/aes_check.mjs` (must print `AES CHECK PASS`);
@@ -184,3 +186,49 @@ Getters `rxjit_effective_*` read back what is actually used. The C-side default 
 6. **The M4 sign-off** (`bench/arm_ab.sh`), then possibly one profile for all.
 7. **`aes_simd` for x86:** the vpaes rounds on plain swizzle are neutral. They now only run where the relaxed module doesn't: the other AES functions, or engines without relaxed SIMD. 0 is the conservative choice.
 8. **A slimmer deliverable, if it ever matters:** `randomx.wasm` was 242 KB raw (86 KB gzipped) before the relaxed side module; the embedded 4.3 KB blob plus the bridge add a little. See §6.
+
+## 9. No-SAB fallback (`nosab`, 2026-09-30)
+When the page is not `crossOriginIsolated` (no COOP/COEP), there is no SharedArrayBuffer, no shared `WebAssembly.Memory` and no pthreads. Before this, `worker.js` threw and nothing ran, not even `?light=1`. Now the miner falls back to a fast light mode; `?sab=0` forces it on an isolated page for A/B.
+
+**Decision: light mode first.** Full mode would need a private 2 GB dataset per worker. Light mode needs 256 MiB per worker and no dataset build, and in wasm it loses much less than in native RandomX. The VM itself is ~9 ms/hash, so the per-hash item work (16384 × t_item) is not 10× on top of it.
+
+**Pieces** (commits `a3d3653`, `40a3b79`, `7289a20`, `691c474`):
+- **`randomx_st.{js,wasm}`**: a second emcc run in `wasm/build.sh`, same sources without pthreads (`ST_BUILD=0` skips it). The generated modules import a max-only memory (`RXJIT_MEM_FLAG` = `0x01`; `0x03` in the pthread build). The relaxed AES blob is built twice (`rx_aes_relaxed_blob_st.h`). The pthread `randomx.wasm` stayed byte-identical through the build change.
+- **JIT'd light mode** (both builds): `vm_interpreted.cpp` sends light VMs (`cachePtr`) to `rxjit_run_program_light`.
+  - That builds the superscalar item function `item(i32 item, i32 out)` per cache (pointer + `cacheKey`) via `rxjit_emit_superscalar_item_fn`.
+  - It embeds that function into the threaded module as function 24 / type 4 (`rxjit_threaded_set_light_fn`).
+  - Step 7 calls it with item = ds_ptr (`dataset_offset/64`) + ma/64, into arena +960 (`RXJIT_ARENA_ITEM_OFF`), before the usual xor. Without a light fn the bytes are the full-mode ones, so the arm identity holds.
+- **Inline mulh in the superscalar kernel:** V8 doesn't inline the stub calls, and they were ~39% of the item time. This speeds up the dataset init as well.
+- **Browser:** `miner.js` `NoSabPool` is a Worker-shaped facade over N `worker.js?build=st` workers (`?threads=`, default `hardwareConcurrency`), one mining thread each.
+  - Each worker has its own cache and a disjoint nonce slot (`nonceSlot/nonceSlots`).
+  - It sums the hashrates, passes shares through, and emits `ready` once.
+  - `worker.js` now also JITs the isolated `?light=1`.
+
+**Numbers** (Zen 3, 1T unless noted):
+
+| | t_item | light ms/hash | H/s per worker |
+|---|---|---|---|
+| before (interpreter) | 16.7 µs | ~320 | ~3 |
+| light JIT | 1.44 µs | ~36 | ~28 |
+| + inline mulh | 1.18 µs | ~32 | ~31 |
+| Chromium, no COOP/COEP, 2 workers (before inline mulh) | | | 59 summed |
+
+t_item breakdown: ~0.4 µs of dependent cache misses (1.04 µs with the cache index masked to 64 KiB). Of the remaining compute, mulh is still ~0.3 µs (0.88 µs with mulh replaced by `i64.mul`).
+
+**Gates:** `light_mode_check`, `supjit_check`, and every older gate on `RX_BUILD=st`. The browser E2E is a scratch script: a server without COOP/COEP, headless Chromium over CDP, `NoSabPool` on a synthetic job, shares re-verified in Node.
+
+**Caveats:**
+- Memory is ~300 MB per worker (12 workers ≈ 3.6 GB); `?threads=` caps it.
+- Each worker runs its own Argon2 cache init (0.7 s at 1T).
+- The multi-worker scaling (12 workers, SMT) is not measured yet.
+- `wasm_jit_superscalar.cpp`'s kernel still defines the mulh stubs (fn 0/1, now unused).
+- Wide arithmetic (`i64.mul_wide_u`) is not in V8 14.6, not even behind a flag.
+
+**Open levers:**
+1. Measure 1/6/12 workers in Chromium.
+2. Multi-VM lockstep (2 hashes per worker) to overlap the item misses and add ILP.
+3. A lower-latency mulh.
+4. Opt-in full replicas (`?fb_full=1|2`, a cooperative dataset build over transferable chunks, `rxInitItemsInto`).
+5. One cache build broadcast to all workers.
+6. OPFS persistence.
+
