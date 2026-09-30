@@ -236,7 +236,7 @@ t_item breakdown: ~0.4 µs of dependent cache misses (1.04 µs with the cache in
 **Open levers:**
 1. Measure 1/6/12 workers in Chromium.
 2. ~~Multi-VM lockstep~~ implemented behind `?light_vms=2` (above); measure 1/6/12 workers × 1/2 VMs.
-3. A lower-latency mulh.
+3. ~~A lower-latency mulh~~ tried (branch `nosab/mulh-lat`, not merged): 4 independent partial products cut the chain from ~11 to ~8 ops but add ~3 ops per mulh, and it was ~5% slower per item and ~3% slower in light H/s on Zen 3. The item is throughput-bound, not latency-bound, so only fewer ops per mulh would help. Might still be worth trying on arm.
 4. ~~Opt-in full replicas~~ **Done** (`?fb_full=K`, see §9.1).
 5. One cache build broadcast to all workers.
 6. OPFS persistence.
