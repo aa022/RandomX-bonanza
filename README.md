@@ -138,6 +138,9 @@ URL parameters:
 - `?sab=0` — force the no-SharedArrayBuffer fallback (used automatically when
   the page is not `crossOriginIsolated`): N single-thread light-mode workers
   on `randomx_st.wasm`, ~300 MB each; `?threads=N` sets N
+- `?fb_full=K` (K = 0–2, no-SAB only) — K of those workers mine in full mode
+  on a private dataset replica (~2.3 GB each), which all workers build
+  together per seed; a worker that can't allocate one stays in light mode
 - `?nojit=1` — disable the C-side JIT
 - `?threads=N` — start with N mining threads (1–32)
 - `?init_threads=N` — dataset-init parallelism (default 32)
