@@ -81,6 +81,7 @@ EXPORTED_FUNCTIONS='[
   "_rxjit_test_generate",
   "_rxjit_test_generate_static",
   "_rxjit_stat_runs",
+  "_rxjit_stat_light_runs",
   "_rxjit_stat_fails",
   "_rxjit_stat_static_init_attempts",
   "_rxjit_stat_static_init_failures",

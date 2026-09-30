@@ -178,6 +178,23 @@ static _Thread_local uint32_t g_slot = 0;
 // decoded per thread). Off: every macro emits exactly the old bytes.
 static _Thread_local int g_shared = 0;
 
+// Light mode (no dataset): the body of the superscalar item function
+// item(i32 item, i32 out) -> () (rxjit_emit_superscalar_item_fn), appended
+// as function TFN_ITEM with type TTYPE_ITEM. Step 7 then calls it with
+// item = LOCT_ds_ptr (dataset_offset / 64 in light mode) + ma / 64 and
+// out = arena +RXJIT_ARENA_ITEM_OFF, and xors those 64 bytes instead of a
+// dataset line. Set by rxjit_threaded_set_light_fn for one generation;
+// len 0 (the default) emits exactly the full-mode bytes.
+static _Thread_local const uint8_t *g_light_fn = 0;
+static _Thread_local uint32_t g_light_fn_len = 0;
+#define TFN_ITEM   24 // after main_loop (split_id is always on)
+#define TTYPE_ITEM 4
+
+void rxjit_threaded_set_light_fn(const uint8_t *body, uint32_t len) {
+	g_light_fn = body;
+	g_light_fn_len = body ? len : 0;
+}
+
 // vm_state offsets (mirrors rxjit_vm_state_t in wasm_jit_gen.h).
 #define VM_R0_OFFSET    0
 #define VM_F0_OFFSET    64
@@ -1434,9 +1451,21 @@ static uint32_t emit_step5_mx_xor(uint8_t *buf) {
 //   V3 mode: same direct-memory pattern as step 2 (compile-time index).
 static uint32_t emit_step7_dataset_xor(uint8_t *buf) {
 	THUNK_BEGIN;
-	LG(LOCT_ds_ptr);
-	LG(LOC_ma);
-	I32_ADD();
+	if (g_light_fn_len) { // light: item(ds_ptr + ma/64, arena ITEM), then xor that line
+		LG(LOCT_ds_ptr);
+		LG(LOC_ma);
+		WI32_CONST(6);
+		I32_SHR_U();
+		I32_ADD();
+		ARENA_PTR(g_r_file_base + RXJIT_ARENA_ITEM_OFF);
+		WASM_U8(0x10);
+		WASM_U32(TFN_ITEM);
+		ARENA_PTR(g_r_file_base + RXJIT_ARENA_ITEM_OFF);
+	} else {
+		LG(LOCT_ds_ptr);
+		LG(LOC_ma);
+		I32_ADD();
+	}
 	LS(LOC_tmp);
 	if (g_emit_regs_in_mem) {
 		for (int i = 0; i < 8; i++) {
@@ -2592,13 +2621,16 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 
 #define EMIT_TYPE_SECTION_T()                                          \
 	WASM_SECTION(WASM_SECTION_TYPE, {                                  \
+		WASM_U8(g_light_fn_len ? 5 : 4);                               \
 		WASM_U8_THUNK({                                                \
-			4,                                                         \
 			0x60, 0, 0,                                                \
 			0x60, 2, WASM_TYPE_I64, WASM_TYPE_I64, 1, WASM_TYPE_I64,   \
 			0x60, 2, WASM_TYPE_V128, WASM_TYPE_V128, 1, WASM_TYPE_V128,\
 			0x60, 1, WASM_TYPE_V128, 1, WASM_TYPE_V128,                \
 		});                                                            \
+		if (g_light_fn_len) { /* TTYPE_ITEM: (i32, i32) -> () */       \
+			WASM_U8_THUNK({0x60, 2, WASM_TYPE_I32, WASM_TYPE_I32, 0}); \
+		}                                                              \
 	})
 
 uint32_t rxjit_generate_threaded_module(
@@ -2665,14 +2697,15 @@ uint32_t rxjit_generate_threaded_module(
 	// function section: 23 (or 24 in split_id) functions: 22 stubs + [inner_dispatch] + main_loop
 	WASM_SECTION(WASM_SECTION_FUNCTION, {
 		if (split) {
+			WASM_U8(g_light_fn_len ? 25 : 24);
 			WASM_U8_THUNK({
-				24,
 				1, 1,                                           // mulh, imulh
 				2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, // fadd/fsub/fmul/fdiv type 2
 				3, 3, 3, 3,                                     // fsqrt type 3
 				0,                                              // inner_dispatch type 0
 				0,                                              // main_loop type 0
 			});
+			if (g_light_fn_len) WASM_U8(TTYPE_ITEM);        // light: item (TFN_ITEM)
 		} else {
 			WASM_U8_THUNK({
 				23,
@@ -2732,7 +2765,7 @@ uint32_t rxjit_generate_threaded_module(
 
 	// code section: 22 stubs + [inner_dispatch] + main_loop
 	WASM_SECTION(WASM_SECTION_CODE, {
-		WASM_U8(split ? 24 : 23);                 // function count
+		WASM_U8((split ? 24 : 23) + (g_light_fn_len ? 1 : 0)); // function count
 		p += emit_stub_bodies(jit_feature, p);    // stubs 0..21
 		if (split) {
 			// inner_dispatch function body (index 22 when split is on)
@@ -2750,6 +2783,12 @@ uint32_t rxjit_generate_threaded_module(
 			                         program_slot_ptr, jit_feature, p);
 			WASM_U8(0x0b);                          // end of function
 		});
+		if (g_light_fn_len) { // light: item function body (index TFN_ITEM)
+			WASM_U32_PATCH({
+				memcpy(p, g_light_fn, g_light_fn_len);
+				p += g_light_fn_len;
+			});
+		}
 	});
 
 	THUNK_END;

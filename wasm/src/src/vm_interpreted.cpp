@@ -71,6 +71,15 @@ namespace randomx {
 		uint64_t dataset_offset,
 		uint32_t ma,
 		uint32_t mx);
+	int rxjit_run_program_light(
+		NativeRegisterFile& nreg,
+		Instruction program_buf[RANDOMX_PROGRAM_MAX_SIZE],
+		const ProgramConfiguration& config,
+		uint8_t* scratchpad,
+		randomx_cache* cache,
+		uint64_t dataset_offset,
+		uint32_t ma,
+		uint32_t mx);
 }
 #endif
 
@@ -111,6 +120,18 @@ namespace randomx {
 				config,
 				scratchpad,
 				mem.memory,
+				datasetOffset,
+				mem.ma,
+				mem.mx);
+		} else if (g_jitEnabled && !isV2 && this->cachePtr != nullptr) {
+			// light mode (InterpretedLightVm, cachePtr set by setCache):
+			// dataset items are computed by the embedded superscalar kernel
+			programJitOk = rxjit_run_program_light(
+				nreg,
+				program.programBufferRaw(),
+				config,
+				scratchpad,
+				this->cachePtr,
 				datasetOffset,
 				mem.ma,
 				mem.mx);

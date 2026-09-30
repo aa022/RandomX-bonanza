@@ -297,6 +297,44 @@ static uint32_t emit_dataset_store(uint8_t *buf) {
 	THUNK_END;
 }
 
+// One initDatasetItem: r = f(item) over the RANDOMX_CACHE_ACCESSES programs,
+// stored to mem[out..out+64).
+static uint32_t emit_item_compute(const randomx::DecodedSuperscalarProgram programs[],
+                                  uint32_t cache_base, uint8_t *buf) {
+	THUNK_BEGIN;
+	p += emit_item_init(p);
+
+	// For each of RANDOMX_CACHE_ACCESSES programs:
+	for (int i = 0; i < RANDOMX_CACHE_ACCESSES; ++i) {
+		const auto &prog = programs[i];
+		// mixBlock = cache + (registerValue & mask) * 64
+		p += emit_mix_addr(cache_base, p);
+		// execute program (inlined)
+		p += emit_super_program(prog, p);
+		// r[q] ^= mem[mixBlock + q*8]
+		p += emit_mix_xor(p);
+		// registerValue = r[addrReg]
+		LG(RREG(prog.addrReg));
+		LS(LK_registerVal);
+	}
+
+	// store r[0..7] to dataset
+	p += emit_dataset_store(p);
+	THUNK_END;
+}
+
+// Kernel locals declaration (groups after the 2 i32 params):
+//   4 i32 (item, endItem, out, mixBlock)   indices 2..5
+//   8 i64 (r0..r7)                         indices 6..13
+//   2 i64 (registerValue, tmp64)           indices 14..15
+#define EMIT_KERNEL_LOCALS()           \
+	WASM_U8_THUNK({                    \
+		3,                             \
+		4, WASM_TYPE_I32,              \
+		8, WASM_TYPE_I64,              \
+		2, WASM_TYPE_I64,              \
+	})
+
 // Emit the body of the kernel function (no locals declaration, no end byte).
 static uint32_t emit_kernel_body(const randomx::DecodedSuperscalarProgram programs[],
                                  uint32_t cache_base, uint32_t dataset_base, uint8_t *buf) {
@@ -320,24 +358,7 @@ static uint32_t emit_kernel_body(const randomx::DecodedSuperscalarProgram progra
 	// outer loop
 	LOOP_VOID();
 	{
-		p += emit_item_init(p);
-
-		// For each of RANDOMX_CACHE_ACCESSES programs:
-		for (int i = 0; i < RANDOMX_CACHE_ACCESSES; ++i) {
-			const auto &prog = programs[i];
-			// mixBlock = cache + (registerValue & mask) * 64
-			p += emit_mix_addr(cache_base, p);
-			// execute program (inlined)
-			p += emit_super_program(prog, p);
-			// r[q] ^= mem[mixBlock + q*8]
-			p += emit_mix_xor(p);
-			// registerValue = r[addrReg]
-			LG(RREG(prog.addrReg));
-			LS(LK_registerVal);
-		}
-
-		// store r[0..7] to dataset
-		p += emit_dataset_store(p);
+		p += emit_item_compute(programs, cache_base, p);
 
 		// out += 64
 		LG(LK_out);
@@ -422,21 +443,33 @@ extern "C" uint32_t rxjit_generate_superscalar_kernel(
 		WASM_U32_WITH_STUB(STUB_IMUL128HI);
 		// fn 2: kernel
 		WASM_U32_PATCH({
-			// Locals declaration (groups after the 2 i32 params):
-			//   4 i32 (item, endItem, out, mixBlock)   indices 2..5
-			//   8 i64 (r0..r7)                         indices 6..13
-			//   2 i64 (registerValue, tmp64)           indices 14..15
-			WASM_U8_THUNK({
-				3,
-				4, WASM_TYPE_I32,
-				8, WASM_TYPE_I64,
-				2, WASM_TYPE_I64,
-			});
+			EMIT_KERNEL_LOCALS();
 			p += emit_kernel_body(programs, cache_base, dataset_base, p);
 			WASM_U8(0x0b);  // end of function
 		});
 	});
 
+	THUNK_END;
+}
+
+// Light mode: the body (locals + code + end, without the size prefix) of the
+// function (i32 item, i32 out) -> () that the threaded module embeds (type
+// (i32,i32)->(), calls fn 0/1 as mulh/smulh, the threaded stubs' order):
+// one initDatasetItem(item) into mem[out..out+64). The params reuse the
+// kernel's slots 0/1 (startItem/count), so the program emitters are shared.
+extern "C" uint32_t rxjit_emit_superscalar_item_fn(
+	const randomx::DecodedSuperscalarProgram programs[],
+	uint32_t cache_base,
+	uint8_t* buf)
+{
+	THUNK_BEGIN;
+	EMIT_KERNEL_LOCALS();
+	LG(LK_startItem);
+	LS(LK_item);
+	LG(LK_count);
+	LS(LK_out);
+	p += emit_item_compute(programs, cache_base, p);
+	WASM_U8(0x0b);  // end of function
 	THUNK_END;
 }
 // clang-format on

@@ -24,6 +24,7 @@
 #define RXJIT_ARENA_RMASK_OFF 320
 #define RXJIT_ARENA_PAD_OFF   832
 #define RXJIT_ARENA_SPB_OFF   896
+#define RXJIT_ARENA_ITEM_OFF  960 // light mode: the 64-byte item computed per iteration
 #define RXJIT_ARENA_SLOT_OFF  1024
 #define RXJIT_ARENA_SENT_OFF  5120
 #define RXJIT_ARENA_SIZE      6144
@@ -70,6 +71,12 @@ uint32_t rxjit_generate_threaded_module(uint32_t vm_state_ptr, uint32_t scratchp
                                         int jit_feature, int regs_in_memory,
                                         int split_inner_dispatch, int fuse_n, int triples_n,
                                         int kind16, int shared_code, uint8_t *buf);
+
+// Light mode: embed this superscalar item function body (see
+// rxjit_emit_superscalar_item_fn) in the next rxjit_generate_threaded_module
+// call(s) on this thread; (NULL, 0) restores the full-mode module. The body is
+// copied at generation time, so it must stay valid until then.
+void rxjit_threaded_set_light_fn(const uint8_t *body, uint32_t len);
 
 #ifdef __cplusplus
 }

@@ -37,6 +37,13 @@ uint32_t rxjit_generate_superscalar_kernel(
     uint32_t cache_base, uint32_t dataset_base, uint32_t mem_min_pages, uint32_t mem_max_pages,
     uint8_t *buf);
 
+// Light mode (wasm_jit_threaded.c): the function body (locals + code + end,
+// no size prefix) of item(i32 item, i32 out) -> (), one initDatasetItem into
+// out. Expects mulh/smulh at function indices 0/1. At most ~64 KiB.
+uint32_t rxjit_emit_superscalar_item_fn(
+    const randomx::DecodedSuperscalarProgram programs[/*RANDOMX_CACHE_ACCESSES*/],
+    uint32_t cache_base, uint8_t *buf);
+
 #ifdef __cplusplus
 }
 #endif
