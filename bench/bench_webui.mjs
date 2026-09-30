@@ -40,7 +40,7 @@ import { parseProfileArgs, applyProfile, profileHeader, staticDispatchesPerOp, m
 
 const __dirname    = dirname(fileURLToPath(import.meta.url));
 const require      = createRequire(import.meta.url);
-const createRandomX = require(join(__dirname, '..', 'public', 'randomx.js'));
+const createRandomX = require(join(__dirname, '..', 'public', process.env.RX_BUILD === 'st' ? 'randomx_st.js' : 'randomx.js'));
 
 const args = process.argv.slice(2);
 function arg(name, dflt) { const i = args.indexOf(name); return i < 0 ? dflt : args[i + 1]; }

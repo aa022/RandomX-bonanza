@@ -16,6 +16,15 @@ uint32_t rxjit_u32_leb128(uint32_t val, uint8_t data[5]);
 }
 #endif
 
+// Memory-import limits flag of every generated module: shared+max (0x03) in
+// the pthread build (SAB memory), max only (0x01) in the single-thread
+// no-SAB build (randomx_st). Must match the host memory or instantiation fails.
+#ifdef __EMSCRIPTEN_PTHREADS__
+#define RXJIT_MEM_FLAG 0x03
+#else
+#define RXJIT_MEM_FLAG 0x01
+#endif
+
 #define WASM_U8(v)  \
 	do {            \
 		*p++ = (v); \

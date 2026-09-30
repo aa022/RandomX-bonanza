@@ -439,7 +439,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE uint32_t rx_aes_bench(uint32_t n, int mode) {
 // The side module's bytes are data here; each worker compiles + instantiates
 // it once against the shared memory (cache: globalThis.__rxAesR; null = gave
 // up, e.g. no relaxed SIMD in this engine) and calls hf directly.
-#include "rx_aes_relaxed_blob.h"
+#ifdef __EMSCRIPTEN_PTHREADS__
+#include "rx_aes_relaxed_blob.h"    // imports the shared memory
+#else
+#include "rx_aes_relaxed_blob_st.h" // randomx_st: plain (non-shared) memory
+#endif
 #include <atomic>
 
 EM_JS(int, rx_js_aes_relaxed_hf, (int blob, int len, int sp, int size, int hash, int fill, int kptr), {

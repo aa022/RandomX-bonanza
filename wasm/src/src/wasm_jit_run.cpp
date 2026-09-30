@@ -15,6 +15,9 @@
 #include "wasm_jit_fuse_table.h" // RXJIT_FUSE_NMAX, RXJIT_TRIPLE_NMAX
 #include "wasm_jit_profile.h"
 #include "wasm_jit_threaded.h"
+#include "wasm_jit_superscalar.h" // light mode: the embedded item function
+#include "dataset.hpp"             // randomx_cache (light mode)
+#include <string>
 #include "common.hpp"
 #include "program.hpp"
 #include "bytecode_machine.hpp"
@@ -94,9 +97,13 @@ thread_local bool g_jit_static_failed = false;
 // block (1 KiB of buffer = 1 KiB of randomx.wasm).
 constexpr size_t RXJIT_THREADED_BUF_SMALL = 1 << 18;
 constexpr size_t RXJIT_THREADED_BUF_LARGE = 1 << 21;
-static size_t rxjit_threaded_buf_need(int feature, int kind16) {
-	return (kind16 || (feature & RXJIT_FEATURE_UNROLL2)) ? RXJIT_THREADED_BUF_LARGE
-	                                                      : RXJIT_THREADED_BUF_SMALL;
+// Light mode's superscalar item function body: ~20-40 KiB, item_pair
+// (light_mlp 2) twice that; the emitters check a conservative bound first.
+constexpr size_t RXJIT_LIGHT_FN_CAP = 1 << 18;
+static size_t rxjit_threaded_buf_need(int feature, int kind16, int light) {
+	return ((kind16 || (feature & RXJIT_FEATURE_UNROLL2)) ? RXJIT_THREADED_BUF_LARGE
+	                                                       : RXJIT_THREADED_BUF_SMALL) +
+	       (light ? RXJIT_LIGHT_FN_CAP : 0);
 }
 thread_local uint8_t *g_jit_threaded_buf = nullptr;
 thread_local size_t g_jit_threaded_buf_cap = 0;
@@ -115,6 +122,20 @@ thread_local int g_jit_threaded_kind16 = 0; // record head width (rxjit_kind16)
 thread_local int g_jit_threaded_shared = 0; // shared_code: no pointers baked (wasm_jit_profile.h)
 thread_local bool g_jit_threaded_initted = false;
 thread_local bool g_jit_threaded_failed = false;
+// Light mode: the item function is generated per cache (address + key, i.e.
+// the superscalar programs) and light_mlp mode; g_light_gen counts the
+// rebuilds, and the module is regenerated when the generation it embeds (0 =
+// full mode) differs.
+thread_local int g_jit_threaded_light = 0;
+thread_local uint8_t *g_light_fn_buf = nullptr;
+thread_local uint32_t g_light_fn_len = 0;
+thread_local int g_light_mlp_mode = 0;          // light_mlp the body was emitted for
+thread_local int g_light_mlp_req = 0;           // effective light_mlp it was emitted under
+thread_local uint32_t g_light_cache_base = 0;   // cache->memory it bakes (light_mlp 1 probe)
+thread_local const void *g_light_cache = nullptr;
+thread_local std::string *g_light_key = nullptr;
+thread_local int g_light_gen = 0;
+std::atomic<uint32_t> g_rxjit_light_runs{0}; // light-mode programs run by the JIT
 
 // On/off toggle for the threaded interpreter. When 0, the (existing) dynamic-
 // module path runs. When 1, every JIT call goes through the resident
@@ -143,10 +164,12 @@ std::atomic<int> g_rxjit_supjit_enabled{0};
 // from these on first use). Regenerated at every rxInitDatasetStart call
 // because cache_base and dataset_base get baked in.
 //
-// The 64 KiB buffer is large enough for any plausible 8-program kernel
-// (~30–50 KiB observed). g_supjit_generation is bumped on every regen so
-// per-pthread JS state knows to invalidate its cached Instance.
-uint8_t g_supjit_kernel_bytes[1 << 16] = {0};
+// ~30–50 KiB per item of the kernel's loop body (observed), times kernel_k
+// (up to RXJIT_KERNEL_K_MAX); the generator checks a conservative bound
+// against the buffer size first. g_supjit_generation is bumped on every regen
+// so per-pthread JS state knows to invalidate its cached Instance.
+constexpr uint32_t RXJIT_SUPJIT_KERNEL_CAP = 1 << 19;
+uint8_t g_supjit_kernel_bytes[RXJIT_SUPJIT_KERNEL_CAP] = {0};
 std::atomic<uint32_t> g_supjit_kernel_size{0};
 std::atomic<uint32_t> g_supjit_generation{0};
 
@@ -508,6 +531,11 @@ void *rxjit_supjit_bytes_ptr(void) {
 }
 
 EMSCRIPTEN_KEEPALIVE
+uint32_t rxjit_supjit_bytes_cap(void) {
+	return RXJIT_SUPJIT_KERNEL_CAP;
+}
+
+EMSCRIPTEN_KEEPALIVE
 uint32_t rxjit_supjit_bytes_size(void) {
 	return g_supjit_kernel_size.load(std::memory_order_relaxed);
 }
@@ -606,6 +634,9 @@ uint32_t rxjit_get_samples_count(void) {
 EMSCRIPTEN_KEEPALIVE uint32_t rxjit_stat_runs(void) {
 	return g_rxjit_runs.load(std::memory_order_relaxed);
 }
+EMSCRIPTEN_KEEPALIVE uint32_t rxjit_stat_light_runs(void) {
+	return g_rxjit_light_runs.load(std::memory_order_relaxed);
+}
 EMSCRIPTEN_KEEPALIVE uint32_t rxjit_stat_fails(void) {
 	return g_rxjit_fails.load(std::memory_order_relaxed);
 }
@@ -693,6 +724,8 @@ static std::atomic<int> g_rxjit_unroll2_override{-1};   // -1: the profile's unr
 static std::atomic<int> g_rxjit_shared_code_override{-1}; // -1: the profile's shared_code
 static std::atomic<int> g_rxjit_aes_simd_override{-1};    // -1: the profile's aes_simd
 static std::atomic<int> g_rxjit_aes_relaxed_override{-1}; // -1: the profile's aes_relaxed
+static std::atomic<int> g_rxjit_light_mlp_override{-1};   // -1: the profile's light_mlp
+static std::atomic<int> g_rxjit_kernel_k_override{-1};    // -1: the profile's kernel_k
 
 extern "C" int g_rx_aes_relaxed; // soft_aes.cpp, read by aes_hash.cpp per call
 
@@ -837,6 +870,44 @@ int rxjit_effective_shared_code(void) {
 	return rxjit_shared_code();
 }
 
+// light_mlp (wasm_jit_profile.h): 0..2, the override (>= 0) or the profile's.
+// Part of the light function's regen key (rxjit_run_program_light).
+EMSCRIPTEN_KEEPALIVE
+void rxjit_set_light_mlp(int mode) {
+	g_rxjit_light_mlp_override.store(mode < 0 ? -1 : mode > 2 ? 2 : mode, std::memory_order_relaxed);
+}
+
+EMSCRIPTEN_KEEPALIVE
+int rxjit_effective_light_mlp(void) {
+	int m = g_rxjit_light_mlp_override.load(std::memory_order_relaxed);
+	if (m < 0) m = rxjit_profiles[g_rxjit_profile.load(std::memory_order_relaxed)].light_mlp;
+	return m;
+}
+
+// kernel_k (wasm_jit_profile.h): supjit items per loop trip, 1..
+// RXJIT_KERNEL_K_MAX, the override (>= 1; -1 = the profile's). Read when a
+// kernel is generated (wasm_jit_compiler.cpp).
+EMSCRIPTEN_KEEPALIVE
+void rxjit_set_kernel_k(int k) {
+	g_rxjit_kernel_k_override.store(k < 1 ? -1 : k, std::memory_order_relaxed);
+}
+
+EMSCRIPTEN_KEEPALIVE
+int rxjit_effective_kernel_k(void) {
+	int k = g_rxjit_kernel_k_override.load(std::memory_order_relaxed);
+	if (k < 1) k = rxjit_profiles[g_rxjit_profile.load(std::memory_order_relaxed)].kernel_k;
+	return k < 1 ? 1 : k > RXJIT_KERNEL_K_MAX ? RXJIT_KERNEL_K_MAX : k;
+}
+
+// kernel_k for rxInitItemsInto (the fb_full chunks): only the override, else 1.
+// A chunk kernel is regenerated and recompiled per 4 MiB chunk, and a bigger
+// K costs more than it saves there (12 workers, fb_full=1: cooperative build
+// 6.7 s at K = 1, 7.5 / 8.5 / 10.5 s at K = 2 / 3 / 4).
+int rxjit_chunk_kernel_k(void) {
+	const int k = g_rxjit_kernel_k_override.load(std::memory_order_relaxed);
+	return k < 1 ? 1 : k > RXJIT_KERNEL_K_MAX ? RXJIT_KERNEL_K_MAX : k;
+}
+
 EMSCRIPTEN_KEEPALIVE
 uint32_t rxjit_test_generate(void *program256, void *vm_state, void *scratchpad, void *dataset,
                              uint64_t dataset_offset, uint32_t rr0, uint32_t rr1, uint32_t rr2,
@@ -888,11 +959,14 @@ static void rxjit_note_module_hash(const uint8_t *bytes, uint32_t n, const int *
 // into vm_state and the decoded program into the slot, and invokes
 // inst.exports.d() via rxjit_js_run_threaded.
 #ifdef __EMSCRIPTEN__
+// light: 0 = full mode (dataset); else the light generation g_light_gen whose
+// item function (g_light_fn_buf) replaces the dataset read, and dataset_offset
+// is turned into an item offset.
 static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
                                       Instruction program_buf[RANDOMX_PROGRAM_MAX_SIZE],
                                       const ProgramConfiguration &config, uint8_t *scratchpad,
                                       uint8_t *dataset, uint64_t dataset_offset, uint32_t ma,
-                                      uint32_t mx) {
+                                      uint32_t mx, int light = 0) {
 	g_rxjit_threaded_entries.fetch_add(1, std::memory_order_relaxed);
 	if (g_jit_threaded_failed) return 0;
 
@@ -965,20 +1039,26 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 	if (!g_jit_threaded_initted || (!shared && sp != g_jit_threaded_baked_sp) ||
 	    feature != g_jit_threaded_feature || fuse_n != g_jit_threaded_fuse_n ||
 	    triples_n != g_jit_threaded_triples_n || kind16 != g_jit_threaded_kind16 ||
-	    shared != g_jit_threaded_shared) {
+	    shared != g_jit_threaded_shared || light != g_jit_threaded_light) {
 		int regs_in_mem = g_rxjit_regs_in_memory.load(std::memory_order_relaxed);
 		int split_id = g_rxjit_split_inner_dispatch.load(std::memory_order_relaxed);
-		const size_t need = rxjit_threaded_buf_need(feature, kind16);
+		const size_t need = rxjit_threaded_buf_need(feature, kind16, light != 0);
 		if (need > g_jit_threaded_buf_cap) {
 			free(g_jit_threaded_buf);
 			g_jit_threaded_buf = (uint8_t *)malloc(need);
 			g_jit_threaded_buf_cap = g_jit_threaded_buf ? need : 0;
+		}
+		if (light) {
+			rxjit_threaded_set_light_fn(g_light_fn_buf, g_light_fn_len);
+			rxjit_threaded_set_light_mlp(g_light_mlp_mode, g_light_cache_base);
 		}
 		uint32_t sz = g_jit_threaded_buf ? rxjit_generate_threaded_module(
 		    (uint32_t)(uintptr_t)g_jit_threaded_vm_state, (uint32_t)(uintptr_t)scratchpad,
 		    (uint32_t)(uintptr_t)dataset, (uint32_t)(uintptr_t)g_jit_threaded_program_slot, 1,
 		    g_jit_max_memory_pages, feature, regs_in_mem, split_id, fuse_n, triples_n, kind16,
 		    shared, g_jit_threaded_buf) : 0;
+		rxjit_threaded_set_light_fn(nullptr, 0);
+		rxjit_threaded_set_light_mlp(0, 0);
 		g_rxjit_threaded_module_size.store(sz, std::memory_order_relaxed);
 		if (sz == 0 || sz > g_jit_threaded_buf_cap) {
 			g_rxjit_threaded_phase.store(103, std::memory_order_relaxed);
@@ -1003,6 +1083,7 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 		g_jit_threaded_triples_n = triples_n;
 		g_jit_threaded_kind16 = kind16;
 		g_jit_threaded_shared = shared;
+		g_jit_threaded_light = light;
 		g_jit_threaded_initted = true;
 		g_rxjit_threaded_phase.store(10, std::memory_order_relaxed);
 	}
@@ -1030,7 +1111,9 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 	vm->read_regs[1] = (uint8_t)config.readReg1;
 	vm->read_regs[2] = (uint8_t)config.readReg2;
 	vm->read_regs[3] = (uint8_t)config.readReg3;
-	vm->dataset_ptr_with_offset = (uint32_t)((uintptr_t)dataset + (uintptr_t)dataset_offset);
+	vm->dataset_ptr_with_offset =
+	    light ? (uint32_t)(dataset_offset / randomx::CacheLineSize) // item offset
+	          : (uint32_t)((uintptr_t)dataset + (uintptr_t)dataset_offset);
 
 	// Decode program into the slot.
 	// Layout v2 bakes this thread's vm_state address into every record.
@@ -1069,6 +1152,62 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 	return 1;
 }
 #endif
+
+// Light mode (no dataset): the threaded interpreter with the superscalar item
+// function embedded (wasm_jit_threaded.c g_light_fn). Only with the threaded
+// interpreter on; returns 0 (-> portable interpreter) otherwise or on failure.
+int rxjit_run_program_light(NativeRegisterFile &nreg,
+                            Instruction program_buf[RANDOMX_PROGRAM_MAX_SIZE],
+                            const ProgramConfiguration &config, uint8_t *scratchpad,
+                            randomx_cache *cache, uint64_t dataset_offset, uint32_t ma,
+                            uint32_t mx) {
+#ifdef __EMSCRIPTEN__
+	if (g_rxjit_use_threaded_interp.load(std::memory_order_relaxed) == 0 || cache == nullptr)
+		return 0;
+	if (g_jit_threaded_failed) return 0;
+	const int mlp = rxjit_effective_light_mlp();
+	if (cache != g_light_cache || g_light_key == nullptr || *g_light_key != cache->cacheKey ||
+	    mlp != g_light_mlp_req) {
+		if (!g_light_fn_buf) g_light_fn_buf = (uint8_t *)malloc(RXJIT_LIGHT_FN_CAP);
+		if (!g_light_key) g_light_key = new std::string();
+		if (!g_light_fn_buf) return 0;
+		// The emitters write unchecked; they check a size bound against the
+		// cap first (0 if it might not fit). item_pair that does not fit
+		// falls back to the one-item function (mode 0).
+		const uint32_t cb = (uint32_t)(uintptr_t)cache->memory;
+		int mode = mlp;
+		uint32_t len = 0;
+		if (mode == 2) {
+			len = rxjit_emit_superscalar_item_pair_fn(
+			    cache->decodedPrograms, cb, RXJIT_ARENA_ITEM2_OFF - RXJIT_ARENA_ITEM_OFF,
+			    RXJIT_LIGHT_FN_CAP, g_light_fn_buf);
+			if (len == 0) mode = 0;
+		}
+		if (mode != 2)
+			len = rxjit_emit_superscalar_item_fn(cache->decodedPrograms, cb, RXJIT_LIGHT_FN_CAP,
+			                                     g_light_fn_buf);
+		if (len == 0 || len > RXJIT_LIGHT_FN_CAP) {
+			g_light_cache = nullptr;
+			return 0;
+		}
+		g_light_fn_len = len;
+		g_light_mlp_mode = mode;
+		g_light_mlp_req = mlp;
+		g_light_cache_base = cb;
+		g_light_cache = cache;
+		*g_light_key = cache->cacheKey;
+		if (++g_light_gen <= 0) g_light_gen = 1;
+	}
+	const int ok = rxjit_run_program_threaded(nreg, program_buf, config, scratchpad, nullptr,
+	                                          dataset_offset, ma, mx, g_light_gen);
+	if (ok) g_rxjit_light_runs.fetch_add(1, std::memory_order_relaxed);
+	return ok;
+#else
+	(void)nreg; (void)program_buf; (void)config; (void)scratchpad; (void)cache;
+	(void)dataset_offset; (void)ma; (void)mx;
+	return 0;
+#endif
+}
 
 int rxjit_run_program_full(NativeRegisterFile &nreg,
                            Instruction program_buf[RANDOMX_PROGRAM_MAX_SIZE],

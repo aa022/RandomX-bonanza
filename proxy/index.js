@@ -14,6 +14,8 @@ const path = require('path');
 const { WebSocketServer } = require('../vendor/ws');
 const config = require('../config');
 
+// '.js' also covers public/coi-sw.js: service workers must be served with a
+// JS MIME type (it's a no-op here, the proxy's own headers already isolate).
 const MIME = {
   '.html':  'text/html',
   '.js':    'application/javascript',

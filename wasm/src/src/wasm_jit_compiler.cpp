@@ -11,6 +11,9 @@
 extern "C" void rxjit_supjit_publish_bytes(uint32_t size);
 extern "C" int rxjit_supjit_run_range(uint32_t startItem, uint32_t count);
 extern "C" void *rxjit_supjit_bytes_ptr(void);
+extern "C" uint32_t rxjit_supjit_bytes_cap(void);
+extern "C" int rxjit_effective_kernel_k(void);
+extern "C" int rxjit_chunk_kernel_k(void);
 extern "C" int rxjit_get_supjit_enabled(void);
 extern "C" void rxjit_set_supjit_enabled(int on);
 
@@ -318,8 +321,9 @@ static void *initDatasetRangeThreadProgress(void *arg) {
 	initDatasetRangeWithProgress(static_cast<DatasetThreadJob *>(arg));
 	return nullptr;
 }
+#endif
 
-// JIT pthread worker — calls the wasm SuperscalarHash kernel in 16384-item
+// JIT range worker (pthread, or inline in randomx_st) — calls the wasm SuperscalarHash kernel in 16384-item
 // chunks (so progress updates remain ~150ms-scale even with 8× per-program
 // speedup). Falls back to the interpreter for any chunk where the JS bridge
 // returns 0 (compile failure, runtime exception, etc.) and disables the
@@ -342,6 +346,7 @@ static void initDatasetRangeWithJit(DatasetThreadJob *job) {
 	}
 }
 
+#ifdef __EMSCRIPTEN_PTHREADS__
 static void *initDatasetRangeThreadJit(void *arg) {
 	initDatasetRangeWithJit(static_cast<DatasetThreadJob *>(arg));
 	return nullptr;
@@ -427,13 +432,16 @@ int rxInitDatasetStart(randomx_cache *cache, randomx_dataset *dataset, uint32_t 
 
 	// Phase D: if SuperscalarHash JIT is enabled, generate the per-cache
 	// kernel module once per init call (regenerated to bake in the current
-	// cache_base + dataset_base). Generation cost is ~1 ms.
+	// cache_base + dataset_base, and the kernel_k read now). Generation cost
+	// is ~1 ms.
 	bool useSupjit = rxjit_get_supjit_enabled() != 0;
 	if (useSupjit) {
+		const uint32_t cap = rxjit_supjit_bytes_cap();
 		uint32_t sz = rxjit_generate_superscalar_kernel(
 		    cache->decodedPrograms, (uint32_t)(uintptr_t)cache->memory,
-		    (uint32_t)(uintptr_t)dataset->memory, 1, 65536, (uint8_t *)rxjit_supjit_bytes_ptr());
-		if (sz == 0 || sz > (1 << 16)) {
+		    (uint32_t)(uintptr_t)dataset->memory, 1, 65536, rxjit_effective_kernel_k(), cap,
+		    (uint8_t *)rxjit_supjit_bytes_ptr());
+		if (sz == 0 || sz > cap) {
 			// Generator failed — disable JIT and fall back to interpreter path.
 			rxjit_set_supjit_enabled(0);
 			useSupjit = false;
@@ -474,8 +482,10 @@ int rxInitDatasetStart(randomx_cache *cache, randomx_dataset *dataset, uint32_t 
 	}
 	g_init_thread_count = threadCount;
 #else
+	// single-thread build (randomx_st): synchronous, but still on the supjit kernel
 	DatasetThreadJob job = {cache, dataset->memory, startItem, startItem + itemCount};
-	initDatasetRangeWithProgress(&job);
+	if (useSupjit) initDatasetRangeWithJit(&job);
+	else initDatasetRangeWithProgress(&job);
 #endif
 
 	return 1;
@@ -494,6 +504,49 @@ int rxInitDatasetJoin(void) {
 	}
 	g_init_thread_count = 0;
 #endif
+	return 1;
+}
+
+// No-SAB full replicas (miner.js NoSabPool ?fb_full=K): items [startItem,
+// startItem + itemCount) into an arbitrary buffer dst instead of the dataset,
+// so every randomx_st worker can compute chunks for the replica workers and
+// hand them over as plain ArrayBuffers. The supjit kernel writes to
+// dataset_base + startItem*64 in wrapping i32, so dataset_base = dst -
+// startItem*64 lands on dst. The kernel is regenerated per call (~1 ms) into
+// the one kernel buffer, so this must not overlap an rxInitDatasetStart job
+// (pthread build). Falls back to initDatasetItem like the range workers.
+EMSCRIPTEN_KEEPALIVE
+int rxInitItemsInto(randomx_cache *cache, uint8_t *dst, uint32_t startItem, uint32_t itemCount) {
+	if (cache == nullptr || dst == nullptr || itemCount == 0) {
+		return 0;
+	}
+	const uint32_t end = startItem + itemCount;
+	uint32_t item = startItem;
+	if (rxjit_get_supjit_enabled() != 0) {
+		const uint32_t base = (uint32_t)(uintptr_t)dst - startItem * randomx::CacheLineSize;
+		const uint32_t cap = rxjit_supjit_bytes_cap();
+		const uint32_t sz = rxjit_generate_superscalar_kernel(
+		    cache->decodedPrograms, (uint32_t)(uintptr_t)cache->memory, base, 1, 65536,
+		    rxjit_chunk_kernel_k(), cap, (uint8_t *)rxjit_supjit_bytes_ptr());
+		if (sz == 0 || sz > cap) {
+			rxjit_set_supjit_enabled(0);
+		} else {
+			rxjit_supjit_publish_bytes(sz);
+			constexpr uint32_t CHUNK = 16384;
+			while (item < end) {
+				const uint32_t step = (end - item) < CHUNK ? (end - item) : CHUNK;
+				if (!rxjit_supjit_run_range(item, step)) {
+					rxjit_set_supjit_enabled(0);
+					break;
+				}
+				item += step;
+			}
+		}
+	}
+	uint8_t *out = dst + (size_t)(item - startItem) * randomx::CacheLineSize;
+	for (; item < end; ++item, out += randomx::CacheLineSize) {
+		randomx::initDatasetItem(cache, out, item);
+	}
 	return 1;
 }
 

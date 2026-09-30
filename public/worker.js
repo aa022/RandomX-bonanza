@@ -1,14 +1,24 @@
 // Try to extract the version tag the worker was spawned with so we pull
 // a fresh randomx.js bundle every restart.
-(() => {
+// ?build=st selects the single-thread no-SAB build (randomx_st.js): the page
+// is not crossOriginIsolated, so miner.js runs N of these workers (NoSabPool),
+// one mining thread each. It must be known before the first message, hence
+// the URL rather than the init message. Embed blob workers have no query:
+// their bootstrap sets self.__randomxAssets {baseURL, glueURL, build}. Not
+// `assets`: a top-level const shares scope with the importScripts'd glue.
+const rxAssets = self.__randomxAssets;
+const stBuild = /[?&]build=st(&|$)/.test((self.location && self.location.search) || '') ||
+  !!(rxAssets && rxAssets.build === 'st');
+const rxScript = stBuild ? 'randomx_st.js' : 'randomx.js';
+const rxVersion = (() => {
   let v = 'dev';
   try {
     const m = (self.location && self.location.search || '').match(/[?&]v=([^&]+)/);
     if (m) v = m[1];
   } catch (_) {}
-  const assets = self.__randomxAssets;
-  importScripts(assets ? assets.glueURL : `randomx.js?v=${encodeURIComponent(v)}`);
+  return encodeURIComponent(v);
 })();
+importScripts(rxAssets ? rxAssets.glueURL : `${rxScript}?v=${rxVersion}`);
 
 let Module = null;
 let vm = null;
@@ -32,6 +42,13 @@ let cachePromise = null;
 let cacheSeedHash = null;
 let profileCore = false;
 let lastProfilePost = 0;
+// NoSabPool: this worker's slice of the nonce space (slot of slots).
+let nonceSlot = 0;
+let nonceSlots = 1;
+// NoSabPool ?fb_full=K (randomx_st only): this worker's part of the cooperative
+// full-dataset build (fb_full.js FbWorker; init fbRole 'full' = replica).
+let fb = null;
+let fbPaused = false;
 
 let currentJob = null;
 let pendingJob = null;
@@ -168,21 +185,24 @@ async function init(options = {}) {
   datasetInitThreads = Math.max(1, Math.min(32, Number(options.datasetInitThreads) || 32));
   // The new C-side WASM JIT runs the full 2048-iter program loop on each
   // worker thread; it's compatible with multi-thread full-memory mining.
-  // Only enabled in full-mem mode (the JIT inlines absolute dataset reads).
-  jitEnabled = options.enableJit !== false && fullMemory;
+  // Light mode JITs too: the threaded module embeds the superscalar item
+  // function in place of the dataset read (rxjit_run_program_light).
+  jitEnabled = options.enableJit !== false;
   profileCore = options.profileCore === true;
+  nonceSlots = Math.max(1, Math.floor(Number(options.nonceSlots) || 1));
+  nonceSlot = Math.max(0, Math.min(nonceSlots - 1, Math.floor(Number(options.nonceSlot) || 0)));
   postMessage({
     type: 'status',
-    message: `Loading WASM runtime (crossOriginIsolated=${self.crossOriginIsolated === true})...`,
+    message: `Loading WASM runtime ${rxScript} (crossOriginIsolated=${self.crossOriginIsolated === true})...`,
   });
 
-  if (self.crossOriginIsolated !== true) {
+  if (!stBuild && self.crossOriginIsolated !== true) {
     throw new Error('WASM pthreads require crossOriginIsolated=true. Use HTTPS/trusted localhost, or mark this LAN origin as secure in the browser.');
   }
 
   Module = await createRandomX({
-    mainScriptUrlOrBlob: self.__randomxAssets ? self.__randomxAssets.glueURL : 'randomx.js',
-    locateFile: (path) => self.__randomxAssets ? new URL(path, self.__randomxAssets.baseURL).href : path,
+    mainScriptUrlOrBlob: rxAssets ? rxAssets.glueURL : `${rxScript}?v=${rxVersion}`,
+    locateFile: (path) => rxAssets ? new URL(path, rxAssets.baseURL).href : path,
     print: (...args) => postMessage({
       type: 'status',
       message: `WASM: ${args.join(' ')}`,
@@ -311,7 +331,9 @@ async function init(options = {}) {
         // unroll2=0|1 (2x dispatch replication), shared_code=0|1 (no per-thread
         // pointer in the module bytes, so V8 compiles one copy for all
         // workers), aes_simd=0|1 (SIMD vs T-table AES in randomx.wasm),
-        // aes_relaxed=0|1 (hashAndFill AES in the relaxed-SIMD side module). 'auto' is isX86() ? x86 : arm;
+        // aes_relaxed=0|1 (hashAndFill AES in the relaxed-SIMD side module),
+        // light_mlp=0|1|2 (light mode: next-item line probe / item pairing),
+        // kernel_k=1..4 (supjit dataset-init items per loop trip). 'auto' is isX86() ? x86 : arm;
         // JSC always gets arm (it refused to tier up the large functions).
         if (Module._rxjit_set_profile) {
           const PROFILE_NAMES = ['arm', 'x86']; // index = RXJIT_PROFILE_*
@@ -340,6 +362,10 @@ async function init(options = {}) {
           if (Module._rxjit_set_aes_simd) Module._rxjit_set_aes_simd(expNum('aes_simd'));
           // aes_relaxed=0|1: hashAndFill via the relaxed side module (x86 profile, relaxed feature only)
           if (Module._rxjit_set_aes_relaxed) Module._rxjit_set_aes_relaxed(expNum('aes_relaxed'));
+          // light_mlp=0|1|2: light-mode step 7 (1 next-item probe, 2 item pairing)
+          if (Module._rxjit_set_light_mlp) Module._rxjit_set_light_mlp(expNum('light_mlp'));
+          // kernel_k=N: supjit dataset-init kernel items per loop trip (1..4)
+          if (Module._rxjit_set_kernel_k) Module._rxjit_set_kernel_k(expNum('kernel_k'));
           postMessage({
             type: 'status',
             message: `JIT profile: ${PROFILE_NAMES[Module._rxjit_get_profile()]} (${auto ? 'auto' : 'forced'})` +
@@ -347,7 +373,9 @@ async function init(options = {}) {
               ` unroll2=${Module._rxjit_effective_unroll2()}` +
               (Module._rxjit_effective_shared_code ? ` shared_code=${Module._rxjit_effective_shared_code()}` : '') +
               (Module._rxjit_effective_aes_simd ? ` aes_simd=${Module._rxjit_effective_aes_simd()}` : '') +
-              (Module._rxjit_effective_aes_relaxed ? ` aes_relaxed=${Module._rxjit_effective_aes_relaxed()}` : ''),
+              (Module._rxjit_effective_aes_relaxed ? ` aes_relaxed=${Module._rxjit_effective_aes_relaxed()}` : '') +
+              (Module._rxjit_effective_light_mlp ? ` light_mlp=${Module._rxjit_effective_light_mlp()}` : '') +
+              (Module._rxjit_effective_kernel_k ? ` kernel_k=${Module._rxjit_effective_kernel_k()}` : ''),
           });
         }
         postMessage({ type: 'status', message: 'JIT path: THREADED-INTERPRETER (resident module)' });
@@ -407,6 +435,19 @@ async function init(options = {}) {
   if (api.profile_set_enabled) {
     api.profile_set_enabled(profileCore ? 1 : 0);
     if (profileCore) api.profile_reset();
+  }
+
+  if (stBuild && (options.fbRole === 'full' || options.fbRole === 'light')) {
+    importScripts(rxAssets ? new URL('fb_full.js', rxAssets.baseURL).href : `fb_full.js?v=${rxVersion}`);
+    fb = new RxFbFull.FbWorker({
+      Module,
+      full: options.fbRole === 'full',
+      post: (m, transfer) => postMessage(m, transfer || []),
+      seed: () => currentSeedHash,
+      cache: () => cache || 0,
+      finalize: fbFinalize,
+      log: (message) => postMessage({ type: 'status', message }),
+    });
   }
 
   postJitStats();
@@ -620,14 +661,33 @@ async function buildCache(seedHash) {
   currentSeedHash = seedHash;
   Module._free(seedPtr);
   postMessage({ type: 'status', message: 'Ready to mine' });
+  if (fb) fb.cacheReady(seedHash);
+  return true;
+}
+
+// fb_full replica with every chunk: full-mode VM on the dataset, drop the cache.
+function fbFinalize(ds) {
+  const v = api.create_vm(4, null, ds); // RANDOMX_FLAG_FULL_MEM
+  if (!v) return false;
+  if (vm) api.destroy_vm(vm);
+  vm = v;
+  api.release_cache(cache);
+  cache = null;
+  postMessage({ type: 'status', message: 'fb_full: dataset replica complete, released cache' });
+  postMessage({ type: 'mode', mode: 'full' });
   return true;
 }
 
 function initializeNonceRange(job) {
   // XMRig Proxy advertises "nicehash" in login extensions and assigns the
   // high nonce byte in each blob. Ordinary jobs retain the full 32-bit space.
-  job._nonceSpace = job.nicehash === true ? 0x1000000 : 0x100000000;
+  // NoSabPool workers split it into nonceSlots disjoint spans (the last one
+  // takes the remainder); each starts at a random offset inside its own span.
+  const space = job.nicehash === true ? 0x1000000 : 0x100000000;
+  const span = Math.floor(space / nonceSlots);
   job._noncePrefix = job.nicehash === true ? job._blob[42] * 0x1000000 : 0;
+  job._nonceBase = nonceSlot * span;
+  job._nonceSpace = nonceSlot === nonceSlots - 1 ? space - job._nonceBase : span;
   job._nonce = Math.floor(Math.random() * job._nonceSpace);
   job._nonceRemaining = job._nonceSpace;
 }
@@ -636,15 +696,27 @@ function nextNonceRange(job, wanted) {
   if (!job._nonceRemaining) return null;
   const next = (job._nonce + 1) % job._nonceSpace;
   // The native parallel loop writes startNonce + index. Bound each batch
-  // before the low bits overflow, so it cannot carry into an assigned byte.
+  // before the span edge, so it cannot carry into an assigned byte or into
+  // another worker's span.
   const count = Math.min(wanted, job._nonceRemaining, job._nonceSpace - next);
   job._nonce = next + count - 1;
   job._nonceRemaining -= count;
-  return { startNonce: (job._noncePrefix + next) >>> 0, count };
+  return { startNonce: (job._noncePrefix + job._nonceBase + next) >>> 0, count };
 }
 
 function mineLoop() {
   if (!mining) return;
+
+  // fb_full chunk work goes first (the build is what everyone waits for), and
+  // while a build is on, short slices let its messages in between.
+  if (fb && fb.busy()) {
+    if (!fbPaused && currentJob) postMessage({ type: 'hashrate', rate: 0 });
+    fbPaused = true;
+    setTimeout(mineLoop, 20);
+    return;
+  }
+  fbPaused = false;
+  const sliceMs = fb && fb.active() ? 50 : 900;
 
   // Pick up new job if available
   if (pendingJob) {
@@ -669,7 +741,7 @@ function mineLoop() {
   const useParallelMining = fullMemory && datasetThreads > 1 && mineCtx && api.mine_batch_context;
 
   // Hash until ~1 second has passed, then yield
-  while (performance.now() - start < 900) {
+  while (performance.now() - start < sliceMs) {
     const range = nextNonceRange(currentJob, useParallelMining ? datasetThreads * 2 : 1);
     if (!range) {
       // Do not repeat the same nonce range if a pool leaves a job active
@@ -813,5 +885,7 @@ self.onmessage = function(e) {
       currentJob = null;
       pendingJob = null;
       break;
+    default:
+      if (fb) fb.handle(msg); // fb_* chunk messages (NoSabPool ?fb_full)
   }
 };
