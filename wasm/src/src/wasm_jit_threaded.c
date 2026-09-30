@@ -185,14 +185,26 @@ static _Thread_local int g_shared = 0;
 // out = arena +RXJIT_ARENA_ITEM_OFF, and xors those 64 bytes instead of a
 // dataset line. Set by rxjit_threaded_set_light_fn for one generation;
 // len 0 (the default) emits exactly the full-mode bytes.
+// g_light_mlp (rxjit_threaded_set_light_mlp, wasm_jit_threaded.h): 1 adds the
+// next item's line probe before the call, 2 makes TFN_ITEM item_pair (type
+// TTYPE_ITEM becomes (i32, i32, i32) -> ()) called on even iterations.
 static _Thread_local const uint8_t *g_light_fn = 0;
 static _Thread_local uint32_t g_light_fn_len = 0;
+static _Thread_local int g_light_mlp = 0;
+static _Thread_local uint32_t g_light_cache_base = 0;
 #define TFN_ITEM   24 // after main_loop (split_id is always on)
 #define TTYPE_ITEM 4
+// light_mlp 2 pairs iterations (2i, 2i + 1) within one main_loop call, which
+// counts ic down from RANDOMX_PROGRAM_ITERATIONS: iteration i even <=> ic even.
+_Static_assert(RANDOMX_PROGRAM_ITERATIONS % 2 == 0, "light_mlp 2 pairs iterations");
 
 void rxjit_threaded_set_light_fn(const uint8_t *body, uint32_t len) {
 	g_light_fn = body;
 	g_light_fn_len = body ? len : 0;
+}
+void rxjit_threaded_set_light_mlp(int mode, uint32_t cache_base) {
+	g_light_mlp = mode;
+	g_light_cache_base = cache_base;
 }
 
 // vm_state offsets (mirrors rxjit_vm_state_t in wasm_jit_gen.h).
@@ -1449,9 +1461,61 @@ static uint32_t emit_step5_mx_xor(uint8_t *buf) {
 
 // Step 7: r[i] ^= dataset[LOCT_ds_ptr + ma + i*8] for i in 0..7
 //   V3 mode: same direct-memory pattern as step 2 (compile-time index).
+// Light: the item is ds_ptr (dataset_offset / 64) + ma / 64. mx after step 5
+// is the next iteration's ma (step 8 swaps them), so its item is known here
+// too: g_light_mlp 1 touches its first cache line, 2 computes it together with
+// this one on even iterations (ic even) into the ITEM2 line, which the odd
+// iteration then xors without a call.
 static uint32_t emit_step7_dataset_xor(uint8_t *buf) {
 	THUNK_BEGIN;
-	if (g_light_fn_len) { // light: item(ds_ptr + ma/64, arena ITEM), then xor that line
+	if (g_light_fn_len && g_light_mlp == 2) {
+		// if ((ic & 1) == 0) item_pair(ds_ptr + ma/64, ds_ptr + mx/64, arena ITEM)
+		LG(LOC_ic);
+		WI32_CONST(1);
+		I32_AND();
+		I32_EQZ();
+		WASM_U8_THUNK({0x04, 0x40}); // if (no result)
+		LG(LOCT_ds_ptr);
+		LG(LOC_ma);
+		WI32_CONST(6);
+		I32_SHR_U();
+		I32_ADD();
+		LG(LOCT_ds_ptr);
+		LG(LOC_mx);
+		WI32_CONST(6);
+		I32_SHR_U();
+		I32_ADD();
+		ARENA_PTR(g_r_file_base + RXJIT_ARENA_ITEM_OFF);
+		WASM_U8(0x10);
+		WASM_U32(TFN_ITEM);
+		END_BLK();
+		// line = arena ITEM + (ic & 1) * (ITEM2 - ITEM), branchless
+		ARENA_PTR(g_r_file_base + RXJIT_ARENA_ITEM_OFF);
+		LG(LOC_ic);
+		WI32_CONST(1);
+		I32_AND();
+		WI32_CONST(RXJIT_ARENA_ITEM2_OFF - RXJIT_ARENA_ITEM_OFF);
+		WASM_U8(0x6c); // i32.mul
+		I32_ADD();
+	} else if (g_light_fn_len) { // light: item(ds_ptr + ma/64, arena ITEM), then xor that line
+		if (g_light_mlp == 1 && g_light_cache_base) {
+			// probe: arena ITEM qword 0 = the next item's first cache-line
+			// qword (overwritten by the call; the store keeps the load alive)
+			ARENA_PTR(g_r_file_base + RXJIT_ARENA_ITEM_OFF);
+			LG(LOCT_ds_ptr);
+			LG(LOC_mx);
+			WI32_CONST(6);
+			I32_SHR_U();
+			I32_ADD();
+			WI32_CONST(0x3FFFFF); // CACHE_ITEM_MASK (wasm_jit_superscalar.cpp)
+			I32_AND();
+			WI32_CONST(6);
+			I32_SHL();
+			WI32_CONST((int32_t)g_light_cache_base);
+			I32_ADD();
+			I64_LOAD_OFF(0);
+			I64_STORE_OFF(0);
+		}
 		LG(LOCT_ds_ptr);
 		LG(LOC_ma);
 		WI32_CONST(6);
@@ -2628,7 +2692,11 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 			0x60, 2, WASM_TYPE_V128, WASM_TYPE_V128, 1, WASM_TYPE_V128,\
 			0x60, 1, WASM_TYPE_V128, 1, WASM_TYPE_V128,                \
 		});                                                            \
-		if (g_light_fn_len) { /* TTYPE_ITEM: (i32, i32) -> () */       \
+		if (g_light_fn_len && g_light_mlp == 2) {                      \
+			/* TTYPE_ITEM: item_pair (i32, i32, i32) -> () */          \
+			WASM_U8_THUNK({0x60, 3, WASM_TYPE_I32, WASM_TYPE_I32,      \
+			               WASM_TYPE_I32, 0});                         \
+		} else if (g_light_fn_len) { /* TTYPE_ITEM: (i32, i32) -> () */\
 			WASM_U8_THUNK({0x60, 2, WASM_TYPE_I32, WASM_TYPE_I32, 0}); \
 		}                                                              \
 	})

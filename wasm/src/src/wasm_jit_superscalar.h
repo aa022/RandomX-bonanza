@@ -19,6 +19,9 @@
 extern "C" {
 #endif
 
+// Items per kernel loop trip (rxjit_set_kernel_k): 1..RXJIT_KERNEL_K_MAX.
+#define RXJIT_KERNEL_K_MAX 4
+
 // Generate a complete WASM module that runs initDatasetItem for a range of
 // dataset items.
 //
@@ -27,22 +30,35 @@ extern "C" {
 //                   randomx cache, baked into the module as i32.const.
 //   dataset_base    absolute pointer to the dataset memory, baked in.
 //   mem_min_pages / mem_max_pages  shared-memory import limits.
-//   buf             output buffer (caller-owned). 64 KiB is plenty for an
-//                   ~8-program kernel (~30-40 KiB typical).
+//   items_per_trip  K independent items per loop trip (their cache misses
+//                   overlap), clamped to 1..RXJIT_KERNEL_K_MAX; 1 = the one-
+//                   item kernel. Falls back to 1 if K items might not fit.
+//   cap             size of buf; the emitters write unchecked, so a
+//                   conservative bound is checked first (~30-40 KiB per item
+//                   typical).
+//   buf             output buffer (caller-owned).
 //
-// Returns number of bytes written into buf. The module imports "e.m" (shared
-// memory) and exports "k" (the kernel function).
+// Returns number of bytes written into buf, 0 if even K = 1 might not fit.
+// The module imports "e.m" (shared memory) and exports "k" (the kernel
+// function).
 uint32_t rxjit_generate_superscalar_kernel(
     const randomx::DecodedSuperscalarProgram programs[/*RANDOMX_CACHE_ACCESSES*/],
     uint32_t cache_base, uint32_t dataset_base, uint32_t mem_min_pages, uint32_t mem_max_pages,
-    uint8_t *buf);
+    int items_per_trip, uint32_t cap, uint8_t *buf);
 
 // Light mode (wasm_jit_threaded.c): the function body (locals + code + end,
 // no size prefix) of item(i32 item, i32 out) -> (), one initDatasetItem into
-// out. Expects mulh/smulh at function indices 0/1. At most ~64 KiB.
+// out. 0 if it might not fit in cap bytes (~20-40 KiB typical).
 uint32_t rxjit_emit_superscalar_item_fn(
     const randomx::DecodedSuperscalarProgram programs[/*RANDOMX_CACHE_ACCESSES*/],
-    uint32_t cache_base, uint8_t *buf);
+    uint32_t cache_base, uint32_t cap, uint8_t *buf);
+
+// Light mode, item pairing (light_mlp 2): the body of
+// item_pair(i32 itemA, i32 itemB, i32 out) -> (), itemA into out and itemB
+// into out + out_delta, computed as one 2-item block. 0 if it might not fit.
+uint32_t rxjit_emit_superscalar_item_pair_fn(
+    const randomx::DecodedSuperscalarProgram programs[/*RANDOMX_CACHE_ACCESSES*/],
+    uint32_t cache_base, uint32_t out_delta, uint32_t cap, uint8_t *buf);
 
 #ifdef __cplusplus
 }

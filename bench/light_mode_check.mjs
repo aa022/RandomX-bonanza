@@ -2,10 +2,14 @@
 // dataset) with the threaded interpreter + the embedded superscalar item
 // function (rxjit_run_program_light), then again with the JIT disabled
 // (portable interpreter + initDatasetItem), and requires bit-identical results.
-// Also re-keys the cache once to check the item function follows the cache.
+// Also re-keys the cache once to check the item function follows the cache,
+// then flips light_mlp (0 <-> 2) on the second key: the item function and the
+// module must follow the mode too.
 //
 // Usage:
 //   node bench/light_mode_check.mjs [--count 16] [--profile arm|x86|auto] [--feature-base 3]
+//        [--light-mlp 0|1|2]   step 7: probe (1) or item pairing (2); the second key
+//                              also exercises the light fn's regen key with the mode
 //   RX_BUILD=st node bench/light_mode_check.mjs      # single-thread no-SAB build
 
 import { createRequire } from 'module';
@@ -88,6 +92,22 @@ for (const [ki, key] of KEYS.entries()) {
       bad++;
     }
   }
+  if (ki === KEYS.length - 1) { // light_mlp flip on the same cache, then back
+    const mlp = Module._rxjit_effective_light_mlp();
+    Module._rxjit_set_light_mlp(mlp ? 0 : 2);
+    Module._rxSetJitEnabled(1);
+    const r1 = Module._rxjit_stat_light_runs() >>> 0;
+    const flip = hashAll(list.slice(0, 2));
+    jitRuns += (Module._rxjit_stat_light_runs() >>> 0) - r1;
+    total += 2;
+    Module._rxjit_set_light_mlp(PROF.lightMlp);
+    for (let i = 0; i < 2; i++) {
+      if (flip[i] !== ref[i]) {
+        if (bad < 5) console.error(`MISMATCH key#${ki} light_mlp ${mlp ? 0 : 2} #${i}\n  jit ${flip[i]}\n  ref ${ref[i]}`);
+        bad++;
+      }
+    }
+  }
 }
 destroy_vm(vm);
 
@@ -97,5 +117,5 @@ if (jitRuns < total * 8) {
   process.exit(1);
 }
 if (bad) { console.error(`FAIL ${mode}: ${bad}/${total} hashes differ`); process.exit(1); }
-console.log(`OK ${mode}: ${total} light-mode hashes match the portable interpreter over ${KEYS.length} keys (${jitRuns} JIT programs; ~${(msJit / total).toFixed(1)} ms/hash JIT vs ${(msRef / total).toFixed(1)} interp, incl. warm-up)`);
+console.log(`OK ${mode}: ${total} light-mode hashes match the portable interpreter over ${KEYS.length} keys + a light_mlp flip (${jitRuns} JIT programs; ~${(msJit / total).toFixed(1)} ms/hash JIT vs ${(msRef / total).toFixed(1)} interp, incl. warm-up)`);
 process.exit(0);
