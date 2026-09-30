@@ -21,8 +21,13 @@ const state = {
 };
 
 const params = new URLSearchParams(location.search);
+// No SharedArrayBuffer (the page is not crossOriginIsolated, or ?sab=0 forces
+// it for A/B): no pthreads, so mining runs as N single-thread workers on the
+// randomx_st build (NoSabPool below), each in JIT'd light mode with its own
+// 256 MiB cache (~300 MB per worker; ?threads=N caps it).
+const noSab = params.get('sab') === '0' || window.crossOriginIsolated !== true;
 // Full-memory mode is the default. Opt out with ?light=1 (or legacy ?full=0).
-const fullMemory = params.get('light') !== '1' && params.get('full') !== '0';
+const fullMemory = !noSab && params.get('light') !== '1' && params.get('full') !== '0';
 // JIT defaults: on for all engines. The threaded-interpreter + V2-minimal
 // (split_inner_dispatch) path landed in worker.js makes the JIT a clear win
 // everywhere — Safari 560 H/s, Chrome 530 H/s, Firefox 550+ at 32T on M4
@@ -309,6 +314,78 @@ function handleJob(job) {
   });
 }
 
+// Worker-shaped facade over N single-thread randomx_st workers (no SAB). It
+// fans init/job/stop out (init with a disjoint nonce slot each), sums the
+// per-worker hashrates, passes shares and errors through, emits 'ready' once
+// all workers are ready, and forwards the chatty per-worker messages
+// (status/jit/profile) from worker 0 only.
+class NoSabPool {
+  constructor(n, vTag) {
+    this.onmessage = null;
+    this.onerror = null;
+    this.onmessageerror = null;
+    this.workers = [];
+    this.rates = new Array(n).fill(0);
+    this.ready = new Set();
+    this.modeSent = false;
+    for (let i = 0; i < n; i++) {
+      const w = new Worker(`worker.js?v=${vTag}&build=st`, { name: `rx-st-${i}` });
+      w.onmessage = (e) => this._recv(i, e.data);
+      w.onerror = (e) => { if (this.onerror) this.onerror(e); };
+      w.onmessageerror = (e) => { if (this.onmessageerror) this.onmessageerror(e); };
+      this.workers.push(w);
+    }
+  }
+
+  _emit(data) {
+    if (this.onmessage) this.onmessage({ data });
+  }
+
+  _recv(i, msg) {
+    switch (msg.type) {
+      case 'ready':
+        this.ready.add(i);
+        if (this.ready.size === this.workers.length) this._emit(msg);
+        break;
+      case 'hashrate':
+        this.rates[i] = msg.rate;
+        this._emit({ type: 'hashrate', rate: this.rates.reduce((a, b) => a + b, 0) });
+        break;
+      case 'mode':
+        if (!this.modeSent) {
+          this.modeSent = true;
+          this._emit({ ...msg, mode: `${msg.mode} (no SAB, ${this.workers.length} workers)` });
+        }
+        break;
+      case 'share':
+        this._emit(msg);
+        break;
+      case 'error':
+        this._emit({ ...msg, message: `[worker ${i}] ${msg.message}` });
+        break;
+      default:
+        if (i === 0) this._emit(msg);
+    }
+  }
+
+  postMessage(msg) {
+    if (msg.type === 'stop') this.rates.fill(0);
+    const n = this.workers.length;
+    this.workers.forEach((w, i) => {
+      w.postMessage(msg.type === 'init'
+        ? { ...msg, fullMemory: false, datasetThreads: 1, datasetInitThreads: 1, nonceSlot: i, nonceSlots: n }
+        : msg);
+    });
+  }
+
+  terminate() {
+    for (const w of this.workers) {
+      try { w.terminate(); } catch (_) {}
+    }
+    this.workers = [];
+  }
+}
+
 function initWorker() {
   if (state.worker) {
     if (state.workerReady) {
@@ -320,8 +397,12 @@ function initWorker() {
   }
 
   const vTag = (window.MINER_BUILD || 'dev').replace(/[^a-zA-Z0-9-]/g, '');
-  state.worker = new Worker(`worker.js?v=${vTag}`);
+  state.worker = noSab ? new NoSabPool(datasetThreads, vTag) : new Worker(`worker.js?v=${vTag}`);
   log(`build=${window.MINER_BUILD || '?'} (cside-jit split)`);
+  if (noSab) {
+    log(`No SharedArrayBuffer${params.get('sab') === '0' ? ' (forced by ?sab=0)' : ''}: ` +
+        `${datasetThreads} single-thread light-mode workers (randomx_st, ~300 MB each)`);
+  }
   if (!enableJit) {
     log('JIT disabled by URL param.');
   }

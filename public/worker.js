@@ -1,12 +1,18 @@
 // Try to extract the version tag the worker was spawned with so we pull
 // a fresh randomx.js bundle every restart.
+// ?build=st selects the single-thread no-SAB build (randomx_st.js): the page
+// is not crossOriginIsolated, so miner.js runs N of these workers (NoSabPool),
+// one mining thread each. It must be known before the first message, hence
+// the URL rather than the init message.
+const stBuild = /[?&]build=st(&|$)/.test((self.location && self.location.search) || '');
+const rxScript = stBuild ? 'randomx_st.js' : 'randomx.js';
 (() => {
   let v = 'dev';
   try {
     const m = (self.location && self.location.search || '').match(/[?&]v=([^&]+)/);
     if (m) v = m[1];
   } catch (_) {}
-  importScripts(`randomx.js?v=${encodeURIComponent(v)}`);
+  importScripts(`${rxScript}?v=${encodeURIComponent(v)}`);
 })();
 
 let Module = null;
@@ -31,6 +37,9 @@ let cachePromise = null;
 let cacheSeedHash = null;
 let profileCore = false;
 let lastProfilePost = 0;
+// NoSabPool: this worker's slice of the 32-bit nonce space (slot of slots).
+let nonceSlot = 0;
+let nonceSlots = 1;
 
 let currentJob = null;
 let pendingJob = null;
@@ -166,20 +175,23 @@ async function init(options = {}) {
   datasetInitThreads = Math.max(1, Math.min(32, Number(options.datasetInitThreads) || 32));
   // The new C-side WASM JIT runs the full 2048-iter program loop on each
   // worker thread; it's compatible with multi-thread full-memory mining.
-  // Only enabled in full-mem mode (the JIT inlines absolute dataset reads).
-  jitEnabled = options.enableJit !== false && fullMemory;
+  // Light mode JITs too: the threaded module embeds the superscalar item
+  // function in place of the dataset read (rxjit_run_program_light).
+  jitEnabled = options.enableJit !== false;
   profileCore = options.profileCore === true;
+  nonceSlots = Math.max(1, Math.floor(Number(options.nonceSlots) || 1));
+  nonceSlot = Math.max(0, Math.min(nonceSlots - 1, Math.floor(Number(options.nonceSlot) || 0)));
   postMessage({
     type: 'status',
-    message: `Loading WASM runtime (crossOriginIsolated=${self.crossOriginIsolated === true})...`,
+    message: `Loading WASM runtime ${rxScript} (crossOriginIsolated=${self.crossOriginIsolated === true})...`,
   });
 
-  if (self.crossOriginIsolated !== true) {
+  if (!stBuild && self.crossOriginIsolated !== true) {
     throw new Error('WASM pthreads require crossOriginIsolated=true. Use HTTPS/trusted localhost, or mark this LAN origin as secure in the browser.');
   }
 
   Module = await createRandomX({
-    mainScriptUrlOrBlob: 'randomx.js',
+    mainScriptUrlOrBlob: rxScript,
     locateFile: (path) => path,
     print: (...args) => postMessage({
       type: 'status',
@@ -631,7 +643,9 @@ function mineLoop() {
     currentJob._blob = hexToBytes(currentJob.blob);
     currentJob._targetBytes = parsePoolTarget(currentJob.target);
     currentJob._targetDiff = targetToDiff(currentJob._targetBytes).toString();
-    currentJob._nonce = Math.floor(Math.random() * 0xFFFFFFFF);
+    // random start inside this worker's slot (the whole space with one slot)
+    const span = Math.floor(0x100000000 / nonceSlots);
+    currentJob._nonce = (nonceSlot * span + Math.floor(Math.random() * span)) >>> 0;
   }
 
   if (!currentJob || !vm) {
