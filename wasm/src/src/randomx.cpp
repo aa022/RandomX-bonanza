@@ -562,6 +562,49 @@ extern "C" {
 #endif
 	}
 
+#ifdef __EMSCRIPTEN__
+	int rxjit_effective_light_vms(void);
+
+	// Light 2-VM lockstep (rxjit_set_light_vms(2)): randomx_calculate_hash of
+	// inA on vmA and of inB on vmB, two light VMs on the same cache, with each
+	// pair of programs run together (randomx_vm::runPair) so one thread
+	// interleaves the two hashes' dataset-item computations. The rest (AES
+	// fill, program generation, blake2b, finalisation) stays per VM. Any other
+	// pair, or the knob at 1, hashes the two inputs one after the other.
+	EMSCRIPTEN_KEEPALIVE
+	void rxLightHash2(randomx_vm* vmA, const void* inA, size_t lenA, void* outA,
+	                  randomx_vm* vmB, const void* inB, size_t lenB, void* outB) {
+		randomx_vm* vm[2] = { vmA, vmB };
+		if (vmA == vmB || rxjit_effective_light_vms() != 2) {
+			randomx_calculate_hash(vmA, inA, lenA, outA);
+			randomx_calculate_hash(vmB, inB, lenB, outB);
+			return;
+		}
+		alignas(16) uint64_t tempHash[2][8];
+		blake2b(tempHash[0], sizeof(tempHash[0]), inA, lenA, nullptr, 0);
+		blake2b(tempHash[1], sizeof(tempHash[1]), inB, lenB, nullptr, 0);
+		for (int k = 0; k < 2; ++k)
+			vm[k]->initScratchpad(&tempHash[k]);
+		uint32_t fprc[2] = { RoundToNearest, RoundToNearest }; // resetRoundingMode, per VM
+		for (int chain = 0; chain < RANDOMX_PROGRAM_COUNT; ++chain) {
+			if (!vmA->runPair(vmB, &tempHash[0], &tempHash[1], fprc)) {
+				// not a lockstep pair (decided before any program ran)
+				randomx_calculate_hash(vmA, inA, lenA, outA);
+				randomx_calculate_hash(vmB, inB, lenB, outB);
+				return;
+			}
+			if (chain == RANDOMX_PROGRAM_COUNT - 1) break;
+			for (int k = 0; k < 2; ++k)
+				blake2b(tempHash[k], sizeof(tempHash[k]), vm[k]->getRegisterFile(), sizeof(randomx::RegisterFile), nullptr, 0);
+		}
+		vmA->getFinalResult(outA, RANDOMX_HASH_SIZE);
+		vmB->getFinalResult(outB, RANDOMX_HASH_SIZE);
+		if (rxProfileIsEnabled()) {
+			rxProfileHashes.fetch_add(2, std::memory_order_relaxed);
+		}
+	}
+#endif
+
 	void randomx_calculate_commitment(const void* input, size_t inputSize, const void* hash_in, void* com_out) {
 		assert(inputSize == 0 || input != nullptr);
 		assert(hash_in != nullptr);

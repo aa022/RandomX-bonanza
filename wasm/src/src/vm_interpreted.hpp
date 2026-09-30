@@ -59,12 +59,14 @@ namespace randomx {
 		}
 		explicit InterpretedVm(randomx_flags flags) : VmBase<Allocator, softAes>(flags) {}
 		void run(void* seed) override;
+		bool runPair(randomx_vm* other, void* seed, void* otherSeed, uint32_t fprc[2]) override;
 		void setDataset(randomx_dataset* dataset) override;
 	protected:
 		virtual void datasetRead(uint64_t blockNumber, int_reg_t(&r)[RegistersCount]);
 		virtual void datasetPrefetch(uint64_t blockNumber);
 	private:
 		void execute();
+		void storeRegisters(const NativeRegisterFile& nreg);
 
 		InstructionByteCode bytecode[RANDOMX_PROGRAM_MAX_SIZE];
 	};
