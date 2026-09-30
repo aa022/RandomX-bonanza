@@ -32,7 +32,7 @@ DURATION     ?= 30
 PROFILE      ?= auto
 EXTRA        ?=
 
-.PHONY: all help install build serve bench test clean fclean re
+.PHONY: all help install build embed serve bench test test-embed clean fclean re
 
 # Target dep graph:
 #   install ──→ deps stamp ──┐
@@ -52,6 +52,8 @@ help:
 	@printf 'webminer — make targets\n'
 	@printf '  install   verify toolchain (emcc, clang, wasm-opt, node)\n'
 	@printf '  build     compile public/randomx.{js,wasm}\n'
+	@printf '  embed     build the jsDelivr-ready distribution in dist/\n'
+	@printf '  test-embed  run embed lifecycle and consent checks\n'
 	@printf '  serve     build + run the proxy on http://localhost:8080\n'
 	@printf '  test      canonical RandomX hash smoke test\n'
 	@printf '  bench     full-memory hashrate sweep (mirrors the webui)\n'
@@ -119,6 +121,12 @@ $(WASM_WASM): $(DEPS_STAMP) $(WASM_DEPS)
 	fi
 
 $(WASM_JS): $(WASM_WASM)
+
+embed: build
+	@node scripts/package-embed.mjs
+
+test-embed:
+	@node --test tests/embed.test.cjs
 
 # ─── serve ──────────────────────────────────────────────────────────────
 serve: build

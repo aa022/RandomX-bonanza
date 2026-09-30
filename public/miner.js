@@ -14,6 +14,7 @@ const state = {
   currentJobSeq: 0,
   currentJobDiff: 0,
   lastJob: null,
+  nicehash: false,
   shareEtaStart: 0,        // anchored on first non-zero hashrate + share-accepted
   shareEtaTotal: 0,        // SNAPSHOT of diff/hashrate at anchor time — stable for the duration of one share search
   datasetBuilt: false,     // light mode: true on first 'mode'; full: set by dataset_progress
@@ -198,6 +199,7 @@ function connectWS() {
   }
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  state.nicehash = false;
   state.ws = new WebSocket(`${proto}//${location.host}`);
 
   state.ws.onopen = () => {
@@ -246,6 +248,7 @@ function connectWS() {
 
     // Login response with first job
     if (msg.result && msg.result.job) {
+      state.nicehash = Array.isArray(msg.result.extensions) && msg.result.extensions.includes('nicehash');
       log('Logged in, received first job');
       handleJob(msg.result.job);
     }
@@ -286,6 +289,7 @@ function connectWS() {
 
 function handleJob(job) {
   if (!state.mining) return;
+  job = { ...job, nicehash: state.nicehash };
   const diff = targetToDiff(job.target);
   state.currentJobId = job.job_id;
   state.currentJobSeq++;
@@ -306,6 +310,7 @@ function handleJob(job) {
     seed_hash: job.seed_hash,
     job_id: job.job_id,
     job_seq: state.currentJobSeq,
+    nicehash: job.nicehash,
   });
 }
 
@@ -365,6 +370,7 @@ function initWorker() {
             seed_hash: job.seed_hash,
             job_id: job.job_id,
             job_seq: state.currentJobSeq,
+            nicehash: job.nicehash,
           });
         }
         break;
@@ -413,6 +419,14 @@ function initWorker() {
           }));
         } else {
           log('Share not submitted: pool connection is not open');
+        }
+        break;
+      case 'nonce_exhausted':
+        if (state.mining && msg.job_id === state.currentJobId && msg.job_seq === state.currentJobSeq) {
+          state.hashrate = 0;
+          state.status = 'nonce range exhausted; waiting for a new job';
+          log(state.status);
+          updateUI();
         }
         break;
       case 'mode':

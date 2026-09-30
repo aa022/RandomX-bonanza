@@ -494,6 +494,33 @@
     #log { height: 90px; }
   }
 </style>
+<style>
+  body { flex-direction: column; align-items: center; gap: 1.5rem; }
+  .embed-builder { width: 100%; max-width: 760px; padding: 1.2rem; border: 1px solid var(--w-ink); background: var(--w-bg); font-size: .78rem; }
+  .embed-builder h2 { font-size: .85rem; letter-spacing: .18em; text-transform: uppercase; margin-bottom: .8rem; font-weight: 400; }
+  .embed-builder p { line-height: 1.7; margin: .6rem 0; overflow-wrap: anywhere; }
+  .embed-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; margin: 1rem 0; }
+  .embed-grid label { display: grid; gap: .4rem; font-size: .7rem; }
+  .embed-grid .wide { grid-column: 1 / -1; }
+  .embed-builder input, .embed-builder select, .embed-builder textarea { width: 100%; min-width: 0; border: 1px solid var(--w-rule); background: var(--w-bg-elev); color: var(--w-ink); padding: .6rem; font: inherit; }
+  .embed-builder input[type=checkbox] { width: auto; accent-color: var(--w-amber); }
+  .embed-builder button { padding: .55rem .75rem; border: 1px solid var(--w-rule); font: inherit; margin: .3rem .2rem .3rem 0; background: transparent; color: var(--w-ink); cursor: pointer; }
+  .embed-builder button:hover { color: var(--w-amber); }
+  .embed-builder textarea { height: 220px; resize: vertical; margin-top: .6rem; font-size: .68rem; tab-size: 2; }
+  .embed-builder details { border-top: 1px solid var(--w-rule); padding-top: .8rem; margin: .8rem 0; }
+  .embed-builder summary { cursor: pointer; font-size: .7rem; letter-spacing: .06em; }
+  .embed-builder pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: .8rem; margin: .7rem 0; background: var(--w-bg-elev); font-size: .66rem; line-height: 1.7; }
+  .embed-builder table { width: 100%; border-collapse: collapse; margin: .8rem 0; font-size: .68rem; line-height: 1.6; }
+  .embed-builder td, .embed-builder th { text-align: left; vertical-align: top; padding: .5rem; border-bottom: 1px solid var(--w-rule); overflow-wrap: anywhere; }
+  .embed-builder th { font-weight: 400; }
+  #embedBuilderStatus, #embedBudget { font-size: .68rem; color: var(--w-ink-dim); }
+  #embedPreview:not(:empty) { margin-top: 1rem; }
+  .custom-preview, .site-consent { padding: 1rem; border: 1px solid var(--w-rule); margin-top: .8rem; }
+  .custom-preview label { display: block; margin: .7rem 0; }
+  .custom-preview input[type=number] { width: 6rem; }
+  .site-consent { border-color: var(--w-amber); }
+  @media(max-width: 560px) { .embed-grid { grid-template-columns: 1fr; } }
+</style>
 </head>
 <body>
   <div class="widget" id="widget">
@@ -627,6 +654,72 @@
     </div>
   </div>
 
+  <section class="embed-builder" aria-label="Embed script builder">
+    <h2>Embed configuration</h2>
+    <form id="embedBuilder">
+      <div class="embed-grid">
+        <label class="wide">Monero wallet<input name="wallet" required maxlength="256" autocomplete="off" spellcheck="false"></label>
+        <label>Pool<input name="pool" required autocomplete="off" spellcheck="false"></label>
+        <label>TCP port<input name="port" type="number" min="1" max="65535" required value="3333"></label>
+        <label class="wide">WebSocket proxy<input name="proxy" required placeholder="wss://your-bridge.example" spellcheck="false"></label>
+        <label>CPU %<input name="workload" type="number" min="0" max="80" step="any" value="50" required></label>
+        <label>Interface<select name="display"><option value="widget">Widget</option><option value="headless">Headless API</option></select></label>
+        <label class="wide">Quickstart<span><input name="quickstart" type="checkbox"> Request consent on first interaction</span></label>
+      </div>
+      <details>
+        <summary>Advanced</summary>
+        <div class="embed-grid">
+          <label>Worker<input name="workerName" value="embed" maxlength="64"></label>
+          <label>Memory<select name="mode"><option value="full">Full · 2.5 GiB</option><option value="light">Light · 256 MiB</option></select></label>
+          <label class="wide">Proxy routing<select name="routeQuery"><option value="true">Add pool / port query</option><option value="false">Fixed endpoint</option></select></label>
+          <label>Nonce mode<select name="nonceMode"><option value="auto">Negotiated</option><option value="nicehash">NiceHash</option></select></label>
+          <label>Keepalive<select name="keepalive"><option value="auto">Negotiated</option><option value="required">Required · every 15 s</option></select></label>
+          <label class="wide">Script URL<input name="scriptURL" required spellcheck="false" value="https://cdn.jsdelivr.net/gh/aa022/RandomX-bonanza@v0.2.0/dist/embed.js"></label>
+        </div>
+      </details>
+      <p id="embedBudget"></p>
+      <button type="submit">Generate</button>
+      <button id="embedCopy" type="button">Copy</button>
+      <button id="embedShowPreview" type="button">Preview</button>
+      <button id="embedClearPreview" type="button">Clear</button>
+    </form>
+    <label for="embedSnippet">Script</label>
+    <textarea id="embedSnippet" readonly spellcheck="false" aria-label="Generated embed script"></textarea>
+    <p id="embedBuilderStatus" role="status" aria-live="polite"></p>
+    <details class="embed-deployment">
+      <summary>Deployment / CORS</summary>
+      <table>
+        <thead><tr><th>Endpoint</th><th>Configuration</th></tr></thead>
+        <tbody>
+          <tr><td>Host page</td><td>HTTPS. Set COOP and COEP on the HTML response. These headers enable the shared memory used by WASM threads.</td></tr>
+          <tr><td>Static assets</td><td>Publish the complete <code>dist/</code> directory to the script URL’s pinned release. For your own asset server, send the CORS and CORP headers below on JavaScript and WASM responses, including redirects.</td></tr>
+          <tr><td>Pool proxy</td><td>Use <code>wss://</code> on HTTPS pages. Forward WebSocket upgrades to the bridge. This bridge uses a <code>pool</code>/<code>port</code> URL query; choose Fixed endpoint for proxies that select their pool internally. Match the disclosed pool to that endpoint. Message frames carry XMRig-shaped <code>login</code>, <code>job</code> and <code>submit</code> JSON-RPC. Native WebSocket ping/pong checks the transport.</td></tr>
+        </tbody>
+      </table>
+      <p>HTML response headers</p>
+      <pre>Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp</pre>
+      <p>Cross-origin static asset response headers</p>
+      <pre>Access-Control-Allow-Origin: *
+Cross-Origin-Resource-Policy: cross-origin
+Content-Type: application/javascript  # .js
+Content-Type: application/wasm        # .wasm</pre>
+      <p>Generated scripts use <code>crossorigin="anonymous"</code>; asset requests omit cross-origin credentials. CORS belongs on the asset server. Adding it to the host page alone does not grant access to another server’s files.</p>
+      <p>For an existing Content Security Policy, allow the asset origin in <code>script-src</code> and <code>connect-src</code>, the proxy in <code>connect-src</code>, and <code>blob:</code> workers. Example for jsDelivr:</p>
+      <pre>script-src 'self' https://cdn.jsdelivr.net blob: 'wasm-unsafe-eval';
+worker-src 'self' blob:;
+connect-src 'self' https://cdn.jsdelivr.net wss://YOUR_PROXY;</pre>
+      <p>Authorize inline initialization with your site’s script nonce or hash. For the widget stylesheet, pass a matching <code>nonce</code> and allow it in <code>style-src</code>. Keep your existing CSP directives. Browsers needing the broader WASM permission may require <code>'unsafe-eval'</code>.</p>
+      <p>COEP also applies to other resources on the page: external scripts, fonts and images must support CORS or an appropriate CORP policy. WebSockets use an <code>Origin</code> header rather than CORS preflight; allow the embedding site in your proxy’s origin policy.</p>
+      <p>Verify in the embedding page’s console:</p>
+      <pre>window.isSecureContext === true
+window.crossOriginIsolated === true
+typeof SharedArrayBuffer === 'function'</pre>
+      <p>If isolation is false, check the HTML response headers and any <code>Permissions-Policy</code> restriction on <code>cross-origin-isolated</code>. If assets fail, inspect their CORS/CORP headers and CSP errors. If the proxy fails, check TLS, its Origin policy, and the HTTP <code>101</code> upgrade response. Safari’s local demo needs HTTPS; a CDN script cannot supply isolation headers for its host page.</p>
+    </details>
+    <div id="embedPreview"></div>
+  </section>
+
   <!-- MINER_DEFAULTS is rewritten from config.js by the local proxy so the
        client knows the project's default wallet + pool target without
        hardcoding them in JS. -->
@@ -639,5 +732,7 @@
     };
   </script>
   <script src="miner.js"></script>
+  <script src="embed.js" data-auto="false"></script>
+  <script src="embed-builder.js"></script>
 </body>
 </html>

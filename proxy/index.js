@@ -46,7 +46,7 @@ function targetToDiff(targetHex) {
 
 // One client session = one upstream pool TCP socket. `tag` distinguishes
 // browser ('ws') from xmrig ('tcp') sessions in the proxy log.
-function createSession(tag, sendToClient) {
+function createSession(tag, sendToClient, target = {}) {
   let pool          = null;
   let poolBuffer    = '';
   let poolReady     = false;
@@ -57,12 +57,13 @@ function createSession(tag, sendToClient) {
   // sharing this proxy don't collide on the pool side.
   const sessionUid  = Math.random().toString(36).slice(2, 8);
 
-  let currentHost   = config.POOL_HOST;
-  let currentPort   = config.POOL_PORT;
+  let currentHost   = target.host || config.POOL_HOST;
+  let currentPort   = target.port || config.POOL_PORT;
   let walletOverride = null;
   let workerOverride = null;
 
   function sendToPool(msg) {
+    if (!pool) connectPool();
     const line = JSON.stringify(msg) + '\n';
     if (poolReady && pool && !pool.destroyed) pool.write(line);
     else pending.push(line);
@@ -83,6 +84,7 @@ function createSession(tag, sendToClient) {
     // Capture this socket so async 'close'/'error' on a stale socket (from
     // a set_target-driven reconnect) doesn't tear down the new pool.
     const myPool = new net.Socket();
+    myPool.setKeepAlive(true, 15000);
     pool = myPool;
     poolBuffer = '';
     myPool.connect(currentPort, currentHost, () => {
@@ -130,11 +132,16 @@ function createSession(tag, sendToClient) {
     });
   }
 
-  connectPool();
-
   function onClientMessage(rawText) {
     try {
       const msg = JSON.parse(rawText);
+
+      // Legacy embed compatibility. New clients use native WS ping/pong
+      // and the pool's negotiated Stratum keepalive extension.
+      if (msg.method === 'ping') {
+        safeSendToClient({ id: msg.id, result: { status: 'OK' } });
+        return;
+      }
 
       // Browser tells us which pool + wallet to use before login. We may
       // need to reconnect upstream if the host:port actually changed.
@@ -151,9 +158,10 @@ function createSession(tag, sendToClient) {
         workerOverride = newWorker;
         console.log(`[${tag}/set_target] -> ${currentHost}:${currentPort}, wallet=${(walletOverride || config.WALLET).slice(0, 12)}…`);
         if (changed) {
+          const wasConnected = !!pool;
           disconnectPool();
           pending = [];
-          connectPool();
+          if (wasConnected) connectPool();
         }
         return;
       }
@@ -173,7 +181,7 @@ function createSession(tag, sendToClient) {
         console.log(`[${tag}/login] worker=${uniqueWorker}`);
       }
 
-      if (msg.method === 'submit' && minerId) {
+      if (msg.method === 'submit' && minerId && rewriteLogin) {
         msg.params = msg.params || {};
         msg.params.id = minerId;
       }
@@ -233,11 +241,13 @@ const requestHandler = (req, res) => {
     'Content-Type': MIME[ext] || 'application/octet-stream',
     'Cross-Origin-Opener-Policy':   'same-origin',
     'Cross-Origin-Embedder-Policy': 'require-corp',
-    'Cross-Origin-Resource-Policy': 'same-origin',
+    'Cross-Origin-Resource-Policy': ext === '.html' ? 'same-origin' : 'cross-origin',
+    'Access-Control-Allow-Origin': '*',
     'Content-Security-Policy': [
       "default-src 'self'",
-      "script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval' 'unsafe-inline'",
-      "connect-src 'self' ws: wss:",
+      "script-src 'self' https://cdn.jsdelivr.net blob: 'wasm-unsafe-eval' 'unsafe-eval' 'unsafe-inline'",
+      "worker-src 'self' blob:",
+      "connect-src 'self' https://cdn.jsdelivr.net ws: wss:",
       "img-src 'self' data:",
       "style-src 'self' 'unsafe-inline'",
     ].join('; '),
@@ -260,12 +270,34 @@ const requestHandler = (req, res) => {
 const server = http.createServer(requestHandler);
 
 const wss = new WebSocketServer({ server });
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   console.log('[ws] browser connected');
-  const session = createSession('ws', (text) => ws.send(text));
+  const url = new URL(req.url, 'http://localhost');
+  const routed = url.searchParams.has('pool');
+  const host = url.searchParams.get('pool');
+  const port = Number(url.searchParams.get('port'));
+  if (routed && (!host || host.length > 253 || /[\s/<>]/.test(host) || !Number.isInteger(port) || port < 1 || port > 65535)) {
+    ws.close(1008, 'Invalid pool target'); return;
+  }
+  const session = createSession('ws', (text) => ws.send(text), routed ? { host, port } : {});
+  if (routed) session.setLoginPassthrough();
+  ws.alive = true;
+  ws.on('pong', () => { ws.alive = true; });
+  ws.on('error', () => ws.terminate());
   ws.on('message', (data) => session.onClientMessage(data.toString()));
   ws.on('close',  ()      => session.onClientClose());
 });
+
+// Transport heartbeat: browser WebSocket implementations answer pong
+// automatically. Nothing is added to the pool's JSON-RPC message stream.
+const wsHeartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (!ws.alive) { ws.terminate(); continue; }
+    ws.alive = false;
+    ws.ping();
+  }
+}, 15000);
+wss.on('close', () => clearInterval(wsHeartbeat));
 
 // Raw-TCP stratum front-door for xmrig and friends. They send their own
 // login fields, so we don't rewrite anything for these clients.

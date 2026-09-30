@@ -1,0 +1,17 @@
+{
+  "name": "randomx-bonanza-embed",
+  "version": "0.2.0",
+  "description": "Consent-driven RandomX browser embed with configurable pool and CPU workload",
+  "license": "(CC0-1.0 AND BSD-3-Clause)",
+  "main": "dist/embed.js",
+  "jsdelivr": "dist/embed.js",
+  "unpkg": "dist/embed.js",
+  "files": ["dist", "README.md", "LICENSE"],
+  "repository": { "type": "git", "url": "git+https://github.com/aa022/RandomX-bonanza.git" },
+  "scripts": {
+    "build": "make embed",
+    "test": "node --test tests/embed.test.cjs",
+    "prepack": "make embed"
+  },
+  "engines": { "node": ">=18" }
+}
