@@ -638,6 +638,66 @@
       poolPort: 'DEFAULT_POOL_PORT_PLACEHOLDER',
     };
   </script>
+  <!-- ?coi=1 (opt-in): a secure-context page without COOP/COEP registers
+       coi-sw.js, which re-serves everything with the headers, and reloads
+       once, so it comes back crossOriginIsolated and miner.js takes the SAB
+       path. ?coi=0 unregisters it. Must run before miner.js decides noSab;
+       window.__coiPending holds Start until the reload, window.__coiLog is
+       logged by miner.js. See NOSAB_KNOBS.md. -->
+  <script>
+    (function () {
+      var p = new URLSearchParams(location.search);
+      var isCoi = function (w) { return !!w && /\/coi-sw\.js$/.test(w.scriptURL); };
+      var settle = function (msg) {
+        window.__coiPending = false;
+        if (msg) window.__coiLog = msg;
+        window.dispatchEvent(new Event('coi-settled'));
+      };
+      try {
+        var sw = navigator.serviceWorker;
+        if (window.crossOriginIsolated || p.get('coi') === '0') {
+          try { sessionStorage.removeItem('coiReloaded'); } catch (_) {}
+        }
+        if (p.get('coi') === '0') {
+          if (!sw) return;
+          // Unregistering doesn't release this page; reload only if it's ours.
+          var controlled = isCoi(sw.controller);
+          if (controlled) window.__coiPending = true;
+          sw.getRegistrations().then(function (regs) {
+            return Promise.all(regs.filter(function (r) { return isCoi(r.active); })
+              .map(function (r) { return r.unregister(); }));
+          }).then(function () {
+            if (controlled) location.reload();
+          }, function (e) { settle('coi: unregister failed: ' + e); });
+        } else if (p.get('coi') === '1' && !window.crossOriginIsolated && window.isSecureContext &&
+                   sw && p.get('sab') !== '0') {
+          if (sw.controller) {
+            // Controlled but not isolated: the browser ignores the injected
+            // headers (or another worker owns the page). Don't loop.
+            window.__coiLog = 'coi: page is controlled by ' + sw.controller.scriptURL +
+              ' but still not crossOriginIsolated; staying on the no-SAB path';
+          } else if (!sessionStorage.getItem('coiReloaded')) {
+            sessionStorage.setItem('coiReloaded', '1');
+            window.__coiPending = true;
+            var done = false;
+            var reload = function () { if (!done) { done = true; location.reload(); } };
+            sw.addEventListener('controllerchange', reload);
+            sw.register('coi-sw.js').then(function () { return sw.ready; }).then(reload, function (e) {
+              if (!done) { done = true; settle('coi: service worker registration failed: ' + e); }
+            });
+            setTimeout(function () {
+              if (!done) { done = true; settle('coi: service worker not active after 10 s; staying on the no-SAB path'); }
+            }, 10000);
+          } else {
+            window.__coiLog = 'coi: already reloaded once in this tab without isolation; staying on the no-SAB path';
+          }
+        }
+      } catch (e) {
+        // Private windows may throw on sessionStorage / serviceWorker.
+        settle('coi: ' + e);
+      }
+    })();
+  </script>
   <script src="fb_full.js"></script>
   <script src="miner.js"></script>
 </body>

@@ -426,6 +426,16 @@ function initWorker() {
     }
     return;
   }
+  // ?coi=1: index.html is registering coi-sw.js and about to reload into an
+  // isolated page; start after that (or on the no-SAB path if it gives up).
+  if (window.__coiPending) {
+    if (!state.coiWait) {
+      state.coiWait = true;
+      log('coi: waiting for the service worker reload...');
+      window.addEventListener('coi-settled', () => { if (state.mining) initWorker(); }, { once: true });
+    }
+    return;
+  }
 
   const vTag = (window.MINER_BUILD || 'dev').replace(/[^a-zA-Z0-9-]/g, '');
   state.worker = noSab ? new NoSabPool(datasetThreads, vTag, fbFull) : new Worker(`worker.js?v=${vTag}`);
@@ -443,6 +453,9 @@ function initWorker() {
     log('JIT disabled by URL param.');
   }
   log(`crossOriginIsolated=${window.crossOriginIsolated === true}`);
+  const swCtl = navigator.serviceWorker && navigator.serviceWorker.controller;
+  if (swCtl && /\/coi-sw\.js$/.test(swCtl.scriptURL)) log('coi: service worker active (COOP/COEP injected; ?coi=0 removes it)');
+  if (window.__coiLog) log(window.__coiLog);
   log(`navigator.hardwareConcurrency=${navigator.hardwareConcurrency || 'unknown'}, mining threads=${datasetThreads}, init threads=${datasetInitThreads}`);
 
   state.worker.onerror = (e) => {

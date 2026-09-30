@@ -243,6 +243,7 @@ t_item breakdown: ~0.4 µs of dependent cache misses (1.04 µs with the cache in
 4. ~~Opt-in full replicas~~ **Done** (`?fb_full=K`, see §9.1); opt-in, default K = 0 (see `NOSAB_KNOBS.md`).
 5. One cache build broadcast to all workers.
 6. OPFS persistence.
+7. **Opt-in `?coi=1`** (branch `nosab/x-coi-sw`): a COOP/COEP service worker (`public/coi-sw.js`) makes a header-less secure-context page `crossOriginIsolated` after one reload, so it leaves this path for SAB full mode (~678 vs 252 H/s at 12 threads). It changes nothing for plain-HTTP LAN pages, Firefox private windows or header-sending deployments. `bench/coi_e2e.mjs` covers it; the details are in `NOSAB_KNOBS.md` §2a.
 
 ### 9.1 Full replicas (`?fb_full=K`, K = 0–2, default 0)
 **Default: K = 0, opt-in.** One replica wins in the Node benches (+7% at 12 workers, +34% at 6; K = 2 +18% at 12), but costs ~2.3 GB and a ~7.5 s build per seed, so it stays a knob (a default of 1 was tried in `3f7ec77` and reverted). The URL parameters and how they combine are in `NOSAB_KNOBS.md`.
