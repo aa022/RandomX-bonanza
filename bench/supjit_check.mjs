@@ -2,6 +2,8 @@
 // with supjit on) must equal the portable initDatasetItem byte for byte. The
 // full_mode_check / mine_ctx_check gates can't catch a broken kernel: both of
 // their sides read the same (kernel-built) dataset. Also prints the 1T item cost.
+// Then rxInitItemsInto (the no-SAB replica chunks: items into a malloc'd buffer)
+// must equal randomx_init_dataset on random ranges, kernel and fallback path.
 //
 // Usage: node bench/supjit_check.mjs [--items 262144] [--start N]
 //        RX_BUILD=st node bench/supjit_check.mjs      # single-thread no-SAB build
@@ -45,3 +47,32 @@ const ref = M.HEAPU8.slice(lo, lo + NI * 64);
 let bad = 0; for (let i = 0; i < ref.length; i += 64) if (Buffer.compare(ref.subarray(i, i + 64), jit.subarray(i, i + 64))) bad++;
 if (bad) { console.error(`FAIL supjit: ${bad}/${NI} items differ from initDatasetItem`); process.exit(1); }
 console.log(`OK supjit: ${NI} items match initDatasetItem (kernel ${(ms * 1000 / N).toFixed(3)} us/item over ${N} items, 1T)`);
+
+// rxInitItemsInto: random ranges (odd sizes, across the kernel's 16384-item
+// sub-calls, the dataset's top end where addresses cross 2 GiB) into a malloc'd
+// buffer vs randomx_init_dataset into the dataset.
+const into = c('rxInitItemsInto', 'number', ['number', 'number', 'number', 'number']);
+const refInit = c('randomx_init_dataset', null, ['number', 'number', 'number', 'number']);
+const total = c('randomx_dataset_item_count', 'number', [])();
+let seed = 0x9e3779b9;
+const rnd = (n) => { seed = (Math.imul(seed ^ (seed >>> 15), 0x2c1b3c6d) + 0x6d2b79f5) >>> 0; return seed % n; };
+const ranges = [[0, 1], [total - 3001, 3001], [5 * 65536, 20000]];
+for (let k = 0; k < 6; k++) { const n = 1 + rnd(4000); ranges.push([rnd(total - n), n]); }
+const checkRange = ([s, n], sup) => {
+  M._rxjit_set_supjit_enabled(sup);
+  const dst = M._malloc(n * 64);
+  if (!dst || !into(cache, dst, s, n)) throw new Error('rxInitItemsInto failed');
+  if (sup && !M._rxjit_get_supjit_enabled()) { console.error('FAIL itemsInto: kernel disabled itself (fell back)'); process.exit(1); }
+  const got = M.HEAPU8.slice(dst, dst + n * 64);
+  M._free(dst);
+  refInit(ds, cache, s, n);
+  const o = mem + s * 64;
+  if (Buffer.compare(got, M.HEAPU8.subarray(o, o + n * 64))) {
+    console.error(`FAIL itemsInto: items [${s}, ${s + n}) (supjit=${sup}) differ from randomx_init_dataset`); process.exit(1);
+  }
+  return n;
+};
+let nItems = 0;
+for (const r of ranges) nItems += checkRange(r, 1);
+nItems += checkRange([rnd(total - 777), 777], 0);
+console.log(`OK itemsInto: ${ranges.length + 1} ranges (${nItems} items, top end at 0x${(mem + total * 64 - 1 >>> 0).toString(16)}) match randomx_init_dataset`);

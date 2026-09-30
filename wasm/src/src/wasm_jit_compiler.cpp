@@ -501,6 +501,48 @@ int rxInitDatasetJoin(void) {
 	return 1;
 }
 
+// No-SAB full replicas (miner.js NoSabPool ?fb_full=K): items [startItem,
+// startItem + itemCount) into an arbitrary buffer dst instead of the dataset,
+// so every randomx_st worker can compute chunks for the replica workers and
+// hand them over as plain ArrayBuffers. The supjit kernel writes to
+// dataset_base + startItem*64 in wrapping i32, so dataset_base = dst -
+// startItem*64 lands on dst. The kernel is regenerated per call (~1 ms) into
+// the one kernel buffer, so this must not overlap an rxInitDatasetStart job
+// (pthread build). Falls back to initDatasetItem like the range workers.
+EMSCRIPTEN_KEEPALIVE
+int rxInitItemsInto(randomx_cache *cache, uint8_t *dst, uint32_t startItem, uint32_t itemCount) {
+	if (cache == nullptr || dst == nullptr || itemCount == 0) {
+		return 0;
+	}
+	const uint32_t end = startItem + itemCount;
+	uint32_t item = startItem;
+	if (rxjit_get_supjit_enabled() != 0) {
+		const uint32_t base = (uint32_t)(uintptr_t)dst - startItem * randomx::CacheLineSize;
+		const uint32_t sz = rxjit_generate_superscalar_kernel(
+		    cache->decodedPrograms, (uint32_t)(uintptr_t)cache->memory, base, 1, 65536,
+		    (uint8_t *)rxjit_supjit_bytes_ptr());
+		if (sz == 0 || sz > (1 << 16)) {
+			rxjit_set_supjit_enabled(0);
+		} else {
+			rxjit_supjit_publish_bytes(sz);
+			constexpr uint32_t CHUNK = 16384;
+			while (item < end) {
+				const uint32_t step = (end - item) < CHUNK ? (end - item) : CHUNK;
+				if (!rxjit_supjit_run_range(item, step)) {
+					rxjit_set_supjit_enabled(0);
+					break;
+				}
+				item += step;
+			}
+		}
+	}
+	uint8_t *out = dst + (size_t)(item - startItem) * randomx::CacheLineSize;
+	for (; item < end; ++item, out += randomx::CacheLineSize) {
+		randomx::initDatasetItem(cache, out, item);
+	}
+	return 1;
+}
+
 struct MineThreadJob {
 	randomx_flags flags;
 	randomx_cache *cache;
