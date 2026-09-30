@@ -244,6 +244,7 @@ t_item breakdown: ~0.4 µs of dependent cache misses (1.04 µs with the cache in
 5. One cache build broadcast to all workers.
 6. OPFS persistence.
 7. **Item MLP** (§9.2): `light_mlp=2` and `kernel_k` are in, off by default; measure 6/12 workers and the SAB init on an idle box, then set the x86 profile.
+8. **Opt-in `?coi=1`** (branch `nosab/x-coi-sw`): a COOP/COEP service worker (`public/coi-sw.js`) makes a header-less secure-context page `crossOriginIsolated` after one reload, so it leaves this path for SAB full mode (~678 vs 252 H/s at 12 threads). It changes nothing for plain-HTTP LAN pages, Firefox private windows or header-sending deployments. `bench/coi_e2e.mjs` covers it; the details are in `NOSAB_KNOBS.md` §2a.
 
 ### 9.2 Superscalar item MLP (`light_mlp`, `kernel_k`, 2026-10-01)
 Branch `nosab/x-item-mlp`. The item is throughput-bound plus 8 dependent cache misses (~0.4 µs of ~1.1 µs). Moving a miss earlier within one item does not help: a load at the ROB head blocks retirement wherever it sits. Having **two independent misses in flight** does. The only independent addresses are other items: in light mode, `mx` after step 5 is exactly the next iteration's `ma`, so item(i + 1) is known at step 7 of iteration i (a depth of 2 is the ceiling; item(i + 2) needs i + 1's registers). In the dataset-init kernel every item is independent.
