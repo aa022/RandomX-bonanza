@@ -18,7 +18,8 @@
 //   pool.terminate()
 //
 // Worker messages: {type:'go', epoch, warmup, secs} runs the bench window (see nosab_bench)
-// and replies 'done'; {type:'hashes', inputs:[Buffer], jit} hashes each input
+// and replies 'done' (with lightVms 2 a light worker hashes two nonces per call on two
+// VMs in lockstep, rxLightHash2, and 'done' carries pairRuns); {type:'hashes', inputs:[Buffer], jit} hashes each input
 // (jit false: the portable interpreter) and replies {type:'hashes', hashes:[hex], full};
 // {type:'rekey', key} rebuilds the cache for key.
 
@@ -46,7 +47,10 @@ function setupJit(Module, featureBase, prof, lightVms) {
   Module._rxjit_set_feature(featureBase | 4);
   applyProfile(Module, prof);
   Module._rxSetJitEnabled(1);
-  if (lightVms > 1 && Module._rxjit_set_light_vms) { Module._rxjit_set_light_vms(lightVms); return lightVms; }
+  if (lightVms > 1 && Module._rxjit_set_light_vms) {
+    Module._rxjit_set_light_vms(lightVms);
+    return Module._rxjit_effective_light_vms();
+  }
   return 1;
 }
 
@@ -125,9 +129,12 @@ if (!isMainThread && workerData && workerData.nosabPool) {
   const c = (n, r, a) => Module.cwrap(n, r, a);
   const calc = c('randomx_calculate_hash', null, ['number', 'number', 'number', 'number']);
   const post = (m, t) => parentPort.postMessage(m, t || []);
-  let seed = null, cache = 0, vm = 0, full = false;
-  const setKey = (k) => { // new light cache + light VM (the replica keeps its dataset)
+  const hash2 = c('rxLightHash2', null, ['number', 'number', 'number', 'number', 'number', 'number', 'number', 'number']);
+  let seed = null, cache = 0, vm = 0, vm2 = 0, full = false;
+  const setKey = (k) => { // new light cache + light VM(s) (the replica keeps its dataset)
     if (vm) Module._randomx_destroy_vm(vm);
+    if (vm2) Module._randomx_destroy_vm(vm2);
+    vm2 = 0;
     if (cache) Module._randomx_release_cache(cache);
     cache = Module._randomx_alloc_cache(0);
     if (!cache) throw new Error('alloc_cache failed');
@@ -138,6 +145,8 @@ if (!isMainThread && workerData && workerData.nosabPool) {
     Module._free(kp);
     vm = Module._randomx_create_vm(0, cache, 0);
     if (!vm) throw new Error('create_vm failed');
+    // light_vms 2: a second VM on the same cache; one call hashes two nonces
+    if (lightVms === 2 && !(vm2 = Module._randomx_create_vm(0, cache, 0))) throw new Error('create_vm failed');
     seed = k;
     full = false;
   };
@@ -152,6 +161,8 @@ if (!isMainThread && workerData && workerData.nosabPool) {
       if (!v) return false;
       Module._randomx_destroy_vm(vm);
       vm = v;
+      if (vm2) Module._randomx_destroy_vm(vm2); // on the cache
+      vm2 = 0;
       Module._randomx_release_cache(cache);
       cache = 0;
       full = true;
@@ -162,19 +173,32 @@ if (!isMainThread && workerData && workerData.nosabPool) {
   }) : null;
 
   const inPtr = Module._malloc(BLOB_LEN), outPtr = Module._malloc(32);
+  const inPtr2 = Module._malloc(BLOB_LEN), outPtr2 = Module._malloc(32);
   const blob = new Uint8Array(BLOB_LEN);
   for (let j = 0; j < BLOB_LEN; j++) blob[j] = (j * 131 + 7) & 0xff;
   Module.HEAPU8.set(blob, inPtr);
+  Module.HEAPU8.set(blob, inPtr2);
   let nonce = slot;
-  const hash = () => {
+  const setNonce = (p) => {
     const h = Module.HEAPU8; // re-read: the heap view can change on memory growth
-    h[inPtr + NONCE_OFF] = nonce; h[inPtr + NONCE_OFF + 1] = nonce >>> 8;
-    h[inPtr + NONCE_OFF + 2] = nonce >>> 16; h[inPtr + NONCE_OFF + 3] = nonce >>> 24;
-    calc(vm, inPtr, BLOB_LEN, outPtr);
+    h[p + NONCE_OFF] = nonce; h[p + NONCE_OFF + 1] = nonce >>> 8;
+    h[p + NONCE_OFF + 2] = nonce >>> 16; h[p + NONCE_OFF + 3] = nonce >>> 24;
     nonce = (nonce + slots) >>> 0;
+  };
+  // Returns the number of hashes done.
+  const hash = () => {
+    if (vm2) {
+      setNonce(inPtr); setNonce(inPtr2);
+      hash2(vm, inPtr, BLOB_LEN, outPtr, vm2, inPtr2, BLOB_LEN, outPtr2);
+      return 2;
+    }
+    setNonce(inPtr);
+    calc(vm, inPtr, BLOB_LEN, outPtr);
+    return 1;
   };
   // JIT'd programs run so far (light and full mode count separately in C)
   const jitRuns = () => (full ? Module._rxjit_stat_runs() : Module._rxjit_stat_light_runs()) >>> 0;
+  const pairRuns = () => (Module._rxjit_stat_light_pair_runs ? Module._rxjit_stat_light_pair_runs() >>> 0 : 0);
   const wall = () => performance.timeOrigin + performance.now();
 
   parentPort.on('message', (m) => {
@@ -185,20 +209,24 @@ if (!isMainThread && workerData && workerData.nosabPool) {
       if (fb) fb.cacheReady(m.key);
     } else if (m.type === 'go') {
       const { epoch, warmup, secs } = m;
-      const r0 = jitRuns();
+      const r0 = jitRuns(), p0 = pairRuns();
       while (wall() < epoch) {}
       const mStart = epoch + warmup * 1000, mEnd = mStart + secs * 1000;
       let all = 0;
-      while (wall() < mStart) { hash(); all++; }
+      while (wall() < mStart) all += hash();
       // Count the hashes that start and finish inside the window.
       let n = 0, t = wall(), first = t, last = t;
       while (t < mEnd) {
-        hash(); all++;
+        const k = hash();
+        all += k;
         const e = wall();
         if (e > mEnd) break;
-        n++; last = t = e;
+        n += k; last = t = e;
       }
-      post({ type: 'done', hashes: n, secs: (last - first) / 1000, allHashes: all, jitRuns: jitRuns() - r0 });
+      post({
+        type: 'done', hashes: n, secs: (last - first) / 1000, allHashes: all,
+        jitRuns: jitRuns() - r0, pairRuns: pairRuns() - p0, paired: !!vm2,
+      });
     } else if (m.type === 'hashes') {
       if (!m.jit) Module._rxSetJitEnabled(0);
       const hashes = m.inputs.map((input) => {

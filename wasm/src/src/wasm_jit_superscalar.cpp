@@ -63,9 +63,22 @@ constexpr int FN_MULH = 0;
 constexpr int FN_SMULH = 1;
 constexpr int FN_KERNEL = 2;
 
+// The locals one item computation uses. The kernel and the light item
+// function use the layout above (KL); the 2-VM item2 function runs two
+// computations interleaved, each with its own set (rxjit_emit_superscalar_item2_fn).
+struct ItemLocals {
+	int item;        // i32 item number
+	int out;         // i32 output pointer
+	int mixBlock;    // i32
+	int r0;          // i64 r0..r7 = r0..r0+7
+	int registerVal; // i64
+	int mt;          // i64 inline mulh temp
+};
+constexpr ItemLocals KL = {LK_item, LK_out, LK_mixBlock, LK_r0, LK_registerVal, LK_mt};
+
 // Helper to emit r-local access for one of the 8 r-registers.
-static inline int RREG(int idx) {
-	return LK_r0 + idx;
+static inline int RREG(const ItemLocals &L, int idx) {
+	return L.r0 + idx;
 }
 
 // ---------- Macros ----------
@@ -141,7 +154,7 @@ static inline int RREG(int idx) {
 //   hi = aH*bH + (t >> 32) + ((aL*bH + (t & M)) >> 32)
 // Signed: hi -= ((a >> 63) & b) + ((b >> 63) & a). V8 does not inline the
 // call-based stubs; the calls were ~40% of the item time (1T, x64).
-static uint32_t emit_mulh_inline(int a, int b, bool is_signed, uint8_t *buf) {
+static uint32_t emit_mulh_inline(const ItemLocals &L, int a, int b, bool is_signed, uint8_t *buf) {
 	THUNK_BEGIN;
 	// t = aH*bL + ((aL*bL) >> 32)
 	LG(a);
@@ -161,7 +174,7 @@ static uint32_t emit_mulh_inline(int a, int b, bool is_signed, uint8_t *buf) {
 	WI64_CONST(32);
 	I64_SHR_U();
 	I64_ADD();
-	LS(LK_mt);
+	LS(L.mt);
 	// (aL*bH + (t & M)) >> 32
 	LG(a);
 	WI64_CONST(0xffffffffLL);
@@ -170,7 +183,7 @@ static uint32_t emit_mulh_inline(int a, int b, bool is_signed, uint8_t *buf) {
 	WI64_CONST(32);
 	I64_SHR_U();
 	I64_MUL();
-	LG(LK_mt);
+	LG(L.mt);
 	WI64_CONST(0xffffffffLL);
 	I64_AND();
 	I64_ADD();
@@ -185,7 +198,7 @@ static uint32_t emit_mulh_inline(int a, int b, bool is_signed, uint8_t *buf) {
 	I64_SHR_U();
 	I64_MUL();
 	I64_ADD();
-	LG(LK_mt);
+	LG(L.mt);
 	WI64_CONST(32);
 	I64_SHR_U();
 	I64_ADD();
@@ -208,12 +221,13 @@ static uint32_t emit_mulh_inline(int a, int b, bool is_signed, uint8_t *buf) {
 
 // Emit code for one decoded SuperscalarHash instruction.
 //   Side effect on the operand stack: none (each emit is balanced).
-//   Reads/writes the r0..r7 locals at indices LK_r0..LK_r7.
-static uint32_t emit_super_inst(const randomx::DecodedSuperscalarInst &d, uint8_t *buf) {
+//   Reads/writes the r0..r7 locals at indices L.r0..L.r0+7.
+static uint32_t emit_super_inst(const ItemLocals &L, const randomx::DecodedSuperscalarInst &d,
+                                uint8_t *buf) {
 	THUNK_BEGIN;
 	using ST = randomx::SuperscalarInstructionType;
-	const int rd = RREG(d.dst);
-	const int rs = RREG(d.src);
+	const int rd = RREG(L, d.dst);
+	const int rs = RREG(L, d.src);
 	switch ((ST)d.op) {
 	case ST::ISUB_R:
 		LG(rd);
@@ -264,11 +278,11 @@ static uint32_t emit_super_inst(const randomx::DecodedSuperscalarInst &d, uint8_
 		LS(rd);
 		break;
 	case ST::IMULH_R:
-		p += emit_mulh_inline(rd, rs, false, p);
+		p += emit_mulh_inline(L, rd, rs, false, p);
 		LS(rd);
 		break;
 	case ST::ISMULH_R:
-		p += emit_mulh_inline(rd, rs, true, p);
+		p += emit_mulh_inline(L, rd, rs, true, p);
 		LS(rd);
 		break;
 	case ST::IMUL_RCP:
@@ -284,19 +298,20 @@ static uint32_t emit_super_inst(const randomx::DecodedSuperscalarInst &d, uint8_
 }
 
 // Emit body of one SuperscalarHash program (no surrounding control flow).
-static uint32_t emit_super_program(const randomx::DecodedSuperscalarProgram &prog, uint8_t *buf) {
+static uint32_t emit_super_program(const ItemLocals &L, const randomx::DecodedSuperscalarProgram &prog,
+                                   uint8_t *buf) {
 	THUNK_BEGIN;
 	for (uint32_t j = 0; j < prog.size; ++j) {
-		p += emit_super_inst(prog.insts[j], p);
+		p += emit_super_inst(L, prog.insts[j], p);
 	}
 	THUNK_END;
 }
 
-// Emit the cache-mix-block address computation, leaving mixBlock in LK_mixBlock.
+// Emit the cache-mix-block address computation, leaving mixBlock in L.mixBlock.
 //   mixBlock = cache_base + ((registerValue & CACHE_ITEM_MASK) * 64)
-static uint32_t emit_mix_addr(uint32_t cache_base, uint8_t *buf) {
+static uint32_t emit_mix_addr(const ItemLocals &L, uint32_t cache_base, uint8_t *buf) {
 	THUNK_BEGIN;
-	LG(LK_registerVal);
+	LG(L.registerVal);
 	WI64_CONST((int64_t)CACHE_ITEM_MASK);
 	I64_AND();
 	I32_WRAP_I64();
@@ -304,20 +319,24 @@ static uint32_t emit_mix_addr(uint32_t cache_base, uint8_t *buf) {
 	I32_SHL();
 	WI32_CONST(cache_base);
 	I32_ADD();
-	LS(LK_mixBlock);
+	LS(L.mixBlock);
 	THUNK_END;
 }
 
 // Emit the cache-line XOR: r[q] ^= load64(mixBlock + q*8) for q in 0..8.
-static uint32_t emit_mix_xor(uint8_t *buf) {
+static uint32_t emit_mix_xor_q(const ItemLocals &L, int q, uint8_t *buf) {
 	THUNK_BEGIN;
-	for (int q = 0; q < 8; ++q) {
-		LG(RREG(q));
-		LG(LK_mixBlock);
-		I64_LOAD_OFF((uint32_t)(q * 8));
-		I64_XOR();
-		LS(RREG(q));
-	}
+	LG(RREG(L, q));
+	LG(L.mixBlock);
+	I64_LOAD_OFF((uint32_t)(q * 8));
+	I64_XOR();
+	LS(RREG(L, q));
+	THUNK_END;
+}
+static uint32_t emit_mix_xor(const ItemLocals &L, uint8_t *buf) {
+	THUNK_BEGIN;
+	for (int q = 0; q < 8; ++q)
+		p += emit_mix_xor_q(L, q, p);
 	THUNK_END;
 }
 
@@ -327,42 +346,46 @@ static uint32_t emit_mix_xor(uint8_t *buf) {
 //   ...
 //   r7 = r0 ^ superscalarAdd7
 //   registerValue = item (i64)
-static uint32_t emit_item_init(uint8_t *buf) {
+static uint32_t emit_item_init(const ItemLocals &L, uint8_t *buf) {
 	THUNK_BEGIN;
 	// r0 = (item+1) * Mul0
-	LG(LK_item);
+	LG(L.item);
 	WI32_CONST(1);
 	I32_ADD();
 	I64_EXT_I32_U();
 	WI64_CONST((int64_t)superscalarMul0);
 	I64_MUL();
-	LS(RREG(0));
+	LS(RREG(L, 0));
 	// r1..r7 = r0 ^ AddN
 	static const uint64_t adds[7] = {
 	    superscalarAdd1, superscalarAdd2, superscalarAdd3, superscalarAdd4,
 	    superscalarAdd5, superscalarAdd6, superscalarAdd7,
 	};
 	for (int i = 0; i < 7; ++i) {
-		LG(RREG(0));
+		LG(RREG(L, 0));
 		WI64_CONST((int64_t)adds[i]);
 		I64_XOR();
-		LS(RREG(i + 1));
+		LS(RREG(L, i + 1));
 	}
 	// registerValue = item (i64)
-	LG(LK_item);
+	LG(L.item);
 	I64_EXT_I32_U();
-	LS(LK_registerVal);
+	LS(L.registerVal);
 	THUNK_END;
 }
 
 // Emit dataset store: mem[out + q*8] = r[q] for q in 0..8.
-static uint32_t emit_dataset_store(uint8_t *buf) {
+static uint32_t emit_dataset_store_q(const ItemLocals &L, int q, uint8_t *buf) {
 	THUNK_BEGIN;
-	for (int q = 0; q < 8; ++q) {
-		LG(LK_out);
-		LG(RREG(q));
-		I64_STORE_OFF((uint32_t)(q * 8));
-	}
+	LG(L.out);
+	LG(RREG(L, q));
+	I64_STORE_OFF((uint32_t)(q * 8));
+	THUNK_END;
+}
+static uint32_t emit_dataset_store(const ItemLocals &L, uint8_t *buf) {
+	THUNK_BEGIN;
+	for (int q = 0; q < 8; ++q)
+		p += emit_dataset_store_q(L, q, p);
 	THUNK_END;
 }
 
@@ -371,24 +394,59 @@ static uint32_t emit_dataset_store(uint8_t *buf) {
 static uint32_t emit_item_compute(const randomx::DecodedSuperscalarProgram programs[],
                                   uint32_t cache_base, uint8_t *buf) {
 	THUNK_BEGIN;
-	p += emit_item_init(p);
+	const ItemLocals &L = KL;
+	p += emit_item_init(L, p);
 
 	// For each of RANDOMX_CACHE_ACCESSES programs:
 	for (int i = 0; i < RANDOMX_CACHE_ACCESSES; ++i) {
 		const auto &prog = programs[i];
 		// mixBlock = cache + (registerValue & mask) * 64
-		p += emit_mix_addr(cache_base, p);
+		p += emit_mix_addr(L, cache_base, p);
 		// execute program (inlined)
-		p += emit_super_program(prog, p);
+		p += emit_super_program(L, prog, p);
 		// r[q] ^= mem[mixBlock + q*8]
-		p += emit_mix_xor(p);
+		p += emit_mix_xor(L, p);
 		// registerValue = r[addrReg]
-		LG(RREG(prog.addrReg));
-		LS(LK_registerVal);
+		LG(RREG(L, prog.addrReg));
+		LS(L.registerVal);
 	}
 
 	// store r[0..7] to dataset
-	p += emit_dataset_store(p);
+	p += emit_dataset_store(L, p);
+	THUNK_END;
+}
+
+// 2-VM lockstep (light mode, item2): two initDatasetItem computations, A and
+// B, interleaved instruction by instruction. Both run the same programs on
+// their own locals, so the two dependency chains (and their cache-line reads)
+// are independent and the CPU can overlap them.
+static uint32_t emit_item2_compute(const randomx::DecodedSuperscalarProgram programs[],
+                                   uint32_t cache_base, const ItemLocals &A, const ItemLocals &B,
+                                   uint8_t *buf) {
+	THUNK_BEGIN;
+	p += emit_item_init(A, p);
+	p += emit_item_init(B, p);
+	for (int i = 0; i < RANDOMX_CACHE_ACCESSES; ++i) {
+		const auto &prog = programs[i];
+		p += emit_mix_addr(A, cache_base, p);
+		p += emit_mix_addr(B, cache_base, p);
+		for (uint32_t j = 0; j < prog.size; ++j) {
+			p += emit_super_inst(A, prog.insts[j], p);
+			p += emit_super_inst(B, prog.insts[j], p);
+		}
+		for (int q = 0; q < 8; ++q) {
+			p += emit_mix_xor_q(A, q, p);
+			p += emit_mix_xor_q(B, q, p);
+		}
+		LG(RREG(A, prog.addrReg));
+		LS(A.registerVal);
+		LG(RREG(B, prog.addrReg));
+		LS(B.registerVal);
+	}
+	for (int q = 0; q < 8; ++q) {
+		p += emit_dataset_store_q(A, q, p);
+		p += emit_dataset_store_q(B, q, p);
+	}
 	THUNK_END;
 }
 
@@ -538,6 +596,29 @@ extern "C" uint32_t rxjit_emit_superscalar_item_fn(
 	LG(LK_count);
 	LS(LK_out);
 	p += emit_item_compute(programs, cache_base, p);
+	WASM_U8(0x0b);  // end of function
+	THUNK_END;
+}
+// 2-VM lockstep: the body of item2(i32 itemA, i32 outA, i32 itemB, i32 outB)
+// -> (), initDatasetItem(itemA) into mem[outA..+64) and initDatasetItem(itemB)
+// into mem[outB..+64), interleaved (emit_item2_compute). Locals after the four
+// params: mixBlock A/B (4, 5), rA (6..13), rB (14..21), registerValue A/B
+// (22, 23), mulh temp A/B (24, 25). Same size bound as the item function x2.
+extern "C" uint32_t rxjit_emit_superscalar_item2_fn(
+	const randomx::DecodedSuperscalarProgram programs[],
+	uint32_t cache_base,
+	uint8_t* buf)
+{
+	static const ItemLocals A = {0, 1, 4, 6, 22, 24};
+	static const ItemLocals B = {2, 3, 5, 14, 23, 25};
+	THUNK_BEGIN;
+	WASM_U8_THUNK({
+		3,
+		2, WASM_TYPE_I32,
+		16, WASM_TYPE_I64,
+		4, WASM_TYPE_I64,
+	});
+	p += emit_item2_compute(programs, cache_base, A, B, p);
 	WASM_U8(0x0b);  // end of function
 	THUNK_END;
 }

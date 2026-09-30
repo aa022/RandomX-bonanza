@@ -170,7 +170,7 @@ Getters `rxjit_effective_*` read back what is actually used. The C-side default 
 
 **Gates** (all must print OK):
 - `node bench/full_mode_check.mjs --count 32` at `--feature-base 3`, `0`, `1`, and `0 --feature-extra 32`, for `--profile arm` and `x86`;
-- `node bench/light_mode_check.mjs` at `--feature-base 3`, `0`, `1`, for `--profile arm` and `x86`, on both builds (`RX_BUILD=st` for `randomx_st`);
+- `node bench/light_mode_check.mjs` at `--feature-base 3`, `0`, `1`, for `--profile arm` and `x86`, on both builds (`RX_BUILD=st` for `randomx_st`), also with `--light-vms 2` (2-VM lockstep, §9);
 - `node bench/supjit_check.mjs`, both builds (the full-mode gates can't see a broken superscalar kernel, since both of their sides read the kernel-built dataset);
 - `node bench/mine_ctx_check.mjs`;
 - the ARM identity check;
@@ -224,9 +224,18 @@ t_item breakdown: ~0.4 µs of dependent cache misses (1.04 µs with the cache in
 - `wasm_jit_superscalar.cpp`'s kernel still defines the mulh stubs (fn 0/1, now unused).
 - Wide arithmetic (`i64.mul_wide_u`) is not in V8 14.6, not even behind a flag.
 
+**2-VM lockstep light mode** (branch `nosab/light-2vm`, knob off by default): one thread runs two hashes at once, so the two item computations per iteration overlap their cache misses and fill each other's ILP.
+- **Knob:** `rxjit_set_light_vms(1|2)` (`rxjit_effective_light_vms`). Browser `?light_vms=2` (miner.js → worker.js, both builds, light mode only); Node `bench/nosab_bench.mjs --light-vms 2`.
+- **Entry:** `rxLightHash2(vmA, inA, lenA, outA, vmB, inB, lenB, outB)` in `randomx.cpp`. Blake2b, the AES fill, program generation and finalisation stay per VM; each of the 8 program pairs goes through `randomx_vm::runPair` (`vm_interpreted.cpp`) to `rxjit_run_program_light2` (`wasm_jit_run.cpp`). The rounding mode is carried per VM (`fprc[2]`), not in `wasm_rounding_mode`. Any other pair (different caches, full mode, V2, JIT off) or the knob at 1 hashes the two inputs one after the other.
+- **Module:** with the knob on, the light module also gets `main_loop2` (fn 25, export `"e"`) and `item2` (fn 26, type 5 `(i32 itemA, i32 outA, i32 itemB, i32 outB)`). The module is then always generated with `shared_code`, whatever the profile says, and the same module serves single-VM light runs (`"d"`). Without the knob, no byte of any module changes.
+  - `item2` (`rxjit_emit_superscalar_item2_fn`) runs both item computations interleaved instruction by instruction: same programs, two register sets (26 locals).
+  - `main_loop2`: VM A lives in the thread's arena (global `"a"`) and VM B in a second arena, and each arena's `+900` slot holds the other's base. Per iteration: A steps 1–5, switch, B steps 1–5, `item2`, B steps 7–12, switch, A steps 7–12. A switch loads the peer into `LOCT_arena` and the global, and reloads SPB. Spill writes ma/mx to vm_state, sp_addr0/1 to `+904` and fprc to vm_state; fill reruns the prologue and reloads sp_addr0/1.
+- **Gates:** `light_mode_check --light-vms 2` checks both hashes of each pair against the portable interpreter. It alternates which VM is A, adds an odd single hash through the same module, and requires `rxjit_stat_light_pair_runs` to show that every pair ran in lockstep; all 12 combinations (both builds, arm/x86, feature bases 3/0/1) pass. A scratch run of the real `worker.js` in Node (st build, always-met target) re-verified 30 of 30 shares.
+- **Not measured yet.** Two 2 MB scratchpads per thread double the L2 footprint, which may cost more than the interleave gains on SMT. The `item2` register pressure (2 × 11 live i64/i32 values on x64's 16 GPRs) means spills.
+
 **Open levers:**
 1. Measure 1/6/12 workers in Chromium.
-2. Multi-VM lockstep (2 hashes per worker) to overlap the item misses and add ILP.
+2. ~~Multi-VM lockstep~~ implemented behind `?light_vms=2` (above); measure 1/6/12 workers × 1/2 VMs.
 3. A lower-latency mulh.
 4. ~~Opt-in full replicas~~ **Done** (`?fb_full=K`, see §9.1).
 5. One cache build broadcast to all workers.

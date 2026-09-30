@@ -15,7 +15,8 @@
 // Usage:
 //   node bench/nosab_bench.mjs [--workers N] [--secs 15] [--warmup 4]
 //        [--profile arm|x86|auto] [--feature-base 3] [--key K]
-//        [--light-vms N]   future: VMs per worker in lockstep (ignored if the build lacks it)
+//        [--light-vms 1|2] VMs per worker in lockstep: 2 = two VMs on the worker's
+//                          cache, hashed in pairs by rxLightHash2 (ignored if the build lacks it)
 //        [--full K]        K full-dataset replicas (0..2 in the browser; ~2.3 GB each)
 //   default --workers = os.availableParallelism(); always runs randomx_st.
 
@@ -59,15 +60,17 @@ console.log(`light threaded (feature=${FEATURE_BASE | 4} ${info[0].header}) ligh
 const epoch = performance.timeOrigin + performance.now() + 200; // shared start, wall-clock ms
 const res = await Promise.all(pool.workers.map((_, i) =>
   pool.request(i, { type: 'go', epoch, warmup: WARMUP, secs: SECS }, 'done')));
-let total = 0, hashes = 0, fallback = 0;
+let total = 0, hashes = 0, fallback = 0, unpaired = 0;
 for (const [i, r] of res.entries()) {
   const hs = r.hashes / r.secs;
   total += hs; hashes += r.hashes;
   if (r.jitRuns < r.allHashes * 8) fallback++;
+  if (r.paired && r.pairRuns < r.allHashes * 4) unpaired++;
   const role = FULL ? ` ${pool.modes[i].padEnd(5)}` : '';
   console.log(`  worker ${String(i).padStart(2)}${role}: ${hs.toFixed(2).padStart(7)} H/s  (${r.hashes} hashes / ${r.secs.toFixed(2)} s, ${(1000 / hs).toFixed(1)} ms/hash)`);
 }
 if (fallback) console.log(`WARNING: ${fallback} worker(s) fell back to the C interpreter for some programs`);
+if (unpaired) console.log(`WARNING: ${unpaired} worker(s) ran some program pairs one by one (not in lockstep)`);
 console.log(`total ${total.toFixed(1)} H/s over ${WORKERS} workers (${(total / WORKERS).toFixed(2)} H/s per worker, ${hashes} hashes)`);
 pool.terminate();
 process.exit(0);

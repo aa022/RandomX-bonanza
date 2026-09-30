@@ -141,6 +141,8 @@ URL parameters:
 - `?fb_full=K` (K = 0–2, no-SAB only) — K of those workers mine in full mode
   on a private dataset replica (~2.3 GB each), which all workers build
   together per seed; a worker that can't allocate one stays in light mode
+- `?light_vms=2` — light mode (incl. the no-SAB fallback): two VMs per mining
+  thread, hashed in pairs in lockstep (experimental, off by default)
 - `?nojit=1` — disable the C-side JIT
 - `?threads=N` — start with N mining threads (1–32)
 - `?init_threads=N` — dataset-init parallelism (default 32)

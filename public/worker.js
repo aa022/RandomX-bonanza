@@ -45,6 +45,12 @@ let nonceSlots = 1;
 // full-dataset build (fb_full.js FbWorker; init fbRole 'full' = replica).
 let fb = null;
 let fbPaused = false;
+// ?light_vms=2 (light mode): a second VM on the cache; the mine loop hashes
+// two nonces per call in lockstep (rxLightHash2).
+let lightVms = 1;
+let vm2 = null;
+let input2Ptr = 0;
+let hash2Ptr = 0;
 
 let currentJob = null;
 let pendingJob = null;
@@ -228,6 +234,9 @@ async function init(options = {}) {
     vm_set_cache: Module.cwrap('randomx_vm_set_cache', null, ['number', 'number']),
     vm_set_dataset: Module.cwrap('randomx_vm_set_dataset', null, ['number', 'number']),
     calculate_hash: Module.cwrap('randomx_calculate_hash', null, ['number', 'number', 'number', 'number']),
+    light_hash2: Module._rxLightHash2 ? Module.cwrap('rxLightHash2', null, [
+      'number', 'number', 'number', 'number', 'number', 'number', 'number', 'number',
+    ]) : null,
     mine_batch_parallel: Module.cwrap('rxMineBatchParallel', 'number', [
       'number', 'number', 'number', 'number', 'number', 'number',
       'number', 'number', 'number', 'number', 'number',
@@ -251,6 +260,8 @@ async function init(options = {}) {
   };
   inputPtr = Module._malloc(256);
   hashPtr = Module._malloc(32);
+  input2Ptr = Module._malloc(256);
+  hash2Ptr = Module._malloc(32);
   targetPtr = Module._malloc(32);
   mineResultPtr = Module._malloc(40);
 
@@ -364,6 +375,14 @@ async function init(options = {}) {
               (Module._rxjit_effective_aes_simd ? ` aes_simd=${Module._rxjit_effective_aes_simd()}` : '') +
               (Module._rxjit_effective_aes_relaxed ? ` aes_relaxed=${Module._rxjit_effective_aes_relaxed()}` : ''),
           });
+        }
+        // ?light_vms=2 (light mode only): two VMs per mining thread whose
+        // programs run in lockstep (rxLightHash2), so the two hashes' dataset
+        // items are computed interleaved. Off by default.
+        if (!fullMemory && Number(options.lightVms) === 2 && Module._rxjit_set_light_vms && api.light_hash2) {
+          Module._rxjit_set_light_vms(2);
+          lightVms = Module._rxjit_effective_light_vms();
+          postMessage({ type: 'status', message: `Light mode: ${lightVms} VMs per thread in lockstep` });
         }
         postMessage({ type: 'status', message: 'JIT path: THREADED-INTERPRETER (resident module)' });
       }
@@ -593,6 +612,7 @@ async function buildCache(seedHash) {
   Module.HEAPU8.set(seedBytes, seedPtr);
 
   if (vm) { api.destroy_vm(vm); vm = null; }
+  if (vm2) { api.destroy_vm(vm2); vm2 = null; }
   if (mineCtx) { api.destroy_mining_context(mineCtx); mineCtx = 0; }
   if (dataset) { api.release_dataset(dataset); dataset = null; }
   if (cache) { api.release_cache(cache); cache = null; }
@@ -635,6 +655,11 @@ async function buildCache(seedHash) {
     return false;
   }
 
+  if (!fullMemory && lightVms === 2) {
+    vm2 = api.create_vm(flags, cache, null);
+    if (!vm2) postMessage({ type: 'status', message: 'Light mode: second VM failed, hashing one at a time' });
+  }
+
   if (fullMemory && datasetThreads > 1 && api.create_mining_context) {
     mineCtx = api.create_mining_context(flags, 0, dataset, datasetThreads);
     if (!mineCtx) {
@@ -658,11 +683,32 @@ function fbFinalize(ds) {
   if (!v) return false;
   if (vm) api.destroy_vm(vm);
   vm = v;
+  if (vm2) { api.destroy_vm(vm2); vm2 = null; } // ?light_vms=2 VM is on the cache
   api.release_cache(cache);
   cache = null;
   postMessage({ type: 'status', message: 'fb_full: dataset replica complete, released cache' });
   postMessage({ type: 'mode', mode: 'full' });
   return true;
+}
+
+// Nonce n as the 4 blob bytes at offset 39 (little-endian), in hex.
+function nonceHexLe(n) {
+  let s = '';
+  for (let i = 0; i < 4; i++) s += ((n >>> (8 * i)) & 0xff).toString(16).padStart(2, '0');
+  return s;
+}
+
+function postShare(job, nonce, ptr) {
+  const hashBytes = Module.HEAPU8.slice(ptr, ptr + 32);
+  postMessage({
+    type: 'share',
+    job_id: job.job_id,
+    job_seq: job._seq,
+    target_diff: job._targetDiff,
+    share_diff: hashToDiff(hashBytes),
+    nonce: nonceHexLe(nonce),
+    result: bytesToHex(hashBytes),
+  });
 }
 
 function mineLoop() {
@@ -755,6 +801,18 @@ function mineLoop() {
           result: bytesToHex(hashBytes),
         });
       }
+    } else if (vm2) {
+      // ?light_vms=2: two nonces per call, hashed in lockstep on vm and vm2
+      const nonces = [0, 0];
+      for (const [k, ptr] of [inputPtr, input2Ptr].entries()) {
+        const n = nonces[k] = currentJob._nonce = (currentJob._nonce + 1) >>> 0;
+        for (let i = 0; i < 4; i++) blob[nonceOffset + i] = (n >>> (8 * i)) & 0xFF;
+        Module.HEAPU8.set(blob, ptr);
+      }
+      api.light_hash2(vm, inputPtr, blob.length, hashPtr, vm2, input2Ptr, blob.length, hash2Ptr);
+      hashCount += 2;
+      if (hashMeetsTarget(hashPtr, targetBytes)) postShare(currentJob, nonces[0], hashPtr);
+      if (hashMeetsTarget(hash2Ptr, targetBytes)) postShare(currentJob, nonces[1], hash2Ptr);
     } else {
       currentJob._nonce = (currentJob._nonce + 1) >>> 0;
       blob[nonceOffset] = currentJob._nonce & 0xFF;

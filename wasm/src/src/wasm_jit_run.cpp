@@ -98,10 +98,12 @@ thread_local bool g_jit_static_failed = false;
 constexpr size_t RXJIT_THREADED_BUF_SMALL = 1 << 18;
 constexpr size_t RXJIT_THREADED_BUF_LARGE = 1 << 21;
 constexpr size_t RXJIT_LIGHT_FN_CAP = 1 << 16; // superscalar item function body (light mode)
-static size_t rxjit_threaded_buf_need(int feature, int kind16, int light) {
+constexpr size_t RXJIT_LIGHT2_FN_CAP = 1 << 17; // item2 body (light 2-VM lockstep)
+constexpr size_t RXJIT_LIGHT2_EXTRA = RXJIT_LIGHT2_FN_CAP + (1 << 16); // + main_loop2
+static size_t rxjit_threaded_buf_need(int feature, int kind16, int light, int light2) {
 	return ((kind16 || (feature & RXJIT_FEATURE_UNROLL2)) ? RXJIT_THREADED_BUF_LARGE
 	                                                       : RXJIT_THREADED_BUF_SMALL) +
-	       (light ? RXJIT_LIGHT_FN_CAP : 0);
+	       (light ? RXJIT_LIGHT_FN_CAP : 0) + (light2 ? RXJIT_LIGHT2_EXTRA : 0);
 }
 thread_local uint8_t *g_jit_threaded_buf = nullptr;
 thread_local size_t g_jit_threaded_buf_cap = 0;
@@ -130,6 +132,17 @@ thread_local const void *g_light_cache = nullptr;
 thread_local std::string *g_light_key = nullptr;
 thread_local int g_light_gen = 0;
 std::atomic<uint32_t> g_rxjit_light_runs{0}; // light-mode programs run by the JIT
+// Light 2-VM lockstep (rxjit_set_light_vms(2)): the item2 body for light
+// generation g_light2_gen (0 = none yet), whether the module embeds it
+// (main_loop2 "e", forces shared_code), and the second arena (VM B's vm_state,
+// SPB, program slot), allocated on the first pair run.
+std::atomic<int> g_rxjit_light_vms{1};
+thread_local uint8_t *g_light2_fn_buf = nullptr;
+thread_local uint32_t g_light2_fn_len = 0;
+thread_local int g_light2_gen = 0;
+thread_local int g_jit_threaded_light2 = 0;
+thread_local uint8_t *g_jit_threaded_arena2 = nullptr;
+std::atomic<uint32_t> g_rxjit_light_pair_runs{0}; // program pairs run by main_loop2
 
 // On/off toggle for the threaded interpreter. When 0, the (existing) dynamic-
 // module path runs. When 1, every JIT call goes through the resident
@@ -390,7 +403,7 @@ static int rxjit_js_run_superscalar(int, int, int, int, int) {
 #endif
 
 #ifdef __EMSCRIPTEN__
-EM_JS(int, rxjit_js_run_threaded, (int thrPtr, int thrLen, int arena), {
+EM_JS(int, rxjit_js_run_threaded, (int thrPtr, int thrLen, int arena, int pair), {
 	var ctx = (typeof self !== 'undefined') ? self
 	        : (typeof globalThis !== 'undefined') ? globalThis
 	        : {};
@@ -434,7 +447,9 @@ EM_JS(int, rxjit_js_run_threaded, (int thrPtr, int thrLen, int arena), {
 			initUs = Math.round((t1 - t0) * 1000);
 		}
 		t1 = performance.now();
-		ctx._rxjit_threaded.inst.exports.d();
+		// pair: the light 2-VM main loop (the two arenas are linked by C)
+		if (pair) ctx._rxjit_threaded.inst.exports.e();
+		else ctx._rxjit_threaded.inst.exports.d();
 		t2 = performance.now();
 		var runUs = Math.round((t2 - t1) * 1000);
 		// Phase 1a: skip the tier-probe & timing imports once the ring buffer
@@ -470,7 +485,7 @@ EM_JS(int, rxjit_js_run_threaded, (int thrPtr, int thrLen, int arena), {
 	}
 });
 #else
-static int rxjit_js_run_threaded(int, int, int) {
+static int rxjit_js_run_threaded(int, int, int, int) {
 	return 0;
 }
 #endif
@@ -623,6 +638,9 @@ EMSCRIPTEN_KEEPALIVE uint32_t rxjit_stat_runs(void) {
 }
 EMSCRIPTEN_KEEPALIVE uint32_t rxjit_stat_light_runs(void) {
 	return g_rxjit_light_runs.load(std::memory_order_relaxed);
+}
+EMSCRIPTEN_KEEPALIVE uint32_t rxjit_stat_light_pair_runs(void) {
+	return g_rxjit_light_pair_runs.load(std::memory_order_relaxed);
 }
 EMSCRIPTEN_KEEPALIVE uint32_t rxjit_stat_fails(void) {
 	return g_rxjit_fails.load(std::memory_order_relaxed);
@@ -855,6 +873,20 @@ int rxjit_effective_shared_code(void) {
 	return rxjit_shared_code();
 }
 
+// Light mode VMs per thread in lockstep (rxLightHash2): 1 (default) or 2. With
+// 2, the light module also embeds main_loop2 + item2 and is generated with
+// shared_code whatever the profile says (main_loop2 switches arenas); a
+// change regenerates the module on the thread's next light program.
+EMSCRIPTEN_KEEPALIVE
+void rxjit_set_light_vms(int n) {
+	g_rxjit_light_vms.store(n == 2 ? 2 : 1, std::memory_order_relaxed);
+}
+
+EMSCRIPTEN_KEEPALIVE
+int rxjit_effective_light_vms(void) {
+	return g_rxjit_light_vms.load(std::memory_order_relaxed);
+}
+
 EMSCRIPTEN_KEEPALIVE
 uint32_t rxjit_test_generate(void *program256, void *vm_state, void *scratchpad, void *dataset,
                              uint64_t dataset_offset, uint32_t rr0, uint32_t rr1, uint32_t rr2,
@@ -906,102 +938,111 @@ static void rxjit_note_module_hash(const uint8_t *bytes, uint32_t n, const int *
 // into vm_state and the decoded program into the slot, and invokes
 // inst.exports.d() via rxjit_js_run_threaded.
 #ifdef __EMSCRIPTEN__
-// light: 0 = full mode (dataset); else the light generation g_light_gen whose
-// item function (g_light_fn_buf) replaces the dataset read, and dataset_offset
-// is turned into an item offset.
-static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
-                                      Instruction program_buf[RANDOMX_PROGRAM_MAX_SIZE],
-                                      const ProgramConfiguration &config, uint8_t *scratchpad,
-                                      uint8_t *dataset, uint64_t dataset_offset, uint32_t ma,
-                                      uint32_t mx, int light = 0) {
-	g_rxjit_threaded_entries.fetch_add(1, std::memory_order_relaxed);
-	if (g_jit_threaded_failed) return 0;
+// One RXJIT_ARENA_SIZE block (wasm_jit_threaded.h), zeroed, with the sentinel
+// record, the rounding-mask table and the constant mantissa mask filled in;
+// nullptr if the allocation fails. vm_state is the arena base.
+static uint8_t *rxjit_arena_alloc(void) {
+	// 128-B aligned so no cache line is shared with other threads.
+	static_assert(sizeof(rxjit_vm_state_t) <= RXJIT_ARENA_RMASK_OFF, "vm_state grew");
+	static_assert(alignof(rxjit_vm_state_t) <= RXJIT_ARENA_ALIGN, "vm_state alignment");
+	static_assert(sizeof(decoded_inst_t) * 256 <= RXJIT_ARENA_SENT_OFF - RXJIT_ARENA_SLOT_OFF,
+	              "program slot overflows the arena");
+	static_assert(RXJIT_ARENA_SIZE % RXJIT_ARENA_ALIGN == 0, "aligned_alloc size");
+	static_assert(RXJIT_ARENA_SPILL_OFF + 8 <= RXJIT_ARENA_ITEM_OFF, "2-VM spill slots");
+	uint8_t *blk = (uint8_t *)aligned_alloc(RXJIT_ARENA_ALIGN, RXJIT_ARENA_SIZE);
+	if (!blk) return nullptr;
+	memset(blk, 0, RXJIT_ARENA_SIZE);
+	{
+		// Sentinel record #256 terminates the inner pointer walk. Bytes 12..15
+		// hold the slot address: the inner loop loads it (an i32.load, not a
+		// constant, so TurboFan keeps the walk pointer zero-extended). With
+		// u16 kinds the kind is s[0] | s[1] << 8: s[1] stays 0 (the arena is
+		// zeroed), so one sentinel serves both record head widths.
+		uint8_t *s = blk + RXJIT_ARENA_SENT_OFF;
+		s[0] = RXJIT_K_EXIT;
+		s[1] = 0;
+		uint32_t slot = (uint32_t)(uintptr_t)(blk + RXJIT_ARENA_SLOT_OFF);
+		memcpy(s + 12, &slot, 4);
+	}
+	{
+		// Inline directed-rounding masks (step 3): mode m (fprc 0=RN 1=RD
+		// 2=RU 3=RZ) at +RMASK_OFF + m*128, i64x2 splats in the order
+		// TEG, TEL, K1, K2, D1, D3, KON (see wasm_jit_threaded.c).
+		const uint64_t PI = 0x7FF0000000000000ull, NI = 0xFFF0000000000000ull, A = ~0ull;
+		static const uint64_t RM[4][7] = {
+		    {PI, NI, 0, 0, 0, 1, 0}, // RN
+		    {PI, 0, 0, 0, A, 1, A},  // RD
+		    {0, NI, A, 0, 0, 1, A},  // RU
+		    {PI, 0, 0, A, 0, A, A},  // RZ
+		};
+		static_assert(RXJIT_ARENA_RMASK_OFF + 4 * 128 <= RXJIT_ARENA_PAD_OFF, "rmask table");
+		for (int m = 0; m < 4; m++)
+			for (int i = 0; i < 7; i++) {
+				uint8_t *q = blk + RXJIT_ARENA_RMASK_OFF + m * 128 + 16 * i;
+				memcpy(q, &RM[m][i], 8);
+				memcpy(q + 8, &RM[m][i], 8);
+			}
+	}
+	rxjit_vm_state_t *vm = (rxjit_vm_state_t *)(blk + RXJIT_ARENA_VM_OFF);
+	vm->mmask[0] = DYNAMIC_MANTISSA_MASK;
+	vm->mmask[1] = DYNAMIC_MANTISSA_MASK;
+	return blk;
+}
 
+// The thread's arena and module: allocate the arena on the first call, and
+// (re)generate the threaded module bytes (with per-thread pointers baked,
+// unless shared_code): once per thread, and again whenever the scratchpad
+// moves (a new VM on this pthread; not with shared_code, whose module reads
+// the base from the arena) or the feature (incl. the effective UNROLL2 bit)
+// / fuse_n / triples_n / record head width / shared_code / light generation /
+// light 2-VM changes. The JS side sees thrLen > 0 and recompiles. light2
+// (main_loop2 + item2, g_light2_fn_buf) forces shared_code. false: failed, and
+// the thread's threaded path is off for good (g_jit_threaded_failed).
+static bool rxjit_threaded_ensure(uint8_t *scratchpad, uint8_t *dataset, int light, int light2) {
 	if (!g_jit_threaded_initted) {
 		g_rxjit_threaded_phase.store(1, std::memory_order_relaxed);
 		// 1) allocate the per-thread arena (vm_state + program slot + reserved
-		// areas), 128-B aligned so no cache line is shared with other threads.
-		static_assert(sizeof(rxjit_vm_state_t) <= RXJIT_ARENA_RMASK_OFF, "vm_state grew");
-		static_assert(alignof(rxjit_vm_state_t) <= RXJIT_ARENA_ALIGN, "vm_state alignment");
-		static_assert(sizeof(decoded_inst_t) * 256 <= RXJIT_ARENA_SENT_OFF - RXJIT_ARENA_SLOT_OFF,
-		              "program slot overflows the arena");
-		static_assert(RXJIT_ARENA_SIZE % RXJIT_ARENA_ALIGN == 0, "aligned_alloc size");
-		uint8_t *blk = (uint8_t *)aligned_alloc(RXJIT_ARENA_ALIGN, RXJIT_ARENA_SIZE);
+		// areas).
+		uint8_t *blk = rxjit_arena_alloc();
 		if (!blk) {
 			g_rxjit_threaded_phase.store(101, std::memory_order_relaxed);
 			g_jit_threaded_failed = true;
-			return 0;
+			return false;
 		}
-		memset(blk, 0, RXJIT_ARENA_SIZE);
 		g_jit_threaded_vm_state = (rxjit_vm_state_t *)(blk + RXJIT_ARENA_VM_OFF);
 		g_jit_threaded_program_slot = blk + RXJIT_ARENA_SLOT_OFF;
-		{
-			// Sentinel record #256 terminates the inner pointer walk. Bytes 12..15
-			// hold the slot address: the inner loop loads it (an i32.load, not a
-			// constant, so TurboFan keeps the walk pointer zero-extended). With
-			// u16 kinds the kind is s[0] | s[1] << 8: s[1] stays 0 (the arena is
-			// zeroed), so one sentinel serves both record head widths.
-			uint8_t *s = blk + RXJIT_ARENA_SENT_OFF;
-			s[0] = RXJIT_K_EXIT;
-			s[1] = 0;
-			uint32_t slot = (uint32_t)(uintptr_t)(blk + RXJIT_ARENA_SLOT_OFF);
-			memcpy(s + 12, &slot, 4);
-		}
-		{
-			// Inline directed-rounding masks (step 3): mode m (fprc 0=RN 1=RD
-			// 2=RU 3=RZ) at +RMASK_OFF + m*128, i64x2 splats in the order
-			// TEG, TEL, K1, K2, D1, D3, KON (see wasm_jit_threaded.c).
-			const uint64_t PI = 0x7FF0000000000000ull, NI = 0xFFF0000000000000ull, A = ~0ull;
-			static const uint64_t RM[4][7] = {
-			    {PI, NI, 0, 0, 0, 1, 0}, // RN
-			    {PI, 0, 0, 0, A, 1, A},  // RD
-			    {0, NI, A, 0, 0, 1, A},  // RU
-			    {PI, 0, 0, A, 0, A, A},  // RZ
-			};
-			static_assert(RXJIT_ARENA_RMASK_OFF + 4 * 128 <= RXJIT_ARENA_PAD_OFF, "rmask table");
-			for (int m = 0; m < 4; m++)
-				for (int i = 0; i < 7; i++) {
-					uint8_t *q = blk + RXJIT_ARENA_RMASK_OFF + m * 128 + 16 * i;
-					memcpy(q, &RM[m][i], 8);
-					memcpy(q + 8, &RM[m][i], 8);
-				}
-		}
-		g_jit_threaded_vm_state->mmask[0] = DYNAMIC_MANTISSA_MASK;
-		g_jit_threaded_vm_state->mmask[1] = DYNAMIC_MANTISSA_MASK;
 		g_rxjit_threaded_phase.store(3, std::memory_order_relaxed);
 	}
 
-	// 2) generate the threaded module bytes (with per-thread pointers baked,
-	// unless shared_code): once per thread, and again whenever the scratchpad
-	// moves (a new VM on this pthread; not with shared_code, whose module reads
-	// the base from the arena) or the feature (incl. the effective UNROLL2 bit)
-	// / fuse_n / triples_n / record head width / shared_code changes. The JS
-	// side sees thrLen > 0 and recompiles.
+	// 2) generate the module bytes
 	const int feature = rxjit_threaded_gen_feature(g_rxjit_feature.load(std::memory_order_relaxed));
 	const int fuse_n = rxjit_fuse_n_for_feature(feature);
 	const int triples_n = rxjit_triples_n_for_feature(feature);
 	const int kind16 = rxjit_kind16(fuse_n, triples_n);
-	const int shared = rxjit_shared_code();
+	const int shared = rxjit_shared_code() || light2;
 	const uint32_t sp = (uint32_t)(uintptr_t)scratchpad;
 	if (!g_jit_threaded_initted || (!shared && sp != g_jit_threaded_baked_sp) ||
 	    feature != g_jit_threaded_feature || fuse_n != g_jit_threaded_fuse_n ||
 	    triples_n != g_jit_threaded_triples_n || kind16 != g_jit_threaded_kind16 ||
-	    shared != g_jit_threaded_shared || light != g_jit_threaded_light) {
+	    shared != g_jit_threaded_shared || light != g_jit_threaded_light ||
+	    light2 != g_jit_threaded_light2) {
 		int regs_in_mem = g_rxjit_regs_in_memory.load(std::memory_order_relaxed);
 		int split_id = g_rxjit_split_inner_dispatch.load(std::memory_order_relaxed);
-		const size_t need = rxjit_threaded_buf_need(feature, kind16, light != 0);
+		const size_t need = rxjit_threaded_buf_need(feature, kind16, light != 0, light2);
 		if (need > g_jit_threaded_buf_cap) {
 			free(g_jit_threaded_buf);
 			g_jit_threaded_buf = (uint8_t *)malloc(need);
 			g_jit_threaded_buf_cap = g_jit_threaded_buf ? need : 0;
 		}
 		if (light) rxjit_threaded_set_light_fn(g_light_fn_buf, g_light_fn_len);
+		if (light2) rxjit_threaded_set_light2_fn(g_light2_fn_buf, g_light2_fn_len);
 		uint32_t sz = g_jit_threaded_buf ? rxjit_generate_threaded_module(
 		    (uint32_t)(uintptr_t)g_jit_threaded_vm_state, (uint32_t)(uintptr_t)scratchpad,
 		    (uint32_t)(uintptr_t)dataset, (uint32_t)(uintptr_t)g_jit_threaded_program_slot, 1,
 		    g_jit_max_memory_pages, feature, regs_in_mem, split_id, fuse_n, triples_n, kind16,
 		    shared, g_jit_threaded_buf) : 0;
 		rxjit_threaded_set_light_fn(nullptr, 0);
+		rxjit_threaded_set_light2_fn(nullptr, 0);
 		g_rxjit_threaded_module_size.store(sz, std::memory_order_relaxed);
 		if (sz == 0 || sz > g_jit_threaded_buf_cap) {
 			g_rxjit_threaded_phase.store(103, std::memory_order_relaxed);
@@ -1013,7 +1054,7 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 			g_jit_threaded_buf_cap = 0;
 			g_jit_threaded_size = 0;
 			g_jit_threaded_failed = true;
-			return 0;
+			return false;
 		}
 		{
 			const int knobs[] = {feature,     fuse_n,   triples_n, kind16,
@@ -1027,6 +1068,7 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 		g_jit_threaded_kind16 = kind16;
 		g_jit_threaded_shared = shared;
 		g_jit_threaded_light = light;
+		g_jit_threaded_light2 = light2;
 		g_jit_threaded_initted = true;
 		g_rxjit_threaded_phase.store(10, std::memory_order_relaxed);
 	}
@@ -1038,16 +1080,24 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 		memcpy((uint8_t *)g_jit_threaded_vm_state + RXJIT_ARENA_SPB_OFF, &sp, 4);
 		g_jit_threaded_baked_sp = sp;
 	}
+	return true;
+}
 
-	// Per-call: write inputs into vm_state.
-	rxjit_vm_state_t *vm = g_jit_threaded_vm_state;
+// Per call: one VM's program inputs into an arena's vm_state, and its program
+// decoded into the arena's slot. light: dataset_offset becomes an item offset.
+static void rxjit_threaded_load(uint8_t *arena, NativeRegisterFile &nreg,
+                                Instruction program_buf[RANDOMX_PROGRAM_MAX_SIZE],
+                                const ProgramConfiguration &config, uint8_t *dataset,
+                                uint64_t dataset_offset, uint32_t ma, uint32_t mx, uint32_t fprc,
+                                int light) {
+	rxjit_vm_state_t *vm = (rxjit_vm_state_t *)(arena + RXJIT_ARENA_VM_OFF);
 	memcpy(vm->r, nreg.r, sizeof(vm->r));
 	memcpy(vm->f, &nreg.f[0], sizeof(vm->f));
 	memcpy(vm->e, &nreg.e[0], sizeof(vm->e));
 	memcpy(vm->a, &nreg.a[0], sizeof(vm->a));
 	vm->emask[0] = config.eMask[0];
 	vm->emask[1] = config.eMask[1];
-	vm->fprc = wasm_rounding_mode;
+	vm->fprc = fprc;
 	vm->ma = ma;
 	vm->mx = mx;
 	vm->read_regs[0] = (uint8_t)config.readReg0;
@@ -1059,40 +1109,99 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 	          : (uint32_t)((uintptr_t)dataset + (uintptr_t)dataset_offset);
 
 	// Decode program into the slot.
-	// Layout v2 bakes this thread's vm_state address into every record.
+	// Layout v2 bakes this arena's vm_state address into every record.
 	int ndisp = rxjit_decode_for_interp(
-	    (const rxjit_inst_t *)program_buf, (decoded_inst_t *)g_jit_threaded_program_slot,
-	    (uint32_t)(uintptr_t)g_jit_threaded_vm_state, g_jit_threaded_fuse_n,
-	    g_jit_threaded_triples_n, g_jit_threaded_kind16);
+	    (const rxjit_inst_t *)program_buf, (decoded_inst_t *)(arena + RXJIT_ARENA_SLOT_OFF),
+	    (uint32_t)(uintptr_t)vm, g_jit_threaded_fuse_n, g_jit_threaded_triples_n,
+	    g_jit_threaded_kind16);
 	g_rxjit_dispatches.fetch_add((uint64_t)ndisp, std::memory_order_relaxed);
 	g_rxjit_decoded_programs.fetch_add(1, std::memory_order_relaxed);
+}
 
-	// Invoke (lazy compile+instantiate on first call). The first call sees
-	// g_jit_threaded_size > 0 and hands the bytes over; subsequent calls
-	// pass len=0 to signal "module already compiled on the JS side". Only
-	// count the once-per-thread init in static_init_attempts so the counter
-	// stays comparable with the legacy dynamic-module path.
+// r/f/e back from an arena's vm_state into nreg; returns the VM's fprc.
+static uint32_t rxjit_threaded_unload(const uint8_t *arena, NativeRegisterFile &nreg) {
+	const rxjit_vm_state_t *vm = (const rxjit_vm_state_t *)(arena + RXJIT_ARENA_VM_OFF);
+	memcpy(nreg.r, vm->r, sizeof(vm->r));
+	memcpy(&nreg.f[0], vm->f, sizeof(vm->f));
+	memcpy(&nreg.e[0], vm->e, sizeof(vm->e));
+	return vm->fprc;
+}
+
+// Run the loaded arena(s): "d" (one VM), or with pair "e" (main_loop2, the
+// thread's arena and its peer). Lazy compile+instantiate on first call.
+static int rxjit_threaded_invoke(int pair) {
+	// The first call sees g_jit_threaded_size > 0 and hands the bytes over;
+	// subsequent calls pass len=0 to signal "module already compiled on the
+	// JS side". Only count the once-per-thread init in static_init_attempts
+	// so the counter stays comparable with the legacy dynamic-module path.
 	bool first_js_call = (g_jit_threaded_size > 0);
 	if (first_js_call) {
 		g_rxjit_static_init_attempts.fetch_add(1, std::memory_order_relaxed);
 	}
 	int ok = rxjit_js_run_threaded(
 	    (int)(uintptr_t)g_jit_threaded_buf, (int)(first_js_call ? g_jit_threaded_size : 0),
-	    (int)(uintptr_t)((uint8_t *)g_jit_threaded_vm_state - RXJIT_ARENA_VM_OFF));
+	    (int)(uintptr_t)((uint8_t *)g_jit_threaded_vm_state - RXJIT_ARENA_VM_OFF), pair);
 	if (first_js_call) g_jit_threaded_size = 0; // bytes consumed; module is JS-side now
 	if (!ok) {
 		g_rxjit_fails.fetch_add(1, std::memory_order_relaxed);
 		g_jit_threaded_failed = true;
 		return 0;
 	}
-	g_rxjit_runs.fetch_add(1, std::memory_order_relaxed);
-
-	// Copy r/f/e back into nreg from vm_state.
-	memcpy(nreg.r, vm->r, sizeof(vm->r));
-	memcpy(&nreg.f[0], vm->f, sizeof(vm->f));
-	memcpy(&nreg.e[0], vm->e, sizeof(vm->e));
-	wasm_rounding_mode = vm->fprc;
+	g_rxjit_runs.fetch_add(pair ? 2 : 1, std::memory_order_relaxed);
 	return 1;
+}
+
+// light: 0 = full mode (dataset); else the light generation g_light_gen whose
+// item function (g_light_fn_buf) replaces the dataset read, and dataset_offset
+// is turned into an item offset. light2: the module also embeds the 2-VM
+// main loop (light_vms 2), so single and pair runs share one module.
+static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
+                                      Instruction program_buf[RANDOMX_PROGRAM_MAX_SIZE],
+                                      const ProgramConfiguration &config, uint8_t *scratchpad,
+                                      uint8_t *dataset, uint64_t dataset_offset, uint32_t ma,
+                                      uint32_t mx, int light = 0, int light2 = 0) {
+	g_rxjit_threaded_entries.fetch_add(1, std::memory_order_relaxed);
+	if (g_jit_threaded_failed) return 0;
+	if (!rxjit_threaded_ensure(scratchpad, dataset, light, light2)) return 0;
+	uint8_t *arena = (uint8_t *)g_jit_threaded_vm_state - RXJIT_ARENA_VM_OFF;
+	rxjit_threaded_load(arena, nreg, program_buf, config, dataset, dataset_offset, ma, mx,
+	                    wasm_rounding_mode, light);
+	if (!rxjit_threaded_invoke(0)) return 0;
+	wasm_rounding_mode = rxjit_threaded_unload(arena, nreg);
+	return 1;
+}
+
+// Light mode: the item function for this cache (address + key, i.e. the
+// superscalar programs), and with light2 also the item2 function; rebuilt
+// when the cache changes (g_light_gen counts the rebuilds). false: no light JIT.
+static bool rxjit_light_prepare(randomx_cache *cache, int light2) {
+	if (cache != g_light_cache || g_light_key == nullptr || *g_light_key != cache->cacheKey) {
+		if (!g_light_fn_buf) g_light_fn_buf = (uint8_t *)malloc(RXJIT_LIGHT_FN_CAP);
+		if (!g_light_key) g_light_key = new std::string();
+		if (!g_light_fn_buf) return false;
+		// The emitter writes unchecked; the body is ~20-40 KiB, the cap 64 KiB.
+		const uint32_t len = rxjit_emit_superscalar_item_fn(
+		    cache->decodedPrograms, (uint32_t)(uintptr_t)cache->memory, g_light_fn_buf);
+		if (len == 0 || len > RXJIT_LIGHT_FN_CAP) {
+			g_light_cache = nullptr;
+			return false;
+		}
+		g_light_fn_len = len;
+		g_light_cache = cache;
+		*g_light_key = cache->cacheKey;
+		if (++g_light_gen <= 0) g_light_gen = 1;
+	}
+	if (light2 && g_light2_gen != g_light_gen) {
+		if (!g_light2_fn_buf) g_light2_fn_buf = (uint8_t *)malloc(RXJIT_LIGHT2_FN_CAP);
+		if (!g_light2_fn_buf) return false;
+		// Unchecked writes again: about twice the item function, cap 128 KiB.
+		const uint32_t len = rxjit_emit_superscalar_item2_fn(
+		    cache->decodedPrograms, (uint32_t)(uintptr_t)cache->memory, g_light2_fn_buf);
+		if (len == 0 || len > RXJIT_LIGHT2_FN_CAP) return false;
+		g_light2_fn_len = len;
+		g_light2_gen = g_light_gen;
+	}
+	return true;
 }
 #endif
 
@@ -1108,29 +1217,58 @@ int rxjit_run_program_light(NativeRegisterFile &nreg,
 	if (g_rxjit_use_threaded_interp.load(std::memory_order_relaxed) == 0 || cache == nullptr)
 		return 0;
 	if (g_jit_threaded_failed) return 0;
-	if (cache != g_light_cache || g_light_key == nullptr || *g_light_key != cache->cacheKey) {
-		if (!g_light_fn_buf) g_light_fn_buf = (uint8_t *)malloc(RXJIT_LIGHT_FN_CAP);
-		if (!g_light_key) g_light_key = new std::string();
-		if (!g_light_fn_buf) return 0;
-		// The emitter writes unchecked; the body is ~20-40 KiB, the cap 64 KiB.
-		const uint32_t len = rxjit_emit_superscalar_item_fn(
-		    cache->decodedPrograms, (uint32_t)(uintptr_t)cache->memory, g_light_fn_buf);
-		if (len == 0 || len > RXJIT_LIGHT_FN_CAP) {
-			g_light_cache = nullptr;
-			return 0;
-		}
-		g_light_fn_len = len;
-		g_light_cache = cache;
-		*g_light_key = cache->cacheKey;
-		if (++g_light_gen <= 0) g_light_gen = 1;
-	}
+	const int light2 = g_rxjit_light_vms.load(std::memory_order_relaxed) == 2;
+	if (!rxjit_light_prepare(cache, light2)) return 0;
 	const int ok = rxjit_run_program_threaded(nreg, program_buf, config, scratchpad, nullptr,
-	                                          dataset_offset, ma, mx, g_light_gen);
+	                                          dataset_offset, ma, mx, g_light_gen, light2);
 	if (ok) g_rxjit_light_runs.fetch_add(1, std::memory_order_relaxed);
 	return ok;
 #else
 	(void)nreg; (void)program_buf; (void)config; (void)scratchpad; (void)cache;
 	(void)dataset_offset; (void)ma; (void)mx;
+	return 0;
+#endif
+}
+
+// Light 2-VM lockstep (rxjit_set_light_vms(2)): VM 0's and VM 1's current
+// programs (same cache) together through main_loop2, VM 0 in the thread's
+// arena and VM 1 in the second one. fprc: the two VMs' rounding modes (in and
+// out; wasm_rounding_mode is not used). Returns 0 with nothing run (the knob
+// is off, no threaded interpreter, or a failure): the caller runs the two
+// programs one by one.
+int rxjit_run_program_light2(randomx_cache *cache, NativeRegisterFile *nreg[2],
+                             Instruction *program_buf[2], const ProgramConfiguration *config[2],
+                             uint8_t *scratchpad[2], const uint64_t dataset_offset[2],
+                             const uint32_t ma[2], const uint32_t mx[2], uint32_t fprc[2]) {
+#ifdef __EMSCRIPTEN__
+	if (g_rxjit_use_threaded_interp.load(std::memory_order_relaxed) == 0 || cache == nullptr)
+		return 0;
+	if (g_rxjit_light_vms.load(std::memory_order_relaxed) != 2 || g_jit_threaded_failed) return 0;
+	if (!rxjit_light_prepare(cache, 1)) return 0;
+	g_rxjit_threaded_entries.fetch_add(1, std::memory_order_relaxed);
+	if (!rxjit_threaded_ensure(scratchpad[0], nullptr, g_light_gen, 1)) return 0;
+	if (!g_jit_threaded_arena2 && !(g_jit_threaded_arena2 = rxjit_arena_alloc())) return 0;
+	uint8_t *arena[2] = {(uint8_t *)g_jit_threaded_vm_state - RXJIT_ARENA_VM_OFF,
+	                     g_jit_threaded_arena2};
+	// Link the arenas both ways (main_loop2 switches through the peer slot);
+	// VM 1's scratchpad base goes straight into its SPB slot.
+	const uint32_t a0 = (uint32_t)(uintptr_t)arena[0], a1 = (uint32_t)(uintptr_t)arena[1];
+	const uint32_t sp1 = (uint32_t)(uintptr_t)scratchpad[1];
+	memcpy(arena[0] + RXJIT_ARENA_PEER_OFF, &a1, 4);
+	memcpy(arena[1] + RXJIT_ARENA_PEER_OFF, &a0, 4);
+	memcpy(arena[1] + RXJIT_ARENA_SPB_OFF, &sp1, 4);
+	for (int k = 0; k < 2; k++)
+		rxjit_threaded_load(arena[k], *nreg[k], program_buf[k], *config[k], nullptr,
+		                    dataset_offset[k], ma[k], mx[k], fprc[k], g_light_gen);
+	if (!rxjit_threaded_invoke(1)) return 0;
+	for (int k = 0; k < 2; k++)
+		fprc[k] = rxjit_threaded_unload(arena[k], *nreg[k]);
+	g_rxjit_light_runs.fetch_add(2, std::memory_order_relaxed);
+	g_rxjit_light_pair_runs.fetch_add(1, std::memory_order_relaxed);
+	return 1;
+#else
+	(void)cache; (void)nreg; (void)program_buf; (void)config; (void)scratchpad;
+	(void)dataset_offset; (void)ma; (void)mx; (void)fprc;
 	return 0;
 #endif
 }
