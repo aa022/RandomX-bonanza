@@ -97,7 +97,9 @@ thread_local bool g_jit_static_failed = false;
 // block (1 KiB of buffer = 1 KiB of randomx.wasm).
 constexpr size_t RXJIT_THREADED_BUF_SMALL = 1 << 18;
 constexpr size_t RXJIT_THREADED_BUF_LARGE = 1 << 21;
-constexpr size_t RXJIT_LIGHT_FN_CAP = 1 << 16; // superscalar item function body (light mode)
+// Light mode's superscalar item function body: ~20-40 KiB, item_pair
+// (light_mlp 2) twice that; the emitters check a conservative bound first.
+constexpr size_t RXJIT_LIGHT_FN_CAP = 1 << 18;
 static size_t rxjit_threaded_buf_need(int feature, int kind16, int light) {
 	return ((kind16 || (feature & RXJIT_FEATURE_UNROLL2)) ? RXJIT_THREADED_BUF_LARGE
 	                                                       : RXJIT_THREADED_BUF_SMALL) +
@@ -121,11 +123,15 @@ thread_local int g_jit_threaded_shared = 0; // shared_code: no pointers baked (w
 thread_local bool g_jit_threaded_initted = false;
 thread_local bool g_jit_threaded_failed = false;
 // Light mode: the item function is generated per cache (address + key, i.e.
-// the superscalar programs); g_light_gen counts the rebuilds, and the module
-// is regenerated when the generation it embeds (0 = full mode) differs.
+// the superscalar programs) and light_mlp mode; g_light_gen counts the
+// rebuilds, and the module is regenerated when the generation it embeds (0 =
+// full mode) differs.
 thread_local int g_jit_threaded_light = 0;
 thread_local uint8_t *g_light_fn_buf = nullptr;
 thread_local uint32_t g_light_fn_len = 0;
+thread_local int g_light_mlp_mode = 0;          // light_mlp the body was emitted for
+thread_local int g_light_mlp_req = 0;           // effective light_mlp it was emitted under
+thread_local uint32_t g_light_cache_base = 0;   // cache->memory it bakes (light_mlp 1 probe)
 thread_local const void *g_light_cache = nullptr;
 thread_local std::string *g_light_key = nullptr;
 thread_local int g_light_gen = 0;
@@ -158,10 +164,12 @@ std::atomic<int> g_rxjit_supjit_enabled{0};
 // from these on first use). Regenerated at every rxInitDatasetStart call
 // because cache_base and dataset_base get baked in.
 //
-// The 64 KiB buffer is large enough for any plausible 8-program kernel
-// (~30–50 KiB observed). g_supjit_generation is bumped on every regen so
-// per-pthread JS state knows to invalidate its cached Instance.
-uint8_t g_supjit_kernel_bytes[1 << 16] = {0};
+// ~30–50 KiB per item of the kernel's loop body (observed), times kernel_k
+// (up to RXJIT_KERNEL_K_MAX); the generator checks a conservative bound
+// against the buffer size first. g_supjit_generation is bumped on every regen
+// so per-pthread JS state knows to invalidate its cached Instance.
+constexpr uint32_t RXJIT_SUPJIT_KERNEL_CAP = 1 << 19;
+uint8_t g_supjit_kernel_bytes[RXJIT_SUPJIT_KERNEL_CAP] = {0};
 std::atomic<uint32_t> g_supjit_kernel_size{0};
 std::atomic<uint32_t> g_supjit_generation{0};
 
@@ -523,6 +531,11 @@ void *rxjit_supjit_bytes_ptr(void) {
 }
 
 EMSCRIPTEN_KEEPALIVE
+uint32_t rxjit_supjit_bytes_cap(void) {
+	return RXJIT_SUPJIT_KERNEL_CAP;
+}
+
+EMSCRIPTEN_KEEPALIVE
 uint32_t rxjit_supjit_bytes_size(void) {
 	return g_supjit_kernel_size.load(std::memory_order_relaxed);
 }
@@ -711,6 +724,8 @@ static std::atomic<int> g_rxjit_unroll2_override{-1};   // -1: the profile's unr
 static std::atomic<int> g_rxjit_shared_code_override{-1}; // -1: the profile's shared_code
 static std::atomic<int> g_rxjit_aes_simd_override{-1};    // -1: the profile's aes_simd
 static std::atomic<int> g_rxjit_aes_relaxed_override{-1}; // -1: the profile's aes_relaxed
+static std::atomic<int> g_rxjit_light_mlp_override{-1};   // -1: the profile's light_mlp
+static std::atomic<int> g_rxjit_kernel_k_override{-1};    // -1: the profile's kernel_k
 
 extern "C" int g_rx_aes_relaxed; // soft_aes.cpp, read by aes_hash.cpp per call
 
@@ -855,6 +870,44 @@ int rxjit_effective_shared_code(void) {
 	return rxjit_shared_code();
 }
 
+// light_mlp (wasm_jit_profile.h): 0..2, the override (>= 0) or the profile's.
+// Part of the light function's regen key (rxjit_run_program_light).
+EMSCRIPTEN_KEEPALIVE
+void rxjit_set_light_mlp(int mode) {
+	g_rxjit_light_mlp_override.store(mode < 0 ? -1 : mode > 2 ? 2 : mode, std::memory_order_relaxed);
+}
+
+EMSCRIPTEN_KEEPALIVE
+int rxjit_effective_light_mlp(void) {
+	int m = g_rxjit_light_mlp_override.load(std::memory_order_relaxed);
+	if (m < 0) m = rxjit_profiles[g_rxjit_profile.load(std::memory_order_relaxed)].light_mlp;
+	return m;
+}
+
+// kernel_k (wasm_jit_profile.h): supjit items per loop trip, 1..
+// RXJIT_KERNEL_K_MAX, the override (>= 1; -1 = the profile's). Read when a
+// kernel is generated (wasm_jit_compiler.cpp).
+EMSCRIPTEN_KEEPALIVE
+void rxjit_set_kernel_k(int k) {
+	g_rxjit_kernel_k_override.store(k < 1 ? -1 : k, std::memory_order_relaxed);
+}
+
+EMSCRIPTEN_KEEPALIVE
+int rxjit_effective_kernel_k(void) {
+	int k = g_rxjit_kernel_k_override.load(std::memory_order_relaxed);
+	if (k < 1) k = rxjit_profiles[g_rxjit_profile.load(std::memory_order_relaxed)].kernel_k;
+	return k < 1 ? 1 : k > RXJIT_KERNEL_K_MAX ? RXJIT_KERNEL_K_MAX : k;
+}
+
+// kernel_k for rxInitItemsInto (the fb_full chunks): only the override, else 1.
+// A chunk kernel is regenerated and recompiled per 4 MiB chunk, and a bigger
+// K costs more than it saves there (12 workers, fb_full=1: cooperative build
+// 6.7 s at K = 1, 7.5 / 8.5 / 10.5 s at K = 2 / 3 / 4).
+int rxjit_chunk_kernel_k(void) {
+	const int k = g_rxjit_kernel_k_override.load(std::memory_order_relaxed);
+	return k < 1 ? 1 : k > RXJIT_KERNEL_K_MAX ? RXJIT_KERNEL_K_MAX : k;
+}
+
 EMSCRIPTEN_KEEPALIVE
 uint32_t rxjit_test_generate(void *program256, void *vm_state, void *scratchpad, void *dataset,
                              uint64_t dataset_offset, uint32_t rr0, uint32_t rr1, uint32_t rr2,
@@ -995,13 +1048,17 @@ static int rxjit_run_program_threaded(NativeRegisterFile &nreg,
 			g_jit_threaded_buf = (uint8_t *)malloc(need);
 			g_jit_threaded_buf_cap = g_jit_threaded_buf ? need : 0;
 		}
-		if (light) rxjit_threaded_set_light_fn(g_light_fn_buf, g_light_fn_len);
+		if (light) {
+			rxjit_threaded_set_light_fn(g_light_fn_buf, g_light_fn_len);
+			rxjit_threaded_set_light_mlp(g_light_mlp_mode, g_light_cache_base);
+		}
 		uint32_t sz = g_jit_threaded_buf ? rxjit_generate_threaded_module(
 		    (uint32_t)(uintptr_t)g_jit_threaded_vm_state, (uint32_t)(uintptr_t)scratchpad,
 		    (uint32_t)(uintptr_t)dataset, (uint32_t)(uintptr_t)g_jit_threaded_program_slot, 1,
 		    g_jit_max_memory_pages, feature, regs_in_mem, split_id, fuse_n, triples_n, kind16,
 		    shared, g_jit_threaded_buf) : 0;
 		rxjit_threaded_set_light_fn(nullptr, 0);
+		rxjit_threaded_set_light_mlp(0, 0);
 		g_rxjit_threaded_module_size.store(sz, std::memory_order_relaxed);
 		if (sz == 0 || sz > g_jit_threaded_buf_cap) {
 			g_rxjit_threaded_phase.store(103, std::memory_order_relaxed);
@@ -1108,18 +1165,35 @@ int rxjit_run_program_light(NativeRegisterFile &nreg,
 	if (g_rxjit_use_threaded_interp.load(std::memory_order_relaxed) == 0 || cache == nullptr)
 		return 0;
 	if (g_jit_threaded_failed) return 0;
-	if (cache != g_light_cache || g_light_key == nullptr || *g_light_key != cache->cacheKey) {
+	const int mlp = rxjit_effective_light_mlp();
+	if (cache != g_light_cache || g_light_key == nullptr || *g_light_key != cache->cacheKey ||
+	    mlp != g_light_mlp_req) {
 		if (!g_light_fn_buf) g_light_fn_buf = (uint8_t *)malloc(RXJIT_LIGHT_FN_CAP);
 		if (!g_light_key) g_light_key = new std::string();
 		if (!g_light_fn_buf) return 0;
-		// The emitter writes unchecked; the body is ~20-40 KiB, the cap 64 KiB.
-		const uint32_t len = rxjit_emit_superscalar_item_fn(
-		    cache->decodedPrograms, (uint32_t)(uintptr_t)cache->memory, g_light_fn_buf);
+		// The emitters write unchecked; they check a size bound against the
+		// cap first (0 if it might not fit). item_pair that does not fit
+		// falls back to the one-item function (mode 0).
+		const uint32_t cb = (uint32_t)(uintptr_t)cache->memory;
+		int mode = mlp;
+		uint32_t len = 0;
+		if (mode == 2) {
+			len = rxjit_emit_superscalar_item_pair_fn(
+			    cache->decodedPrograms, cb, RXJIT_ARENA_ITEM2_OFF - RXJIT_ARENA_ITEM_OFF,
+			    RXJIT_LIGHT_FN_CAP, g_light_fn_buf);
+			if (len == 0) mode = 0;
+		}
+		if (mode != 2)
+			len = rxjit_emit_superscalar_item_fn(cache->decodedPrograms, cb, RXJIT_LIGHT_FN_CAP,
+			                                     g_light_fn_buf);
 		if (len == 0 || len > RXJIT_LIGHT_FN_CAP) {
 			g_light_cache = nullptr;
 			return 0;
 		}
 		g_light_fn_len = len;
+		g_light_mlp_mode = mode;
+		g_light_mlp_req = mlp;
+		g_light_cache_base = cb;
 		g_light_cache = cache;
 		*g_light_key = cache->cacheKey;
 		if (++g_light_gen <= 0) g_light_gen = 1;

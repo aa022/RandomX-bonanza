@@ -16,6 +16,8 @@
 //   node bench/nosab_bench.mjs [--workers N] [--secs 15] [--warmup 4]
 //        [--profile arm|x86|auto] [--feature-base 3] [--key K]
 //        [--full K]        K full-dataset replicas (0..2 in the browser; ~2.3 GB each)
+//        [--light-mlp 0|1|2] [--kernel-k N]  light step-7 mode / supjit kernel items per trip
+//                          (profile_args.mjs; the build time follows kernel_k)
 //   default --workers = os.availableParallelism(); always runs randomx_st.
 
 import os from 'os';

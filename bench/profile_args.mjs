@@ -10,11 +10,14 @@
 //                            (x86 profile 1, arm 0), overrides the profile's
 //   --aes-relaxed 0|1        hashAndFill AES in the relaxed-SIMD side module (x86
 //                            profile 1, arm 0; needs a relaxed feature), overrides the profile's
+//   --light-mlp 0|1|2        light-mode step 7: 0 one item per iteration, 1 + next-item
+//                            line probe, 2 item pairing (wasm_jit_profile.h); -1 = the profile's
+//   --kernel-k N             supjit dataset-init kernel items per loop trip (1..4); -1 = the profile's
 //
 //   const prof = parseProfileArgs(args);
 //   ... _rxjit_set_feature(...) ...
 //   applyProfile(Module, prof);  // after the last set_feature, before the first hash
-//   profileHeader(Module, prof)  // 'profile=x86 (auto) fuse_n=800 triples_n=0 unroll2=0 kind16=1 shared=1 aes=1 aesr=1'
+//   profileHeader(Module, prof)  // 'profile=x86 (auto) fuse_n=800 triples_n=0 unroll2=0 kind16=1 shared=1 aes=1 aesr=1 mlp=0 kk=1'
 
 export const PROFILE_NAMES = ['arm', 'x86']; // index = RXJIT_PROFILE_*
 
@@ -25,7 +28,7 @@ export function parseProfileArgs(args) {
   if (req !== 'auto' && !PROFILE_NAMES.includes(req)) bad(`--profile must be one of auto|${PROFILE_NAMES.join('|')}`);
   const knob = (n) => { // -1: the profile's value
     const s = arg(n);
-    if (s === '') return -1;
+    if (s === '' || s === '-1') return -1;
     if (!/^\d+$/.test(s)) bad(`${n} wants a non-negative integer, got '${s}'`);
     return Number(s);
   };
@@ -46,6 +49,8 @@ export function parseProfileArgs(args) {
     sharedCode: sc === '' ? -1 : Number(sc),
     aesSimd: as === '' ? -1 : Number(as),
     aesRelaxed: ar === '' ? -1 : Number(ar),
+    lightMlp: knob('--light-mlp'),
+    kernelK: knob('--kernel-k'),
   };
 }
 
@@ -57,6 +62,8 @@ export function applyProfile(Module, prof) {
   Module._rxjit_set_shared_code(prof.sharedCode);
   Module._rxjit_set_aes_simd(prof.aesSimd);
   Module._rxjit_set_aes_relaxed(prof.aesRelaxed);
+  Module._rxjit_set_light_mlp(prof.lightMlp ?? -1);
+  Module._rxjit_set_kernel_k(prof.kernelK ?? -1);
 }
 
 // Effective values read back from C (the feature's NO_FUSE bit included).
@@ -65,7 +72,8 @@ export function profileHeader(Module, prof) {
     ` fuse_n=${Module._rxjit_effective_fuse_n()} triples_n=${Module._rxjit_effective_triples_n()}` +
     ` unroll2=${Module._rxjit_effective_unroll2()} kind16=${Module._rxjit_effective_kind16()}` +
     ` shared=${Module._rxjit_effective_shared_code()} aes=${Module._rxjit_effective_aes_simd()}` +
-    ` aesr=${Module._rxjit_effective_aes_relaxed()}`;
+    ` aesr=${Module._rxjit_effective_aes_relaxed()} mlp=${Module._rxjit_effective_light_mlp()}` +
+    ` kk=${Module._rxjit_effective_kernel_k()}`;
 }
 
 // Module-bytes identity: every generated threaded module is FNV-1a hashed; with

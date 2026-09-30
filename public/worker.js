@@ -326,7 +326,9 @@ async function init(options = {}) {
         // unroll2=0|1 (2x dispatch replication), shared_code=0|1 (no per-thread
         // pointer in the module bytes, so V8 compiles one copy for all
         // workers), aes_simd=0|1 (SIMD vs T-table AES in randomx.wasm),
-        // aes_relaxed=0|1 (hashAndFill AES in the relaxed-SIMD side module). 'auto' is isX86() ? x86 : arm;
+        // aes_relaxed=0|1 (hashAndFill AES in the relaxed-SIMD side module),
+        // light_mlp=0|1|2 (light mode: next-item line probe / item pairing),
+        // kernel_k=1..4 (supjit dataset-init items per loop trip). 'auto' is isX86() ? x86 : arm;
         // JSC always gets arm (it refused to tier up the large functions).
         if (Module._rxjit_set_profile) {
           const PROFILE_NAMES = ['arm', 'x86']; // index = RXJIT_PROFILE_*
@@ -355,6 +357,10 @@ async function init(options = {}) {
           if (Module._rxjit_set_aes_simd) Module._rxjit_set_aes_simd(expNum('aes_simd'));
           // aes_relaxed=0|1: hashAndFill via the relaxed side module (x86 profile, relaxed feature only)
           if (Module._rxjit_set_aes_relaxed) Module._rxjit_set_aes_relaxed(expNum('aes_relaxed'));
+          // light_mlp=0|1|2: light-mode step 7 (1 next-item probe, 2 item pairing)
+          if (Module._rxjit_set_light_mlp) Module._rxjit_set_light_mlp(expNum('light_mlp'));
+          // kernel_k=N: supjit dataset-init kernel items per loop trip (1..4)
+          if (Module._rxjit_set_kernel_k) Module._rxjit_set_kernel_k(expNum('kernel_k'));
           postMessage({
             type: 'status',
             message: `JIT profile: ${PROFILE_NAMES[Module._rxjit_get_profile()]} (${auto ? 'auto' : 'forced'})` +
@@ -362,7 +368,9 @@ async function init(options = {}) {
               ` unroll2=${Module._rxjit_effective_unroll2()}` +
               (Module._rxjit_effective_shared_code ? ` shared_code=${Module._rxjit_effective_shared_code()}` : '') +
               (Module._rxjit_effective_aes_simd ? ` aes_simd=${Module._rxjit_effective_aes_simd()}` : '') +
-              (Module._rxjit_effective_aes_relaxed ? ` aes_relaxed=${Module._rxjit_effective_aes_relaxed()}` : ''),
+              (Module._rxjit_effective_aes_relaxed ? ` aes_relaxed=${Module._rxjit_effective_aes_relaxed()}` : '') +
+              (Module._rxjit_effective_light_mlp ? ` light_mlp=${Module._rxjit_effective_light_mlp()}` : '') +
+              (Module._rxjit_effective_kernel_k ? ` kernel_k=${Module._rxjit_effective_kernel_k()}` : ''),
           });
         }
         postMessage({ type: 'status', message: 'JIT path: THREADED-INTERPRETER (resident module)' });

@@ -11,6 +11,9 @@
 extern "C" void rxjit_supjit_publish_bytes(uint32_t size);
 extern "C" int rxjit_supjit_run_range(uint32_t startItem, uint32_t count);
 extern "C" void *rxjit_supjit_bytes_ptr(void);
+extern "C" uint32_t rxjit_supjit_bytes_cap(void);
+extern "C" int rxjit_effective_kernel_k(void);
+extern "C" int rxjit_chunk_kernel_k(void);
 extern "C" int rxjit_get_supjit_enabled(void);
 extern "C" void rxjit_set_supjit_enabled(int on);
 
@@ -429,13 +432,16 @@ int rxInitDatasetStart(randomx_cache *cache, randomx_dataset *dataset, uint32_t 
 
 	// Phase D: if SuperscalarHash JIT is enabled, generate the per-cache
 	// kernel module once per init call (regenerated to bake in the current
-	// cache_base + dataset_base). Generation cost is ~1 ms.
+	// cache_base + dataset_base, and the kernel_k read now). Generation cost
+	// is ~1 ms.
 	bool useSupjit = rxjit_get_supjit_enabled() != 0;
 	if (useSupjit) {
+		const uint32_t cap = rxjit_supjit_bytes_cap();
 		uint32_t sz = rxjit_generate_superscalar_kernel(
 		    cache->decodedPrograms, (uint32_t)(uintptr_t)cache->memory,
-		    (uint32_t)(uintptr_t)dataset->memory, 1, 65536, (uint8_t *)rxjit_supjit_bytes_ptr());
-		if (sz == 0 || sz > (1 << 16)) {
+		    (uint32_t)(uintptr_t)dataset->memory, 1, 65536, rxjit_effective_kernel_k(), cap,
+		    (uint8_t *)rxjit_supjit_bytes_ptr());
+		if (sz == 0 || sz > cap) {
 			// Generator failed — disable JIT and fall back to interpreter path.
 			rxjit_set_supjit_enabled(0);
 			useSupjit = false;
@@ -518,10 +524,11 @@ int rxInitItemsInto(randomx_cache *cache, uint8_t *dst, uint32_t startItem, uint
 	uint32_t item = startItem;
 	if (rxjit_get_supjit_enabled() != 0) {
 		const uint32_t base = (uint32_t)(uintptr_t)dst - startItem * randomx::CacheLineSize;
+		const uint32_t cap = rxjit_supjit_bytes_cap();
 		const uint32_t sz = rxjit_generate_superscalar_kernel(
 		    cache->decodedPrograms, (uint32_t)(uintptr_t)cache->memory, base, 1, 65536,
-		    (uint8_t *)rxjit_supjit_bytes_ptr());
-		if (sz == 0 || sz > (1 << 16)) {
+		    rxjit_chunk_kernel_k(), cap, (uint8_t *)rxjit_supjit_bytes_ptr());
+		if (sz == 0 || sz > cap) {
 			rxjit_set_supjit_enabled(0);
 		} else {
 			rxjit_supjit_publish_bytes(sz);
