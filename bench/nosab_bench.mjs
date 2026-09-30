@@ -12,7 +12,8 @@
 // Usage:
 //   node bench/nosab_bench.mjs [--workers N] [--secs 15] [--warmup 4]
 //        [--profile arm|x86|auto] [--feature-base 3] [--key K]
-//        [--light-vms N]   future: VMs per worker in lockstep (ignored if the build lacks it)
+//        [--light-vms 1|2] VMs per worker in lockstep: 2 = two VMs on the worker's
+//                          cache, hashed in pairs by rxLightHash2 (ignored if the build lacks it)
 //        [--full K]        future: K full-dataset replicas (errors out: not supported yet)
 //   default --workers = os.availableParallelism(); always runs randomx_st.
 
@@ -51,7 +52,10 @@ function setupJit(Module) {
   Module._rxjit_set_feature(FEATURE_BASE | 4);
   applyProfile(Module, PROF);
   Module._rxSetJitEnabled(1);
-  if (LIGHT_VMS > 1 && Module._rxjit_set_light_vms) { Module._rxjit_set_light_vms(LIGHT_VMS); return LIGHT_VMS; }
+  if (LIGHT_VMS > 1 && Module._rxjit_set_light_vms) {
+    Module._rxjit_set_light_vms(LIGHT_VMS);
+    return Module._rxjit_effective_light_vms();
+  }
   return 1;
 }
 
@@ -84,14 +88,16 @@ if (isMainThread) {
   const epoch = performance.timeOrigin + performance.now() + 200; // shared start, wall-clock ms
   for (const w of workers) w.postMessage({ type: 'go', epoch });
   const res = await Promise.all(results);
-  let total = 0, hashes = 0, fallback = 0;
+  let total = 0, hashes = 0, fallback = 0, unpaired = 0;
   for (const [i, r] of res.entries()) {
     const hs = r.hashes / r.secs;
     total += hs; hashes += r.hashes;
     if (r.jitRuns < r.allHashes * 8) fallback++;
+    if (info[0].lightVms === 2 && r.pairRuns < r.allHashes * 4) unpaired++;
     console.log(`  worker ${String(i).padStart(2)}: ${hs.toFixed(2).padStart(7)} H/s  (${r.hashes} hashes / ${r.secs.toFixed(2)} s, ${(1000 / hs).toFixed(1)} ms/hash)`);
   }
   if (fallback) console.log(`WARNING: ${fallback} worker(s) fell back to the C interpreter for some programs`);
+  if (unpaired) console.log(`WARNING: ${unpaired} worker(s) ran some program pairs one by one (not in lockstep)`);
   console.log(`total ${total.toFixed(1)} H/s over ${WORKERS} workers (${(total / WORKERS).toFixed(2)} H/s per worker, ${hashes} hashes)`);
   for (const w of workers) w.terminate();
   process.exit(0);
@@ -108,39 +114,57 @@ if (isMainThread) {
   const vm = c('randomx_create_vm', 'number', ['number', 'number', 'number'])(0, cache, 0);
   if (!vm) throw new Error('create_vm failed');
   const calc = c('randomx_calculate_hash', null, ['number', 'number', 'number', 'number']);
+  // light_vms 2: a second VM on the same cache; one call hashes two nonces
+  const vm2 = lightVms === 2 ? c('randomx_create_vm', 'number', ['number', 'number', 'number'])(0, cache, 0) : 0;
+  if (lightVms === 2 && !vm2) throw new Error('create_vm failed');
+  const hash2 = c('rxLightHash2', null, ['number', 'number', 'number', 'number', 'number', 'number', 'number', 'number']);
 
   const inPtr = Module._malloc(BLOB_LEN), outPtr = Module._malloc(32);
+  const inPtr2 = Module._malloc(BLOB_LEN), outPtr2 = Module._malloc(32);
   const blob = new Uint8Array(BLOB_LEN);
   for (let j = 0; j < BLOB_LEN; j++) blob[j] = (j * 131 + 7) & 0xff;
   Module.HEAPU8.set(blob, inPtr);
+  Module.HEAPU8.set(blob, inPtr2);
   const { slot, slots } = workerData;
   let nonce = slot;
-  const hash = () => {
+  const setNonce = (p) => {
     const h = Module.HEAPU8; // re-read: the heap view can change on memory growth
-    h[inPtr + NONCE_OFF] = nonce; h[inPtr + NONCE_OFF + 1] = nonce >>> 8;
-    h[inPtr + NONCE_OFF + 2] = nonce >>> 16; h[inPtr + NONCE_OFF + 3] = nonce >>> 24;
-    calc(vm, inPtr, BLOB_LEN, outPtr);
+    h[p + NONCE_OFF] = nonce; h[p + NONCE_OFF + 1] = nonce >>> 8;
+    h[p + NONCE_OFF + 2] = nonce >>> 16; h[p + NONCE_OFF + 3] = nonce >>> 24;
     nonce = (nonce + slots) >>> 0;
+  };
+  // Returns the number of hashes done.
+  const hash = lightVms === 2 ? () => {
+    setNonce(inPtr); setNonce(inPtr2);
+    hash2(vm, inPtr, BLOB_LEN, outPtr, vm2, inPtr2, BLOB_LEN, outPtr2);
+    return 2;
+  } : () => {
+    setNonce(inPtr);
+    calc(vm, inPtr, BLOB_LEN, outPtr);
+    return 1;
   };
   const wall = () => performance.timeOrigin + performance.now();
   parentPort.postMessage({ type: 'ready', header: profileHeader(Module, PROF), lightVms });
   parentPort.once('message', ({ epoch }) => {
     const r0 = Module._rxjit_stat_light_runs() >>> 0;
+    const pairs = () => (Module._rxjit_stat_light_pair_runs ? Module._rxjit_stat_light_pair_runs() >>> 0 : 0);
+    const p0 = pairs();
     while (wall() < epoch) {}
     const mStart = epoch + WARMUP * 1000, mEnd = mStart + SECS * 1000;
     let all = 0;
-    while (wall() < mStart) { hash(); all++; }
+    while (wall() < mStart) all += hash();
     // Count the hashes that start and finish inside the window.
     let n = 0, t = wall(), first = t, last = t;
     while (t < mEnd) {
-      hash(); all++;
+      const k = hash();
+      all += k;
       const e = wall();
       if (e > mEnd) break;
-      n++; last = t = e;
+      n += k; last = t = e;
     }
     parentPort.postMessage({
       type: 'done', hashes: n, secs: (last - first) / 1000, allHashes: all,
-      jitRuns: (Module._rxjit_stat_light_runs() >>> 0) - r0,
+      jitRuns: (Module._rxjit_stat_light_runs() >>> 0) - r0, pairRuns: pairs() - p0,
     });
   });
 }
