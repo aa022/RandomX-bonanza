@@ -160,6 +160,9 @@ static inline int RREG(const ItemLocals &L, int idx) {
 // halves, every partial product fits in an i64), which gives mulhs directly
 // with no ((a >> 63) & b) correction; aL*bL >> 32 stays logical. V8 does not
 // inline the call-based stubs; the calls were ~40% of the item time (1T, x64).
+// Square (a == b, IMULH_R / ISMULH_R allow src == dst): aL*bH is emitted as
+// aH*bL, the same expression as in t, so TurboFan's value numbering folds the
+// two into one multiply (3 instead of 4).
 static uint32_t emit_mulh_inline(const ItemLocals &L, int a, int b, bool is_signed, uint8_t *buf) {
 	THUNK_BEGIN;
 #define HSHR() do { if (is_signed) I64_SHR_S(); else I64_SHR_U(); } while (0)
@@ -171,8 +174,13 @@ static uint32_t emit_mulh_inline(const ItemLocals &L, int a, int b, bool is_sign
 	WI64_CONST(32); I64_SHR_U(); I64_ADD();
 	LS(L.mt);
 	// (aL*bH + (t & M)) >> 32
-	LG(a); WI64_CONST(0xffffffffLL); I64_AND();
-	LG(b); WI64_CONST(32); HSHR(); I64_MUL();
+	if (a == b) { // aH*aL, as in t
+		LG(a); WI64_CONST(32); HSHR();
+		LG(b); WI64_CONST(0xffffffffLL); I64_AND(); I64_MUL();
+	} else {
+		LG(a); WI64_CONST(0xffffffffLL); I64_AND();
+		LG(b); WI64_CONST(32); HSHR(); I64_MUL();
+	}
 	LG(L.mt); WI64_CONST(0xffffffffLL); I64_AND(); I64_ADD();
 	WI64_CONST(32); HSHR();
 	// + aH*bH + (t >> 32)
