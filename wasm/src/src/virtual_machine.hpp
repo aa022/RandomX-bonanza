@@ -43,11 +43,6 @@ public:
 	virtual void setCache(randomx_cache* cache) { }
 	virtual void initScratchpad(void* seed) = 0;
 	virtual void run(void* seed) = 0;
-	// Light 2-VM lockstep (rxLightHash2): generate and run the next program of
-	// this VM (from seed) and of other (from otherSeed) together. fprc: the two
-	// VMs' rounding modes, in and out. false: not a pair this VM can run in
-	// lockstep, and nothing was done.
-	virtual bool runPair(randomx_vm* other, void* seed, void* otherSeed, uint32_t fprc[2]) { return false; }
 	void resetRoundingMode();
 	randomx::RegisterFile *getRegisterFile() {
 		return &reg;

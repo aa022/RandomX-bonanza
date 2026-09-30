@@ -15,13 +15,10 @@
 // Usage:
 //   node bench/nosab_bench.mjs [--workers N] [--secs 15] [--warmup 4]
 //        [--profile arm|x86|auto] [--feature-base 3] [--key K]
-//        [--light-vms 1|2] VMs per worker in lockstep: 2 = two VMs on the worker's
-//                          cache, hashed in pairs by rxLightHash2 (ignored if the build lacks it)
 //        [--full K]        K full-dataset replicas (0..2 in the browser; ~2.3 GB each)
 //   default --workers = os.availableParallelism(); always runs randomx_st.
 
 import os from 'os';
-import { createRequire } from 'module';
 import { parseProfileArgs } from './profile_args.mjs';
 import { startNoSabPool } from './nosab_pool.mjs';
 
@@ -32,20 +29,14 @@ const SECS = Number(arg('--secs', '15'));
 const WARMUP = Number(arg('--warmup', '4'));
 const FEATURE_BASE = Number(arg('--feature-base', '3'));
 const KEY = arg('--key', 'gh-distro bench key');
-const LIGHT_VMS = Number(arg('--light-vms', '1'));
 const FULL = Math.min(WORKERS, Math.max(0, Number(arg('--full', '0'))));
 const PROF = parseProfileArgs(args);
-
-if (LIGHT_VMS > 1) { // capability probe on a throwaway instance
-  const M = await createRequire(import.meta.url)('../public/randomx_st.js')();
-  if (!M._rxjit_set_light_vms) console.log(`note: --light-vms ${LIGHT_VMS} ignored (build lacks rxjit_set_light_vms)`);
-}
 
 const mode = FULL ? `${FULL} full + ${WORKERS - FULL} light` : 'light mode';
 console.log(`nosab bench: randomx_st, ${WORKERS} worker_threads, ${mode}, warm-up ${WARMUP}s + ${SECS}s`);
 const t0 = performance.now();
 const pool = await startNoSabPool({
-  workers: WORKERS, full: FULL, key: KEY, featureBase: FEATURE_BASE, prof: PROF, lightVms: LIGHT_VMS,
+  workers: WORKERS, full: FULL, key: KEY, featureBase: FEATURE_BASE, prof: PROF,
 });
 const info = pool.info;
 if (FULL) {
@@ -55,22 +46,20 @@ if (FULL) {
 } else {
   console.log(`caches ready in ${((performance.now() - t0) / 1000).toFixed(1)} s (Argon2 per worker, concurrent)`);
 }
-console.log(`light threaded (feature=${FEATURE_BASE | 4} ${info[0].header}) light_vms=${info[0].lightVms}`);
+console.log(`light threaded (feature=${FEATURE_BASE | 4} ${info[0].header})`);
 
 const epoch = performance.timeOrigin + performance.now() + 200; // shared start, wall-clock ms
 const res = await Promise.all(pool.workers.map((_, i) =>
   pool.request(i, { type: 'go', epoch, warmup: WARMUP, secs: SECS }, 'done')));
-let total = 0, hashes = 0, fallback = 0, unpaired = 0;
+let total = 0, hashes = 0, fallback = 0;
 for (const [i, r] of res.entries()) {
   const hs = r.hashes / r.secs;
   total += hs; hashes += r.hashes;
   if (r.jitRuns < r.allHashes * 8) fallback++;
-  if (r.paired && r.pairRuns < r.allHashes * 4) unpaired++;
   const role = FULL ? ` ${pool.modes[i].padEnd(5)}` : '';
   console.log(`  worker ${String(i).padStart(2)}${role}: ${hs.toFixed(2).padStart(7)} H/s  (${r.hashes} hashes / ${r.secs.toFixed(2)} s, ${(1000 / hs).toFixed(1)} ms/hash)`);
 }
 if (fallback) console.log(`WARNING: ${fallback} worker(s) fell back to the C interpreter for some programs`);
-if (unpaired) console.log(`WARNING: ${unpaired} worker(s) ran some program pairs one by one (not in lockstep)`);
 console.log(`total ${total.toFixed(1)} H/s over ${WORKERS} workers (${(total / WORKERS).toFixed(2)} H/s per worker, ${hashes} hashes)`);
 pool.terminate();
 process.exit(0);

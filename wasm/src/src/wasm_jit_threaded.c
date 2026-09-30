@@ -195,23 +195,6 @@ void rxjit_threaded_set_light_fn(const uint8_t *body, uint32_t len) {
 	g_light_fn_len = body ? len : 0;
 }
 
-// Light 2-VM lockstep (only with a light fn and shared_code; g_light2_on):
-// main_loop2 (TFN_MAIN_LOOP2, exported "e") runs two VMs' programs, switching
-// arenas between them, and item2 (TFN_ITEM2, rxjit_emit_superscalar_item2_fn)
-// computes both VMs' items of an iteration in one interleaved call. Off
-// (len 0, the default): no extra type, function or export.
-static _Thread_local const uint8_t *g_light2_fn = 0;
-static _Thread_local uint32_t g_light2_fn_len = 0;
-static _Thread_local int g_light2_on = 0;
-#define TFN_MAIN_LOOP2 25
-#define TFN_ITEM2      26
-#define TTYPE_ITEM2    5
-
-void rxjit_threaded_set_light2_fn(const uint8_t *body, uint32_t len) {
-	g_light2_fn = body;
-	g_light2_fn_len = body ? len : 0;
-}
-
 // vm_state offsets (mirrors rxjit_vm_state_t in wasm_jit_gen.h).
 #define VM_R0_OFFSET    0
 #define VM_F0_OFFSET    64
@@ -1464,8 +1447,6 @@ static uint32_t emit_step5_mx_xor(uint8_t *buf) {
 	THUNK_END;
 }
 
-static uint32_t emit_step7_xor_line(uint8_t *buf);
-
 // Step 7: r[i] ^= dataset[LOCT_ds_ptr + ma + i*8] for i in 0..7
 //   V3 mode: same direct-memory pattern as step 2 (compile-time index).
 static uint32_t emit_step7_dataset_xor(uint8_t *buf) {
@@ -1486,13 +1467,6 @@ static uint32_t emit_step7_dataset_xor(uint8_t *buf) {
 		I32_ADD();
 	}
 	LS(LOC_tmp);
-	p += emit_step7_xor_line(p);
-	THUNK_END;
-}
-
-// Step 7's xor: r[i] ^= mem[LOC_tmp + i*8] (the dataset line or the item).
-static uint32_t emit_step7_xor_line(uint8_t *buf) {
-	THUNK_BEGIN;
 	if (g_emit_regs_in_mem) {
 		for (int i = 0; i < 8; i++) {
 			ARENA_BASE();
@@ -1792,147 +1766,6 @@ static uint32_t emit_main_loop_body(uint32_t vm_state_ptr, uint32_t scratchpad_p
 
 	p += emit_epilogue(vm_state_ptr, p);
 
-	THUNK_END;
-}
-
-// ---------------- Light 2-VM lockstep main loop (main_loop2) ----------------
-//
-// Shared_code only (every access is arena-relative, vm_state_ptr = 0), so a
-// VM switch is: LOCT_arena = the peer arena (+RXJIT_ARENA_PEER_OFF), also into
-// TGLOB_arena (inner_dispatch reads it at entry), the scratchpad base from the
-// new arena, and the loop-carried i32 locals and fprc swapped through the
-// arenas: spill stores ma / mx (vm_state, only inputs otherwise), sp_addr0/1
-// (+RXJIT_ARENA_SPILL_OFF) and fprc (vm_state); fill reruns the prologue (the
-// per-program constants, masks and fprc) and reloads sp_addr0/1.
-
-static uint32_t emit_vm2_switch(uint8_t *buf) {
-	THUNK_BEGIN;
-	LG(LOCT_arena);
-	I32_LOAD_OFF(RXJIT_ARENA_PEER_OFF);
-	LT(LOCT_arena);
-	GS(TGLOB_arena);
-	p += emit_load_spb(p);
-	THUNK_END;
-}
-
-static uint32_t emit_vm2_spill(uint8_t *buf) {
-	THUNK_BEGIN;
-	LG(LOCT_arena);
-	LG(LOC_ma);
-	I32_STORE_OFF(VM_MA_OFFSET);
-	LG(LOCT_arena);
-	LG(LOC_mx);
-	I32_STORE_OFF(VM_MX_OFFSET);
-	LG(LOCT_arena);
-	LG(LOC_sp_addr0);
-	I32_STORE_OFF(RXJIT_ARENA_SPILL_OFF);
-	LG(LOCT_arena);
-	LG(LOC_sp_addr1);
-	I32_STORE_OFF(RXJIT_ARENA_SPILL_OFF + 4);
-	LG(LOCT_arena);
-	GG(TGLOB_fprc);
-	I32_STORE_OFF(VM_FPRC_OFFSET);
-	THUNK_END;
-}
-
-static uint32_t emit_vm2_fill(uint8_t *buf) {
-	THUNK_BEGIN;
-	p += emit_prologue(0, p); // ma, mx (spilled), fprc, masks, read regs, ds_ptr
-	LG(LOCT_arena);
-	I32_LOAD_OFF(RXJIT_ARENA_SPILL_OFF);
-	LS(LOC_sp_addr0);
-	LG(LOCT_arena);
-	I32_LOAD_OFF(RXJIT_ARENA_SPILL_OFF + 4);
-	LS(LOC_sp_addr1);
-	THUNK_END;
-}
-
-// Steps 1-5 of one iteration for the current VM (as in main_loop).
-static uint32_t emit_vm2_steps_1_5(uint8_t *buf) {
-	THUNK_BEGIN;
-	p += emit_step1_sp_mix(p);
-	p += emit_step2_xor_r(0, p);
-	p += emit_step3_load_fe(0, p);
-	WASM_U8(0x10);
-	WASM_U32(TFN_INNER_DISPATCH);
-	p += emit_step5_mx_xor(p);
-	THUNK_END;
-}
-
-// Steps 7-12 for the current VM, its item already at arena +ITEM (item2).
-static uint32_t emit_vm2_steps_7_12(uint8_t *buf) {
-	THUNK_BEGIN;
-	ARENA_PTR(RXJIT_ARENA_ITEM_OFF);
-	LS(LOC_tmp);
-	p += emit_step7_xor_line(p);
-	p += emit_step8_swap_mx_ma(p);
-	p += emit_step9_store_r(0, p);
-	p += emit_step10_f_xor_e(p);
-	p += emit_step11_store_f(0, p);
-	p += emit_step12_clear_sp(p);
-	THUNK_END;
-}
-
-// main_loop2 (exported "e"): VM A = the arena in TGLOB_arena, VM B = A's peer.
-// Per iteration: A steps 1-5, switch, B steps 1-5, item2(A's item, B's item),
-// B steps 7-12, switch, A steps 7-12. It ends on A, so TGLOB_arena is A again.
-static uint32_t emit_main_loop2_body(uint8_t *buf) {
-	THUNK_BEGIN;
-	GG(TGLOB_arena);
-	LS(LOCT_arena);
-	// B's initial state into its spill slots, then A's into the locals
-	p += emit_vm2_switch(p);
-	p += emit_prologue(0, p);
-	p += emit_vm2_spill(p);
-	p += emit_vm2_switch(p);
-	p += emit_prologue(0, p);
-
-	WI32_CONST(RANDOMX_PROGRAM_ITERATIONS);
-	LS(LOC_ic);
-	LOOP_VOID();
-	{
-		p += emit_vm2_steps_1_5(p); // A
-		p += emit_vm2_spill(p);
-		p += emit_vm2_switch(p);
-		p += emit_vm2_fill(p);
-		p += emit_vm2_steps_1_5(p); // B
-		// item2(A: ds_ptr + ma/64 -> A +ITEM, B: the same from the locals)
-		LG(LOCT_arena);
-		I32_LOAD_OFF(RXJIT_ARENA_PEER_OFF);
-		LS(LOC_tmp);
-		LG(LOC_tmp);
-		I32_LOAD_OFF(VM_DS_PTR_OFFSET);
-		LG(LOC_tmp);
-		I32_LOAD_OFF(VM_MA_OFFSET);
-		WI32_CONST(6);
-		I32_SHR_U();
-		I32_ADD();
-		LG(LOC_tmp);
-		WI32_CONST(RXJIT_ARENA_ITEM_OFF);
-		I32_ADD();
-		LG(LOCT_ds_ptr);
-		LG(LOC_ma);
-		WI32_CONST(6);
-		I32_SHR_U();
-		I32_ADD();
-		ARENA_PTR(RXJIT_ARENA_ITEM_OFF);
-		WASM_U8(0x10);
-		WASM_U32(TFN_ITEM2);
-		p += emit_vm2_steps_7_12(p); // B
-		p += emit_vm2_spill(p);
-		p += emit_vm2_switch(p);
-		p += emit_vm2_fill(p);
-		p += emit_vm2_steps_7_12(p); // A
-
-		LG(LOC_ic);
-		WI32_CONST(1);
-		I32_SUB();
-		LT(LOC_ic);
-		BR_IF(0);
-	}
-	END_BLK();
-	// A's fprc (B's was spilled at the last switch)
-	p += emit_epilogue(0, p);
 	THUNK_END;
 }
 
@@ -2788,7 +2621,7 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 
 #define EMIT_TYPE_SECTION_T()                                          \
 	WASM_SECTION(WASM_SECTION_TYPE, {                                  \
-		WASM_U8(g_light2_on ? 6 : g_light_fn_len ? 5 : 4);             \
+		WASM_U8(g_light_fn_len ? 5 : 4);                               \
 		WASM_U8_THUNK({                                                \
 			0x60, 0, 0,                                                \
 			0x60, 2, WASM_TYPE_I64, WASM_TYPE_I64, 1, WASM_TYPE_I64,   \
@@ -2797,10 +2630,6 @@ static uint32_t emit_inner_dispatch(uint32_t scratchpad_ptr, int jit_feature, ui
 		});                                                            \
 		if (g_light_fn_len) { /* TTYPE_ITEM: (i32, i32) -> () */       \
 			WASM_U8_THUNK({0x60, 2, WASM_TYPE_I32, WASM_TYPE_I32, 0}); \
-		}                                                              \
-		if (g_light2_on) { /* TTYPE_ITEM2: (i32, i32, i32, i32) -> () */ \
-			WASM_U8_THUNK({0x60, 4, WASM_TYPE_I32, WASM_TYPE_I32,      \
-			               WASM_TYPE_I32, WASM_TYPE_I32, 0});          \
 		}                                                              \
 	})
 
@@ -2838,7 +2667,6 @@ uint32_t rxjit_generate_threaded_module(
 	g_kind16           = kind16;
 	g_d_aux            = kind16 ? 2 : 1;
 	g_shared           = shared_code != 0;
-	g_light2_on        = g_light_fn_len && g_light2_fn_len && g_shared;
 	if (g_shared) {
 		// Arena-relative from here on (vm_state is the arena base); the
 		// scratchpad base comes from the arena's SPB slot, the dataset from
@@ -2869,7 +2697,7 @@ uint32_t rxjit_generate_threaded_module(
 	// function section: 23 (or 24 in split_id) functions: 22 stubs + [inner_dispatch] + main_loop
 	WASM_SECTION(WASM_SECTION_FUNCTION, {
 		if (split) {
-			WASM_U8((g_light_fn_len ? 25 : 24) + (g_light2_on ? 2 : 0));
+			WASM_U8(g_light_fn_len ? 25 : 24);
 			WASM_U8_THUNK({
 				1, 1,                                           // mulh, imulh
 				2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, // fadd/fsub/fmul/fdiv type 2
@@ -2878,10 +2706,6 @@ uint32_t rxjit_generate_threaded_module(
 				0,                                              // main_loop type 0
 			});
 			if (g_light_fn_len) WASM_U8(TTYPE_ITEM);        // light: item (TFN_ITEM)
-			if (g_light2_on) {                              // 2-VM: main_loop2, item2
-				WASM_U8(0);
-				WASM_U8(TTYPE_ITEM2);
-			}
 		} else {
 			WASM_U8_THUNK({
 				23,
@@ -2916,19 +2740,14 @@ uint32_t rxjit_generate_threaded_module(
 	});
 
 	// export section: "d" → main_loop (index depends on split); shared_code
-	// also exports global "a" (TGLOB_arena) for rxjit_js_run_threaded to set;
-	// light 2-VM adds "e" → main_loop2
+	// also exports global "a" (TGLOB_arena) for rxjit_js_run_threaded to set
 	WASM_SECTION(WASM_SECTION_EXPORT, {
-		WASM_U8((g_shared ? 2 : 1) + (g_light2_on ? 1 : 0));
+		WASM_U8(g_shared ? 2 : 1);
 		WASM_U8(1); WASM_U8('d'); WASM_U8(0x00);
 		WASM_U8(fn_main_loop_idx);
 		if (g_shared) {
 			WASM_U8(1); WASM_U8('a'); WASM_U8(0x03);
 			WASM_U8(TGLOB_arena);
-		}
-		if (g_light2_on) {
-			WASM_U8(1); WASM_U8('e'); WASM_U8(0x00);
-			WASM_U8(TFN_MAIN_LOOP2);
 		}
 	});
 
@@ -2946,7 +2765,7 @@ uint32_t rxjit_generate_threaded_module(
 
 	// code section: 22 stubs + [inner_dispatch] + main_loop
 	WASM_SECTION(WASM_SECTION_CODE, {
-		WASM_U8((split ? 24 : 23) + (g_light_fn_len ? 1 : 0) + (g_light2_on ? 2 : 0)); // function count
+		WASM_U8((split ? 24 : 23) + (g_light_fn_len ? 1 : 0)); // function count
 		p += emit_stub_bodies(jit_feature, p);    // stubs 0..21
 		if (split) {
 			// inner_dispatch function body (index 22 when split is on)
@@ -2968,17 +2787,6 @@ uint32_t rxjit_generate_threaded_module(
 			WASM_U32_PATCH({
 				memcpy(p, g_light_fn, g_light_fn_len);
 				p += g_light_fn_len;
-			});
-		}
-		if (g_light2_on) { // 2-VM: main_loop2 (TFN_MAIN_LOOP2), item2 (TFN_ITEM2)
-			WASM_U32_PATCH({
-				p += emit_local_decls(jit_feature, p);
-				p += emit_main_loop2_body(p);
-				WASM_U8(0x0b);                      // end of function
-			});
-			WASM_U32_PATCH({
-				memcpy(p, g_light2_fn, g_light2_fn_len);
-				p += g_light2_fn_len;
 			});
 		}
 	});

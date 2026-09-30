@@ -80,16 +80,6 @@ namespace randomx {
 		uint64_t dataset_offset,
 		uint32_t ma,
 		uint32_t mx);
-	int rxjit_run_program_light2(
-		randomx_cache* cache,
-		NativeRegisterFile* nreg[2],
-		Instruction* program_buf[2],
-		const ProgramConfiguration* config[2],
-		uint8_t* scratchpad[2],
-		const uint64_t dataset_offset[2],
-		const uint32_t ma[2],
-		const uint32_t mx[2],
-		uint32_t fprc[2]);
 }
 #endif
 
@@ -106,55 +96,6 @@ namespace randomx {
 		VmBase<Allocator, softAes>::generateProgram(seed);
 		randomx_vm::initialize();
 		execute();
-	}
-
-	template<class Allocator, bool softAes>
-	bool InterpretedVm<Allocator, softAes>::runPair(randomx_vm* otherVm, void* seed, void* otherSeed, uint32_t fprc[2]) {
-#ifdef __EMSCRIPTEN__
-		// Two light VMs (not V2) of this type on one cache, with the JIT on.
-		auto* other = dynamic_cast<InterpretedVm*>(otherVm);
-		const int notLight = RANDOMX_FLAG_FULL_MEM | RANDOMX_FLAG_V2;
-		if (!g_jitEnabled || other == nullptr || other == this || this->cachePtr == nullptr ||
-		    other->cachePtr != this->cachePtr || ((this->getFlags() | other->getFlags()) & notLight))
-			return false;
-
-		InterpretedVm* vm[2] = { this, other };
-		void* seeds[2] = { seed, otherSeed };
-		NativeRegisterFile nreg[2];
-		for (int k = 0; k < 2; ++k) {
-			InterpretedVm& v = *vm[k];
-			v.generateProgram(seeds[k]);
-			v.initialize();
-			for (unsigned i = 0; i < RegisterCountFlt; ++i)
-				nreg[k].a[i] = rx_load_vec_f128(&v.reg.a[i].lo);
-			v.compileProgram(v.program, v.bytecode, nreg[k], v.getFlags());
-		}
-
-		NativeRegisterFile* np[2] = { &nreg[0], &nreg[1] };
-		Instruction* pb[2] = { program.programBufferRaw(), other->program.programBufferRaw() };
-		const ProgramConfiguration* cf[2] = { &config, &other->config };
-		uint8_t* sp[2] = { scratchpad, other->scratchpad };
-		const uint64_t dso[2] = { datasetOffset, other->datasetOffset };
-		const uint32_t ma[2] = { mem.ma, other->mem.ma };
-		const uint32_t mx[2] = { mem.mx, other->mem.mx };
-		if (rxjit_run_program_light2(this->cachePtr, np, pb, cf, sp, dso, ma, mx, fprc)) {
-			storeRegisters(nreg[0]);
-			other->storeRegisters(nreg[1]);
-		}
-		else {
-			// the knob is off or the JIT failed: one by one (execute redoes the
-			// setup and takes the single light JIT or the interpreter)
-			for (int k = 0; k < 2; ++k) {
-				wasm_rounding_mode = fprc[k];
-				vm[k]->execute();
-				fprc[k] = wasm_rounding_mode;
-			}
-		}
-		return true;
-#else
-		(void)otherVm; (void)seed; (void)otherSeed; (void)fprc;
-		return false;
-#endif
 	}
 
 	template<class Allocator, bool softAes>
@@ -278,11 +219,6 @@ namespace randomx {
 		}
 		}
 
-		storeRegisters(nreg);
-	}
-
-	template<class Allocator, bool softAes>
-	void InterpretedVm<Allocator, softAes>::storeRegisters(const NativeRegisterFile& nreg) {
 		for (unsigned i = 0; i < RegistersCount; ++i)
 			store64(&reg.r[i], nreg.r[i]);
 

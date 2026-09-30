@@ -44,13 +44,6 @@ uint32_t rxjit_emit_superscalar_item_fn(
     const randomx::DecodedSuperscalarProgram programs[/*RANDOMX_CACHE_ACCESSES*/],
     uint32_t cache_base, uint8_t *buf);
 
-// Light 2-VM lockstep: the function body of item2(i32 itemA, i32 outA, i32
-// itemB, i32 outB) -> (), two initDatasetItem interleaved instruction by
-// instruction (same cache). At most ~128 KiB.
-uint32_t rxjit_emit_superscalar_item2_fn(
-    const randomx::DecodedSuperscalarProgram programs[/*RANDOMX_CACHE_ACCESSES*/],
-    uint32_t cache_base, uint8_t *buf);
-
 #ifdef __cplusplus
 }
 #endif

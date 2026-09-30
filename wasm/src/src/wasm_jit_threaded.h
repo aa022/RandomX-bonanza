@@ -17,7 +17,6 @@
 //   +320   rounding-mask table, 4 x 128 B
 //   +832   64 B layout-pad dummy-store area (feature bits 256..1024)
 //   +896   u32 scratchpad base
-//   +900   light 2-VM lockstep: u32 peer arena base, then the spilled sp_addr0/1
 //   +1024  program slot: 256 records x 16 B  program_slot_ptr = blk + 1024
 //   +5120  sentinel record #256
 #define RXJIT_ARENA_ALIGN     128
@@ -25,8 +24,6 @@
 #define RXJIT_ARENA_RMASK_OFF 320
 #define RXJIT_ARENA_PAD_OFF   832
 #define RXJIT_ARENA_SPB_OFF   896
-#define RXJIT_ARENA_PEER_OFF  900 // light 2-VM: the other VM's arena base (main_loop2)
-#define RXJIT_ARENA_SPILL_OFF 904 // light 2-VM: sp_addr0, sp_addr1 across VM switches
 #define RXJIT_ARENA_ITEM_OFF  960 // light mode: the 64-byte item computed per iteration
 #define RXJIT_ARENA_SLOT_OFF  1024
 #define RXJIT_ARENA_SENT_OFF  5120
@@ -80,15 +77,6 @@ uint32_t rxjit_generate_threaded_module(uint32_t vm_state_ptr, uint32_t scratchp
 // call(s) on this thread; (NULL, 0) restores the full-mode module. The body is
 // copied at generation time, so it must stay valid until then.
 void rxjit_threaded_set_light_fn(const uint8_t *body, uint32_t len);
-
-// Light 2-VM lockstep: with a light fn and shared_code, also embed this item2
-// body (rxjit_emit_superscalar_item2_fn) and a second main loop exported as
-// "e" that runs the programs of two VMs together: A in the arena of global
-// "a", B in the arena at A +RXJIT_ARENA_PEER_OFF (whose peer must be A). Each
-// arena is loaded like the one "d" runs (vm_state, SPB, program slot). (NULL,
-// 0) turns it off, the default; like the light fn, it holds for the next
-// generation(s) and the body must stay valid until then.
-void rxjit_threaded_set_light2_fn(const uint8_t *body, uint32_t len);
 
 #ifdef __cplusplus
 }

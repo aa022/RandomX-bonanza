@@ -48,9 +48,6 @@ if (params.get('jit') === '0' || params.get('nojit') === '1') {
 const enableJit = jitDecision;
 const profileCore = params.get('profile') === '1';
 const requestedThreads = Number(params.get('threads'));
-// ?light_vms=2 (light mode, incl. no SAB): two VMs per mining thread, hashed
-// in pairs in lockstep (worker.js, rxLightHash2). Experimental, off by default.
-const lightVms = !fullMemory && params.get('light_vms') === '2' ? 2 : 1;
 const defaultThreads = fullMemory ? 32 : (navigator.hardwareConcurrency || 4);
 let datasetThreads = Math.max(1, Math.min(32, requestedThreads || defaultThreads));
 // Dataset init thread count is decoupled from mining threads. The em-pthread
@@ -606,7 +603,7 @@ function initWorker() {
   }
   // ?jit_profile=auto|arm|x86: threaded-module generator profile (worker.js).
   const jitProfile = params.get('jit_profile') || 'auto';
-  state.worker.postMessage({ type: 'init', enableJit, fullMemory, datasetThreads, datasetInitThreads, profileCore, jitExperiment, jitProfile, lightVms });
+  state.worker.postMessage({ type: 'init', enableJit, fullMemory, datasetThreads, datasetInitThreads, profileCore, jitExperiment, jitProfile });
 }
 
 // Reads the threads input (the only source of truth the user can edit) and
