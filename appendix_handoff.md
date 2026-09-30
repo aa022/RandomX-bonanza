@@ -228,7 +228,18 @@ t_item breakdown: ~0.4 µs of dependent cache misses (1.04 µs with the cache in
 1. Measure 1/6/12 workers in Chromium.
 2. Multi-VM lockstep (2 hashes per worker) to overlap the item misses and add ILP.
 3. A lower-latency mulh.
-4. Opt-in full replicas (`?fb_full=1|2`, a cooperative dataset build over transferable chunks, `rxInitItemsInto`).
+4. ~~Opt-in full replicas~~ **Done** (`?fb_full=K`, see §9.1).
 5. One cache build broadcast to all workers.
 6. OPFS persistence.
 
+### 9.1 Full replicas (`?fb_full=K`, K = 0–2)
+Workers 0..K-1 of the `NoSabPool` get a private dataset (~2.3 GB each: dataset + cache + heap); all N workers build it together per seed, then the replicas mine in full mode (1 thread, JIT) and the others stay light.
+- **`rxInitItemsInto(cache, dst, start, count)`** (`wasm_jit_compiler.cpp`, both builds): items into any buffer on the supjit kernel, regenerated per call with `dataset_base = dst - start*64` (the kernel's `out` wraps in i32 back to `dst`); falls back to `initDatasetItem`. The regen + compile is ~0.1 ms, and a fresh kernel runs at full speed from its first call.
+- **`public/fb_full.js`** (classic script: `RxFbFull` global, or `require()`): `FbCoordinator` (main thread) and `FbWorker` (worker side), shared by `miner.js`/`worker.js` and the Node pool (`bench/nosab_pool.mjs`).
+  - Each worker reports `fb_cache` after its cache build; a replica allocates its dataset once (kept across seeds; a failed allocation demotes it to light).
+  - Once all replica-role workers have reported, the coordinator hands out 2^16-item chunks (4 MiB; 520 per dataset, the last one short) to the least-busy worker: 2 requests per worker, at most 2N chunks in flight until every replica has written them.
+  - A light worker returns a transferable `HEAPU8.slice`; a replica computes its own chunks straight into its dataset (and shares them only with K = 2). The coordinator forwards to the replicas (clones first, the last one takes the buffer), each writes at `(randomx_get_dataset_memory(ds)>>>0) + start*64`.
+  - A replica with all chunks gets `fb_finalize`: full-mode VM on the dataset, cache released, `mode: full`. A new seed (`job`) starts a new epoch; stale messages are dropped by seed.
+  - `worker.js`: the mine loop yields to queued chunk work and runs 50 ms slices while a build is on (a replica's writes stuck behind a 900 ms slice would stall everyone at the in-flight cap). Without `fbRole` in `init` nothing changes.
+- **Build time** (correctness runs, not benches): 3 workers ≈ 16–17 s in Node (both K = 1 and 2), 4 workers with K = 2 ≈ 15 s in Chromium; about 1.3 µs per item per worker, so ~4 s at 12 workers if it scales.
+- **Gates:** `bench/fb_full_check.mjs` (replicas built by 3 workers, K = 2: reference vectors + light interpreter, before and after a seed change); `supjit_check` now also compares `rxInitItemsInto` with `randomx_init_dataset` on random ranges (kernel and fallback, the dataset's top end past 2 GiB). `nosab_bench.mjs --full K` prints the build time and per-worker roles.
