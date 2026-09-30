@@ -173,6 +173,7 @@ Getters `rxjit_effective_*` read back what is actually used. The C-side default 
 - `node bench/light_mode_check.mjs` at `--feature-base 3`, `0`, `1`, for `--profile arm` and `x86`, on both builds (`RX_BUILD=st` for `randomx_st`), also with `--light-vms 2` (2-VM lockstep, §9);
 - `node bench/supjit_check.mjs`, both builds (the full-mode gates can't see a broken superscalar kernel, since both of their sides read the kernel-built dataset);
 - `node bench/mine_ctx_check.mjs`;
+- `node bench/fb_full_check.mjs` (no-SAB full replicas, on by default since §9.1);
 - the ARM identity check;
 - `node bench/aes_check.mjs` (must print `AES CHECK PASS`);
 - `/usr/bin/node` (v20) `WebAssembly.validate(public/randomx.wasm)` must be true, meaning there are no relaxed ops in the main module.
@@ -213,6 +214,16 @@ When the page is not `crossOriginIsolated` (no COOP/COEP), there is no SharedArr
 | + inline mulh | 1.18 µs | ~32 | ~31 |
 | Chromium, no COOP/COEP, 2 workers (before inline mulh) | | | 59 summed |
 
+**Scaling** (Node `nosab_bench.mjs`, `randomx_st`, x86 profile, one 15 s run each, 2026-09-30; t_item 1.218 µs):
+
+| workers | light | `--light-vms 2` | `--full 1` | `--full 2` |
+|---|---|---|---|---|
+| 1 | 33.7 | 31.5 (−6%) | | |
+| 6 | 193.0 (32.2/w) | 186.5 (−3%) | 258.5 (+34%; full 97.6 + 5 × 32.2) | |
+| 12 | 252.5 (21.0/w) | 226.2 (−10%) | 270.4 (+7%; full 49.7 + 11 × 20.1) | 298.8 (+18%; 2 × ~50 + 10 × 19.9) |
+
+SMT costs a light worker ~35% (32 → 21 H/s) and a full one ~50% (98 → 50); 12 workers are 1.31× 6. The cooperative build takes 7.4 s (12 workers, K = 1 or 2) and 8.8 s (6 workers, K = 1), about 2× the §9.1 estimate at 12. Per seed, K = 2 at 12 workers repays a 7.5 s build of all 12 workers in ~40 s.
+
 t_item breakdown: ~0.4 µs of dependent cache misses (1.04 µs with the cache index masked to 64 KiB). Of the remaining compute, mulh is still ~0.3 µs (0.88 µs with mulh replaced by `i64.mul`).
 
 **Gates:** `light_mode_check`, `supjit_check`, and every older gate on `RX_BUILD=st`. The browser E2E is a scratch script: a server without COOP/COEP, headless Chromium over CDP, `NoSabPool` on a synthetic job, shares re-verified in Node.
@@ -220,28 +231,29 @@ t_item breakdown: ~0.4 µs of dependent cache misses (1.04 µs with the cache in
 **Caveats:**
 - Memory is ~300 MB per worker (12 workers ≈ 3.6 GB); `?threads=` caps it.
 - Each worker runs its own Argon2 cache init (0.7 s at 1T).
-- The multi-worker scaling (12 workers, SMT) is not measured yet.
 - `wasm_jit_superscalar.cpp`'s kernel still defines the mulh stubs (fn 0/1, now unused).
 - Wide arithmetic (`i64.mul_wide_u`) is not in V8 14.6, not even behind a flag.
 
-**2-VM lockstep light mode** (branch `nosab/light-2vm`, knob off by default): one thread runs two hashes at once, so the two item computations per iteration overlap their cache misses and fill each other's ILP.
+**2-VM lockstep light mode** (branch `nosab/light-2vm`, knob off by default; slower, see Scaling above): one thread runs two hashes at once, so the two item computations per iteration overlap their cache misses and fill each other's ILP.
 - **Knob:** `rxjit_set_light_vms(1|2)` (`rxjit_effective_light_vms`). Browser `?light_vms=2` (miner.js → worker.js, both builds, light mode only); Node `bench/nosab_bench.mjs --light-vms 2`.
 - **Entry:** `rxLightHash2(vmA, inA, lenA, outA, vmB, inB, lenB, outB)` in `randomx.cpp`. Blake2b, the AES fill, program generation and finalisation stay per VM; each of the 8 program pairs goes through `randomx_vm::runPair` (`vm_interpreted.cpp`) to `rxjit_run_program_light2` (`wasm_jit_run.cpp`). The rounding mode is carried per VM (`fprc[2]`), not in `wasm_rounding_mode`. Any other pair (different caches, full mode, V2, JIT off) or the knob at 1 hashes the two inputs one after the other.
 - **Module:** with the knob on, the light module also gets `main_loop2` (fn 25, export `"e"`) and `item2` (fn 26, type 5 `(i32 itemA, i32 outA, i32 itemB, i32 outB)`). The module is then always generated with `shared_code`, whatever the profile says, and the same module serves single-VM light runs (`"d"`). Without the knob, no byte of any module changes.
   - `item2` (`rxjit_emit_superscalar_item2_fn`) runs both item computations interleaved instruction by instruction: same programs, two register sets (26 locals).
   - `main_loop2`: VM A lives in the thread's arena (global `"a"`) and VM B in a second arena, and each arena's `+900` slot holds the other's base. Per iteration: A steps 1–5, switch, B steps 1–5, `item2`, B steps 7–12, switch, A steps 7–12. A switch loads the peer into `LOCT_arena` and the global, and reloads SPB. Spill writes ma/mx to vm_state, sp_addr0/1 to `+904` and fprc to vm_state; fill reruns the prologue and reloads sp_addr0/1.
 - **Gates:** `light_mode_check --light-vms 2` checks both hashes of each pair against the portable interpreter. It alternates which VM is A, adds an odd single hash through the same module, and requires `rxjit_stat_light_pair_runs` to show that every pair ran in lockstep; all 12 combinations (both builds, arm/x86, feature bases 3/0/1) pass. A scratch run of the real `worker.js` in Node (st build, always-met target) re-verified 30 of 30 shares.
-- **Not measured yet.** Two 2 MB scratchpads per thread double the L2 footprint, which may cost more than the interleave gains on SMT. The `item2` register pressure (2 × 11 live i64/i32 values on x64's 16 GPRs) means spills.
+- **Measured slower** at 1/6/12 workers (−6%, −3%, −10%; every pair ran in lockstep). Two 2 MB scratchpads per thread double the L2 footprint, which costs most on SMT, and the `item2` register pressure (2 × 11 live i64/i32 values on x64's 16 GPRs) means spills. Stays off.
 
 **Open levers:**
-1. Measure 1/6/12 workers in Chromium.
-2. ~~Multi-VM lockstep~~ implemented behind `?light_vms=2` (above); measure 1/6/12 workers × 1/2 VMs.
+1. Measure 1/6/12 workers in Chromium (Node numbers above).
+2. ~~Multi-VM lockstep~~ implemented behind `?light_vms=2` (above); slower on Zen 3 at 1/6/12 workers. Might still be worth trying on arm.
 3. ~~A lower-latency mulh~~ tried (branch `nosab/mulh-lat`, not merged): 4 independent partial products cut the chain from ~11 to ~8 ops but add ~3 ops per mulh, and it was ~5% slower per item and ~3% slower in light H/s on Zen 3. The item is throughput-bound, not latency-bound, so only fewer ops per mulh would help. Might still be worth trying on arm.
-4. ~~Opt-in full replicas~~ **Done** (`?fb_full=K`, see §9.1).
+4. ~~Opt-in full replicas~~ **Done** (`?fb_full=K`, see §9.1); default K = 1 since `3f7ec77`.
 5. One cache build broadcast to all workers.
 6. OPFS persistence.
 
-### 9.1 Full replicas (`?fb_full=K`, K = 0–2)
+### 9.1 Full replicas (`?fb_full=K`, K = 0–2, default 1)
+**Default** (`3f7ec77`): K = 1 on the no-SAB path, since it wins at every measured width (+7% at 12 workers, +34% at 6) and its ~2.3 GB is about the SAB path's full-mode footprint. `?light=1` or a `navigator.deviceMemory` under 8 GB makes it 0; `?fb_full=0` opts out. K = 2 (+18% at 12) stays opt-in for its 4.6 GB. `nosab_bench.mjs --full` still defaults to 0.
+
 Workers 0..K-1 of the `NoSabPool` get a private dataset (~2.3 GB each: dataset + cache + heap); all N workers build it together per seed, then the replicas mine in full mode (1 thread, JIT) and the others stay light.
 - **`rxInitItemsInto(cache, dst, start, count)`** (`wasm_jit_compiler.cpp`, both builds): items into any buffer on the supjit kernel, regenerated per call with `dataset_base = dst - start*64` (the kernel's `out` wraps in i32 back to `dst`); falls back to `initDatasetItem`. The regen + compile is ~0.1 ms, and a fresh kernel runs at full speed from its first call.
 - **`public/fb_full.js`** (classic script: `RxFbFull` global, or `require()`): `FbCoordinator` (main thread) and `FbWorker` (worker side), shared by `miner.js`/`worker.js` and the Node pool (`bench/nosab_pool.mjs`).
@@ -250,5 +262,5 @@ Workers 0..K-1 of the `NoSabPool` get a private dataset (~2.3 GB each: dataset +
   - A light worker returns a transferable `HEAPU8.slice`; a replica computes its own chunks straight into its dataset (and shares them only with K = 2). The coordinator forwards to the replicas (clones first, the last one takes the buffer), each writes at `(randomx_get_dataset_memory(ds)>>>0) + start*64`.
   - A replica with all chunks gets `fb_finalize`: full-mode VM on the dataset, cache released, `mode: full`. A new seed (`job`) starts a new epoch; stale messages are dropped by seed.
   - `worker.js`: the mine loop yields to queued chunk work and runs 50 ms slices while a build is on (a replica's writes stuck behind a 900 ms slice would stall everyone at the in-flight cap). Without `fbRole` in `init` nothing changes.
-- **Build time** (correctness runs, not benches): 3 workers ≈ 16–17 s in Node (both K = 1 and 2), 4 workers with K = 2 ≈ 15 s in Chromium; about 1.3 µs per item per worker, so ~4 s at 12 workers if it scales.
+- **Build time**: 3 workers ≈ 16–17 s in Node (both K = 1 and 2), 4 workers with K = 2 ≈ 15 s in Chromium; 6 workers 8.8 s and 12 workers 7.4 s in Node benches (SMT: ~2× the 4 s a linear 1.3 µs/item/worker would give).
 - **Gates:** `bench/fb_full_check.mjs` (replicas built by 3 workers, K = 2: reference vectors + light interpreter, before and after a seed change); `supjit_check` now also compares `rxInitItemsInto` with `randomx_init_dataset` on random ranges (kernel and fallback, the dataset's top end past 2 GiB). `nosab_bench.mjs --full K` prints the build time and per-worker roles.
