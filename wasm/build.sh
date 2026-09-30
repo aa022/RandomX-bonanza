@@ -123,6 +123,7 @@ EXPORTED_FUNCTIONS='[
   "_rxInitDatasetStart",
   "_rxInitDatasetProgress",
   "_rxInitDatasetJoin",
+  "_rxInitItemsInto",
   "_rxMineBatchParallel",
   "_rxCreateMiningContext",
   "_rxMineBatchContext",

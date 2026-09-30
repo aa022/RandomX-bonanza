@@ -26,6 +26,10 @@ const params = new URLSearchParams(location.search);
 // randomx_st build (NoSabPool below), each in JIT'd light mode with its own
 // 256 MiB cache (~300 MB per worker; ?threads=N caps it).
 const noSab = params.get('sab') === '0' || window.crossOriginIsolated !== true;
+// ?fb_full=K (0..2, no SAB only): K of those workers become full-dataset
+// replicas (a private ~2.3 GB dataset each), built cooperatively by all workers
+// (fb_full.js); a worker that can't allocate one stays in light mode.
+const fbFull = noSab ? Math.max(0, Math.min(2, Math.floor(Number(params.get('fb_full')) || 0))) : 0;
 // Full-memory mode is the default. Opt out with ?light=1 (or legacy ?full=0).
 const fullMemory = !noSab && params.get('light') !== '1' && params.get('full') !== '0';
 // JIT defaults: on for all engines. The threaded-interpreter + V2-minimal
@@ -318,16 +322,34 @@ function handleJob(job) {
 // fans init/job/stop out (init with a disjoint nonce slot each), sums the
 // per-worker hashrates, passes shares and errors through, emits 'ready' once
 // all workers are ready, and forwards the chatty per-worker messages
-// (status/jit/profile) from worker 0 only.
+// (status/jit/profile) from worker 0 only. With fbFull = K, workers 0..K-1 are
+// replicas and an RxFbFull.FbCoordinator runs the dataset build per seed
+// (its progress as 'dataset_progress'); 'mode' reports the full/light split.
 class NoSabPool {
-  constructor(n, vTag) {
+  constructor(n, vTag, fbFull = 0) {
     this.onmessage = null;
     this.onerror = null;
     this.onmessageerror = null;
     this.workers = [];
     this.rates = new Array(n).fill(0);
     this.ready = new Set();
-    this.modeSent = false;
+    this.modes = new Array(n).fill(null);
+    this.modeSent = '';
+    this.full = Math.min(fbFull, n);
+    this.fb = null;
+    if (this.full > 0 && typeof RxFbFull !== 'undefined') {
+      this.fb = new RxFbFull.FbCoordinator({
+        n,
+        full: [...Array(this.full).keys()],
+        send: (i, m, transfer) => this.workers[i].postMessage(m, transfer || []),
+        progress: (done, total, etaSec) => this._emit({ type: 'dataset_progress', done, total, etaSec, threads: n }),
+        done: (seed, replicas) => this._emit({
+          type: 'status', message: `fb_full: ${replicas.length}/${this.full} replica(s) mining in full mode`,
+        }),
+      });
+    } else {
+      this.full = 0;
+    }
     for (let i = 0; i < n; i++) {
       const w = new Worker(`worker.js?v=${vTag}&build=st`, { name: `rx-st-${i}` });
       w.onmessage = (e) => this._recv(i, e.data);
@@ -342,6 +364,7 @@ class NoSabPool {
   }
 
   _recv(i, msg) {
+    if (this.fb && this.fb.recv(i, msg)) return;
     switch (msg.type) {
       case 'ready':
         this.ready.add(i);
@@ -351,12 +374,17 @@ class NoSabPool {
         this.rates[i] = msg.rate;
         this._emit({ type: 'hashrate', rate: this.rates.reduce((a, b) => a + b, 0) });
         break;
-      case 'mode':
-        if (!this.modeSent) {
-          this.modeSent = true;
-          this._emit({ ...msg, mode: `${msg.mode} (no SAB, ${this.workers.length} workers)` });
+      case 'mode': {
+        this.modes[i] = msg.mode;
+        const n = this.workers.length;
+        const nFull = this.modes.filter((m) => m === 'full').length;
+        const mode = nFull ? `${nFull} full + ${n - nFull} light (no SAB)` : `light (no SAB, ${n} workers)`;
+        if (mode !== this.modeSent) {
+          this.modeSent = mode;
+          this._emit({ ...msg, mode });
         }
         break;
+      }
       case 'share':
         this._emit(msg);
         break;
@@ -370,10 +398,13 @@ class NoSabPool {
 
   postMessage(msg) {
     if (msg.type === 'stop') this.rates.fill(0);
+    // a new seed starts a build (the workers report fb_cache once rekeyed)
+    if (this.fb && msg.type === 'job') this.fb.epoch(msg.seed_hash);
     const n = this.workers.length;
     this.workers.forEach((w, i) => {
       w.postMessage(msg.type === 'init'
-        ? { ...msg, fullMemory: false, datasetThreads: 1, datasetInitThreads: 1, nonceSlot: i, nonceSlots: n }
+        ? { ...msg, fullMemory: false, datasetThreads: 1, datasetInitThreads: 1, nonceSlot: i, nonceSlots: n,
+            ...(this.fb ? { fbRole: i < this.full ? 'full' : 'light' } : {}) }
         : msg);
     });
   }
@@ -397,11 +428,16 @@ function initWorker() {
   }
 
   const vTag = (window.MINER_BUILD || 'dev').replace(/[^a-zA-Z0-9-]/g, '');
-  state.worker = noSab ? new NoSabPool(datasetThreads, vTag) : new Worker(`worker.js?v=${vTag}`);
+  state.worker = noSab ? new NoSabPool(datasetThreads, vTag, fbFull) : new Worker(`worker.js?v=${vTag}`);
   log(`build=${window.MINER_BUILD || '?'} (cside-jit split)`);
   if (noSab) {
     log(`No SharedArrayBuffer${params.get('sab') === '0' ? ' (forced by ?sab=0)' : ''}: ` +
         `${datasetThreads} single-thread light-mode workers (randomx_st, ~300 MB each)`);
+    if (fbFull) {
+      log(state.worker.full
+        ? `fb_full=${fbFull}: ${state.worker.full} of them build and mine on a full dataset replica (~2.3 GB each)`
+        : `fb_full=${fbFull}: fb_full.js not loaded, staying in light mode`);
+    }
   }
   if (!enableJit) {
     log('JIT disabled by URL param.');

@@ -6,14 +6,15 @@
 // the URL rather than the init message.
 const stBuild = /[?&]build=st(&|$)/.test((self.location && self.location.search) || '');
 const rxScript = stBuild ? 'randomx_st.js' : 'randomx.js';
-(() => {
+const rxVersion = (() => {
   let v = 'dev';
   try {
     const m = (self.location && self.location.search || '').match(/[?&]v=([^&]+)/);
     if (m) v = m[1];
   } catch (_) {}
-  importScripts(`${rxScript}?v=${encodeURIComponent(v)}`);
+  return encodeURIComponent(v);
 })();
+importScripts(`${rxScript}?v=${rxVersion}`);
 
 let Module = null;
 let vm = null;
@@ -40,6 +41,10 @@ let lastProfilePost = 0;
 // NoSabPool: this worker's slice of the 32-bit nonce space (slot of slots).
 let nonceSlot = 0;
 let nonceSlots = 1;
+// NoSabPool ?fb_full=K (randomx_st only): this worker's part of the cooperative
+// full-dataset build (fb_full.js FbWorker; init fbRole 'full' = replica).
+let fb = null;
+let fbPaused = false;
 
 let currentJob = null;
 let pendingJob = null;
@@ -419,6 +424,19 @@ async function init(options = {}) {
     if (profileCore) api.profile_reset();
   }
 
+  if (stBuild && (options.fbRole === 'full' || options.fbRole === 'light')) {
+    importScripts(`fb_full.js?v=${rxVersion}`);
+    fb = new RxFbFull.FbWorker({
+      Module,
+      full: options.fbRole === 'full',
+      post: (m, transfer) => postMessage(m, transfer || []),
+      seed: () => currentSeedHash,
+      cache: () => cache || 0,
+      finalize: fbFinalize,
+      log: (message) => postMessage({ type: 'status', message }),
+    });
+  }
+
   postJitStats();
   postMessage({ type: 'ready' });
 }
@@ -630,11 +648,36 @@ async function buildCache(seedHash) {
   currentSeedHash = seedHash;
   Module._free(seedPtr);
   postMessage({ type: 'status', message: 'Ready to mine' });
+  if (fb) fb.cacheReady(seedHash);
+  return true;
+}
+
+// fb_full replica with every chunk: full-mode VM on the dataset, drop the cache.
+function fbFinalize(ds) {
+  const v = api.create_vm(4, null, ds); // RANDOMX_FLAG_FULL_MEM
+  if (!v) return false;
+  if (vm) api.destroy_vm(vm);
+  vm = v;
+  api.release_cache(cache);
+  cache = null;
+  postMessage({ type: 'status', message: 'fb_full: dataset replica complete, released cache' });
+  postMessage({ type: 'mode', mode: 'full' });
   return true;
 }
 
 function mineLoop() {
   if (!mining) return;
+
+  // fb_full chunk work goes first (the build is what everyone waits for), and
+  // while a build is on, short slices let its messages in between.
+  if (fb && fb.busy()) {
+    if (!fbPaused && currentJob) postMessage({ type: 'hashrate', rate: 0 });
+    fbPaused = true;
+    setTimeout(mineLoop, 20);
+    return;
+  }
+  fbPaused = false;
+  const sliceMs = fb && fb.active() ? 50 : 900;
 
   // Pick up new job if available
   if (pendingJob) {
@@ -661,7 +704,7 @@ function mineLoop() {
   const useParallelMining = fullMemory && datasetThreads > 1 && mineCtx && api.mine_batch_context;
 
   // Hash until ~1 second has passed, then yield
-  while (performance.now() - start < 900) {
+  while (performance.now() - start < sliceMs) {
     if (useParallelMining) {
       const batchCount = Math.max(datasetThreads, datasetThreads * 2);
       const batchJob = currentJob;
@@ -799,5 +842,7 @@ self.onmessage = function(e) {
       currentJob = null;
       pendingJob = null;
       break;
+    default:
+      if (fb) fb.handle(msg); // fb_* chunk messages (NoSabPool ?fb_full)
   }
 };
