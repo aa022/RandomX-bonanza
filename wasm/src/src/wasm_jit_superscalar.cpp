@@ -15,7 +15,7 @@
 //   5   mixBlock       (i32)
 //   6   r0..r7         (i64 ×8) → indices 6..13
 //   14  registerValue  (i64)
-//   15  tmp64          (i64) scratch
+//   15  tmp64          (i64) qword 0 of the mix block, loaded early (emit_item_compute)
 //   16  mt             (i64) inline mulh temp
 #include "wasm_jit_superscalar.h"
 #include "wasm_jit_macros.h"
@@ -136,73 +136,34 @@ static inline int RREG(int idx) {
 // ---------- Per-instruction emission ----------
 
 // Inline 64x64 -> high 64 multiply of locals a, b; pushes hi. Hacker's
-// Delight mulhu as in wasm_jit_threaded.c emit_mulh_inline:
-//   t  = aH*bL + ((aL*bL) >> 32)
+// Delight mulhu/mulhs (M = 0xffffffff):
+//   t  = aH*bL + ((aL*bL) >>u 32)
 //   hi = aH*bH + (t >> 32) + ((aL*bH + (t & M)) >> 32)
-// Signed: hi -= ((a >> 63) & b) + ((b >> 63) & a). V8 does not inline the
-// call-based stubs; the calls were ~40% of the item time (1T, x64).
+// Unsigned: every >> is logical and aH/bH = a/b >>u 32. Signed ("shd"): aH,
+// bH and the two t-derived shifts are arithmetic (aH/bH are the signed high
+// halves, every partial product fits in an i64), which gives mulhs directly
+// with no ((a >> 63) & b) correction; aL*bL >> 32 stays logical. V8 does not
+// inline the call-based stubs; the calls were ~40% of the item time (1T, x64).
 static uint32_t emit_mulh_inline(int a, int b, bool is_signed, uint8_t *buf) {
 	THUNK_BEGIN;
-	// t = aH*bL + ((aL*bL) >> 32)
-	LG(a);
-	WI64_CONST(32);
-	I64_SHR_U();
-	LG(b);
-	WI64_CONST(0xffffffffLL);
-	I64_AND();
-	I64_MUL();
-	LG(a);
-	WI64_CONST(0xffffffffLL);
-	I64_AND();
-	LG(b);
-	WI64_CONST(0xffffffffLL);
-	I64_AND();
-	I64_MUL();
-	WI64_CONST(32);
-	I64_SHR_U();
-	I64_ADD();
+#define HSHR() do { if (is_signed) I64_SHR_S(); else I64_SHR_U(); } while (0)
+	// t = aH*bL + ((aL*bL) >>u 32)
+	LG(a); WI64_CONST(32); HSHR();
+	LG(b); WI64_CONST(0xffffffffLL); I64_AND(); I64_MUL();
+	LG(a); WI64_CONST(0xffffffffLL); I64_AND();
+	LG(b); WI64_CONST(0xffffffffLL); I64_AND(); I64_MUL();
+	WI64_CONST(32); I64_SHR_U(); I64_ADD();
 	LS(LK_mt);
 	// (aL*bH + (t & M)) >> 32
-	LG(a);
-	WI64_CONST(0xffffffffLL);
-	I64_AND();
-	LG(b);
-	WI64_CONST(32);
-	I64_SHR_U();
-	I64_MUL();
-	LG(LK_mt);
-	WI64_CONST(0xffffffffLL);
-	I64_AND();
-	I64_ADD();
-	WI64_CONST(32);
-	I64_SHR_U();
+	LG(a); WI64_CONST(0xffffffffLL); I64_AND();
+	LG(b); WI64_CONST(32); HSHR(); I64_MUL();
+	LG(LK_mt); WI64_CONST(0xffffffffLL); I64_AND(); I64_ADD();
+	WI64_CONST(32); HSHR();
 	// + aH*bH + (t >> 32)
-	LG(a);
-	WI64_CONST(32);
-	I64_SHR_U();
-	LG(b);
-	WI64_CONST(32);
-	I64_SHR_U();
-	I64_MUL();
-	I64_ADD();
-	LG(LK_mt);
-	WI64_CONST(32);
-	I64_SHR_U();
-	I64_ADD();
-	if (is_signed) {
-		LG(a);
-		WI64_CONST(63);
-		I64_SHR_S();
-		LG(b);
-		I64_AND();
-		I64_SUB();
-		LG(b);
-		WI64_CONST(63);
-		I64_SHR_S();
-		LG(a);
-		I64_AND();
-		I64_SUB();
-	}
+	LG(a); WI64_CONST(32); HSHR();
+	LG(b); WI64_CONST(32); HSHR(); I64_MUL(); I64_ADD();
+	LG(LK_mt); WI64_CONST(32); HSHR(); I64_ADD();
+#undef HSHR
 	THUNK_END;
 }
 
@@ -308,13 +269,18 @@ static uint32_t emit_mix_addr(uint32_t cache_base, uint8_t *buf) {
 	THUNK_END;
 }
 
-// Emit the cache-line XOR: r[q] ^= load64(mixBlock + q*8) for q in 0..8.
+// Emit the cache-line XOR: r[q] ^= load64(mixBlock + q*8) for q in 0..8
+// (q = 0 from tmp64, loaded right after emit_mix_addr).
 static uint32_t emit_mix_xor(uint8_t *buf) {
 	THUNK_BEGIN;
 	for (int q = 0; q < 8; ++q) {
 		LG(RREG(q));
-		LG(LK_mixBlock);
-		I64_LOAD_OFF((uint32_t)(q * 8));
+		if (q == 0) {
+			LG(LK_tmp64); // loaded early, right after emit_mix_addr
+		} else {
+			LG(LK_mixBlock);
+			I64_LOAD_OFF((uint32_t)(q * 8));
+		}
 		I64_XOR();
 		LS(RREG(q));
 	}
@@ -378,6 +344,11 @@ static uint32_t emit_item_compute(const randomx::DecodedSuperscalarProgram progr
 		const auto &prog = programs[i];
 		// mixBlock = cache + (registerValue & mask) * 64
 		p += emit_mix_addr(cache_base, p);
+		// tmp64 = mem[mixBlock]: the cache miss issues before the program
+		// instead of at the xor after it
+		LG(LK_mixBlock);
+		I64_LOAD_OFF(0);
+		LS(LK_tmp64);
 		// execute program (inlined)
 		p += emit_super_program(prog, p);
 		// r[q] ^= mem[mixBlock + q*8]
