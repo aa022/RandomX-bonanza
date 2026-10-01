@@ -2,7 +2,7 @@
 
 Updated: 2026-10-01.
 
-**Status: runtime 0.2.1 is committed and pushed on `embed-v0.2.0-demo` at `cdebaa57f2855d657c0424fe0e405c4aad8af839`; the user deployed `netlify-demo/` at https://fluffy-elf-267140.netlify.app/ against it. Runtime 0.2.1 fixes background sessions; genuine public-pool share acceptance is still pending. Embed 0.3.0 (light-mode worker pool, [below](#embed-030-2026-10-01), plus the RAM budget [below](#light-mode-budget-2026-10-01-after-the-configurator)) is committed locally at `9f0561bd4dc6ff2a710569ec65e88057913c6a37` (it supersedes the unpushed `2f5603e`, `d71ea8b`, `cedc1a3`, `9473ea5` and `f2594c7`), and `netlify-demo/` is now the operator configurator pinned to it ([below](#configurator-2026-10-01)); neither is pushed, so jsDelivr and the live site still serve 0.2.1.**
+**Status: runtime 0.2.1 is committed and pushed on `embed-v0.2.0-demo` at `cdebaa57f2855d657c0424fe0e405c4aad8af839`; the user deployed `netlify-demo/` at https://fluffy-elf-267140.netlify.app/ against it. Runtime 0.2.1 fixes background sessions; genuine public-pool share acceptance is still pending. Embed 0.3.0 (light-mode worker pool, [below](#embed-030-2026-10-01), plus the RAM budget [below](#light-mode-budget-2026-10-01-after-the-configurator)) is committed locally at `ccae3cae408a728b039aa19a6c8d0dc953c779fa` (it supersedes the unpushed `2f5603e`, `d71ea8b`, `cedc1a3`, `9473ea5` and `f2594c7`), and `netlify-demo/` is now the operator configurator pinned to it ([below](#configurator-2026-10-01)); neither is pushed, so jsDelivr and the live site still serve 0.2.1.**
 
 ## Completed
 
@@ -206,7 +206,7 @@ Checked: unit tests 59/59, the real-Chrome suite, and randomx.cc's configurator 
 `netlify-demo/` replaces the single-widget test page with the operator's
 pre-deployment configurator (first draft; the form design is to be iterated
 with the user). The page is `index.html`, `configurator.js` and
-`configurator.css`. It pins embed 0.3.0 at `9f0561bd4dc6ff2a710569ec65e88057913c6a37`.
+`configurator.css`. It pins embed 0.3.0 at `ccae3cae408a728b039aa19a6c8d0dc953c779fa`.
 It has payout/bridge fields with Advanced options, a Full / Light switch, and
 a full-mode panel: the headers, what they can break, and a choice between
 arming them and switching to light. A light panel covers replicas, and a
