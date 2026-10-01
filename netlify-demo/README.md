@@ -6,7 +6,13 @@ Netlify's manual deploy interface. Its contents are the site's publish
 directory; keep `_headers` beside `index.html`. No build command or
 dependency installation is needed.
 
-## The page
+## The pages
+
+- `presets/*.html`: one live widget per page with the snippet that creates
+  exactly that widget below it (`presets/presets.js` builds both from one
+  config object). Full · 20 / 50 / 80 %; gentle light (20 % CPU, 40 % RAM,
+  6 GB cap, no full-dataset workers); mild light (50 / 50 %, 8 GB, boost on);
+  harsh light (80 / 80 %, 12 GB, boost on). The configurator links them.
 
 - `index.html`: the form, from top to bottom.
   1. **Payout and bridge**: wallet, pool, port and WebSocket bridge.
@@ -18,13 +24,14 @@ dependency installation is needed.
        two choices. Either arm the headers (copyable block, Netlify / nginx /
        Apache hints) or **Switch to light** in one click. It also says whether
        this page itself is isolated (`RandomXEmbed.diagnose('full').modes`).
-     - **Light** shows its own panel: what light workers cost, and
-       full-dataset replicas 0 / 1 / 2 with their RAM and seed-change
-       rebuilds.
-     - Both modes take a CPU workload % and an optional thread/worker ceiling
-       (`maxThreads`). An "On this device" estimate comes from
-       `RandomXEmbed.plan()`: threads or workers, replicas and RAM. Visitors'
-       devices differ.
+     - **Light** shows its own panel: RAM % of the reported RAM, the RAM cap
+       where none is reported, and the full-dataset boost (`replicas:
+       'auto'`), which the workers build before they mine.
+     - Both modes take a CPU workload %; full mode also an optional thread
+       ceiling (`maxThreads`) and ARM halving (`optimizeArm`). An "On this
+       device" estimate comes from `RandomXEmbed.plan()`: threads, the RAM
+       budget, light and full-dataset workers and RAM. Visitors' devices
+       differ.
   3. **Visitor interface**: widget or headless API, and quickstart consent.
   4. **Snippet**: regenerated on every change and validated by `plan()`; it
      creates no instance and opens no network connection. A full-mode snippet

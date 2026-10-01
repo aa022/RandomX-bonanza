@@ -135,7 +135,9 @@ silicon and big.LITTLE parts; light mode ignores it (its workers are
 independent, so efficiency cores only add). The form accepts 0–80%; runtime
 controls follow the device's cap. A percentage
 too small to allow one thread cannot start. The widget shows the effective
-CPU percentage and resulting thread count. Changing workload stops the session and requires
+CPU percentage and resulting thread count, the threads (in light mode the
+full-dataset/light split, as planned until the datasets are built), the RAM
+estimate and a **Dataset init** bar (hidden in light mode without replicas). Changing workload stops the session and requires
 consent again. Only one embed instance on a page may mine at a time.
 
 **Full-mode dataset initialization uses `initThreads` threads** (default 32),

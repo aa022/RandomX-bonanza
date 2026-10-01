@@ -442,7 +442,10 @@ async function waitUntil(check, timeout = 30000) {
     const open = await openLight('/open', { maxThreads: 3, nonceMode: 'nicehash' });
     const openChecks = await open.evaluate(() => ({ isolated: crossOriginIsolated, sab: typeof SharedArrayBuffer,
       full: RandomXEmbed.diagnose(), light: RandomXEmbed.diagnose('light'), error: rxMiner.state.error, engine: rxMiner.state.engine,
-      disclosure: document.querySelector('.randomx-embed').shadowRoot.querySelector('.details').textContent }));
+      disclosure: document.querySelector('.randomx-embed').shadowRoot.querySelector('.details').textContent,
+      rows: (r => ({ engine: r.querySelector('.engine').textContent, ram: r.querySelector('.ram').textContent,
+        init: r.querySelector('.init').hidden }))(document.querySelector('.randomx-embed').shadowRoot) }));
+    assert.deepEqual(openChecks.rows, { engine: '3 light threads', ram: 'about 0.9 GB', init: true }, 'no dataset row without replicas');
     assert.equal(openChecks.isolated, false); assert.equal(openChecks.sab, 'undefined');
     assert.equal(openChecks.full.supported, false); assert.deepEqual(openChecks.full.modes, { full: false, light: true });
     assert.equal(openChecks.light.supported, true); assert.deepEqual(openChecks.light.issues, []); assert.equal(openChecks.error, null);
@@ -530,6 +533,10 @@ async function waitUntil(check, timeout = 30000) {
     const built = await replica.evaluate(() => ({ names: rx.names, early: rx.early }));
     assert.deepEqual(built.names, ['rx-st-0', 'rx-st-1', 'rx-st-2'], 'the workers build the dataset themselves');
     assert.equal(built.early, 0, 'no worker hashed before the full dataset was built');
+    const rows = await replica.evaluate(() => { const r = document.querySelector('.randomx-embed').shadowRoot;
+      return { engine: r.querySelector('.engine').textContent, ram: r.querySelector('.ram').textContent,
+        init: r.querySelector('.init').hidden, label: r.querySelector('.init span').textContent, pct: r.querySelector('.pct').textContent }; });
+    assert.deepEqual(rows, { engine: '1 full-dataset + 2 light threads', ram: 'about 3.2 GB', init: false, label: 'Dataset init', pct: '100%' });
     assert.ok(light.shares.every(share => nonceSlot(share.nonce, 3, false) === share.worker));
     sharesOf.replica = (await stopLight(replica, 3)).shares;
     console.log('PASS: light mode with replicas: 1 loads fb_full.js, builds worker 0\'s full dataset on the 3 workers before any mining, then mines with accepted shares');

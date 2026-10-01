@@ -377,7 +377,8 @@
     letter-spacing:.22em;font-size:11px;text-transform:uppercase;display:flex;justify-content:space-between;gap:12px}
     .body{padding:16px}p{line-height:1.65;margin:0 0 12px} .details{font-size:11px;overflow-wrap:anywhere;color:#4a4640}
     .stats{display:grid;grid-template-columns:100px 1fr;gap:8px;margin:14px 0} .stats span:nth-child(odd){color:#4a4640}
-    .bar{letter-spacing:.08em;color:#ff3b8a;overflow:hidden;white-space:nowrap;margin:12px 0}label{display:block;line-height:1.6}
+    .init{display:grid;grid-template-columns:100px minmax(0,1fr) auto;gap:8px;margin:12px 0}.init[hidden]{display:none}
+    .init span:first-child{color:#4a4640}.bar{letter-spacing:.08em;color:#ff3b8a;overflow:hidden;white-space:nowrap}label{display:block;line-height:1.6}
     .consent{margin:14px 0}input[type=range]{width:100%;accent-color:#ff3b8a} input[type=checkbox]{accent-color:#ff3b8a}
     button{font:inherit;cursor:pointer;border:1px solid #6e6b62;background:transparent;color:inherit;padding:8px 12px}
     button:hover{color:#ff3b8a}button:disabled{opacity:.45;cursor:default}button:focus-visible,input:focus-visible{outline:2px solid #ff3b8a;outline-offset:3px}
@@ -387,7 +388,7 @@
     .mini{border:0;padding:0;font-size:11px}.collapsed .body{display:none}.summary{padding:12px 16px;display:flex;gap:14px;align-items:center}
     .summary[hidden]{display:none}.summary .rate{flex:1}.summary button{font-size:11px;padding:5px 8px}
     @media(prefers-color-scheme:dark){.widget{background:#1a1815;color:#f2ede4;border-color:#888579;box-shadow:5px 5px 0 #4b2839}
-    .details,.stats span:nth-child(odd){color:#c0b9aa}}
+    .details,.stats span:nth-child(odd),.init span:first-child{color:#c0b9aa}}
   `;
 
   function create(input = {}) {
@@ -874,8 +875,9 @@
       panel.className = 'widget'; panel.setAttribute('aria-label', 'Monero mining controls');
       panel.innerHTML = `<header><span>randomx bonanza · ${VERSION}</span><button class="mini" aria-expanded="true">[−]</button></header>
         <div class="body"><p>Monero mining</p><p class="details"></p>
-        <div class="stats"><span>Hashrate</span><span class="rate">0 H/s</span><span>Shares</span><span class="shares">0 / 0</span></div>
-        <div class="bar" aria-hidden="true">${'▱'.repeat(24)}</div>
+        <div class="stats"><span>Hashrate</span><span class="rate">0 H/s</span><span>Shares</span><span class="shares">0 / 0</span>
+        <span>Threads</span><span class="engine"></span><span>RAM</span><span class="ram"></span></div>
+        <div class="init"><span>Dataset init</span><span class="bar" aria-hidden="true">${'▱'.repeat(24)}</span><span class="pct">0%</span></div>
         <label>CPU: <output></output><input class="workload" type="range" min="0" max="${MAX_WORKLOAD}" step="1" aria-label="CPU percentage"></label>
         ${config.quickstart ? '' : '<label class="consent"><input type="checkbox"> I understand and agree to use my device for this session.</label>'}
         <div class="controls"><button class="start">Start</button><button class="stop" disabled>Stop</button></div>
@@ -897,8 +899,16 @@
         $('.diagnostics').hidden = !s.error;
         $('output').textContent = `${Number(s.effectivePercentage.toFixed(1))}% · ${s.threads}/${s.limits.cores} threads`;
         $('.shares').textContent = `${s.accepted} accepted / ${s.rejected} rejected`;
+        // Light: the full-dataset/light split, as planned until the build is done.
+        const e = s.engine, full = e.mode === 'light' ? (s.progress >= 1 ? e.replicasActive : e.replicas) : 0;
+        $('.engine').textContent = e.mode === 'full' ? `${count(s.threads, 'thread')} on the shared dataset` :
+          full ? `${full} full-dataset + ${count(e.workers - full, 'light thread')}` : count(e.workers, 'light thread');
+        $('.ram').textContent = e.mode === 'full' ? 'about 2.5 GiB' : `about ${(e.memoryMiB / 1000).toFixed(1)} GB`;
+        // Light mode without replicas has no dataset to initialize.
+        $('.init').hidden = e.mode === 'light' && !e.replicas;
         const filled = Math.round(s.progress * 24);
         $('.bar').textContent = '▰'.repeat(filled) + '▱'.repeat(24 - filled);
+        $('.pct').textContent = Math.round(s.progress * 100) + '%';
         $('.summary .rate').textContent = s.hashrate.toFixed(0) + ' H/s · ' + s.phase;
         $('.summary .stop').disabled = !s.running && s.phase !== 'consent';
       });

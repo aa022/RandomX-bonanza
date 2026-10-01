@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Mild light · RandomX embed preset</title>
+  <meta name="description" content="Light mode on 50 % of the cores within 50 % of the reported RAM, or 8 GB where none is reported. Full-dataset boost on: the embed gives up to two workers a private full dataset where the budget holds it, and builds it on the workers before they mine. Runs on any page.">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../configurator.css">
+  <!-- scripts/serve-demo.mjs rewrites this pin to the local dist/ for development. -->
+  <script defer crossorigin="anonymous" data-auto="false"
+    src="https://cdn.jsdelivr.net/gh/aa022/RandomX-bonanza@cedc1a30a048240824d63860202a798a1d589f8f/dist/embed.js"></script>
+  <script defer src="./presets.js"></script>
+</head>
+<body data-preset="mild-light">
+  <header class="bar"><span>randomx bonanza · embed preset</span><span id="embedVersion"></span></header>
+  <main>
+    <nav class="presets" aria-label="Presets">
+      <a href="../">Configurator</a>
+      <ul>
+      <li><a href="./full-20.html">Full · 20 %</a></li>
+      <li><a href="./full-50.html">Full · 50 %</a></li>
+      <li><a href="./full-80.html">Full · 80 %</a></li>
+      <li><a href="./gentle-light.html">Gentle light</a></li>
+      <li><a href="./mild-light.html" aria-current="page">Mild light</a></li>
+      <li><a href="./harsh-light.html">Harsh light</a></li>
+      </ul>
+    </nav>
+    <h1>Mild light</h1>
+    <p class="lede">Light mode on 50 % of the cores within 50 % of the reported RAM, or 8 GB where none is reported. Full-dataset boost on: the embed gives up to two workers a private full dataset where the budget holds it, and builds it on the workers before they mine. Runs on any page.</p>
+    <p class="note">The widget is live: after you agree and press Start, this device mines for the demo's donation wallet
+      through the public relay. Stop, or leaving the page, ends it.</p>
+    <p id="loadError" class="alert" role="alert" hidden></p>
+    <div id="randomx-miner"></div>
+
+    <section aria-labelledby="snippetTitle">
+      <h2 id="snippetTitle">Snippet for this widget</h2>
+      <pre id="snippet" class="snippet" tabindex="0"></pre>
+      <p class="row"><button type="button" id="copySnippet" class="primary">Copy snippet</button>
+        <span id="copyStatus" role="status" aria-live="polite"></span></p>
+    </section>
+  </main>
+</body>
+</html>

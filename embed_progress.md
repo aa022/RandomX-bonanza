@@ -184,6 +184,16 @@ visitor device (README "Light mode").
 - The 2.25 weight is an x86 (5600X) figure; it needs the idle-machine bench
   pass on the M4 (0/1/2 replicas), along with the build time per worker count.
 
+## Presets and widget rows, 2026-10-01
+
+- `netlify-demo/presets/`: six one-widget pages (full 20 / 50 / 80 %; gentle
+  light 20 % CPU, 40 % RAM, 6 GB cap, no full dataset; mild light 50 / 50 %,
+  8 GB, boost; harsh light 80 / 80 %, 12 GB, boost), each with the snippet
+  that creates exactly that widget (`presets.js`, one config object). The
+  configurator links them.
+- The widget gains a Threads row (light: full-dataset + light split), a RAM
+  row and a labelled **Dataset init** bar with a percentage.
+
 ## Configurator, 2026-10-01
 
 `netlify-demo/` replaces the single-widget test page with the operator's
