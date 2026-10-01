@@ -32,8 +32,10 @@ INIT_THREADS ?= 32
 DURATION     ?= 30
 PROFILE      ?= auto
 EXTRA        ?=
+DEMO_PORT    ?= 8090
+DEMO_ARGS    ?=
 
-.PHONY: all help install build embed serve bench test test-embed clean fclean re
+.PHONY: all help install build embed demo serve bench test test-embed clean fclean re
 
 # Target dep graph:
 #   install ──→ deps stamp ──┐
@@ -55,6 +57,7 @@ help:
 	@printf '  build     compile public/randomx{,_st}.{js,wasm}\n'
 	@printf '  embed     build the jsDelivr-ready distribution in dist/\n'
 	@printf '  test-embed  run embed lifecycle and consent checks\n'
+	@printf '  demo      serve the netlify-demo/ configurator with dist/ on http://localhost:$(DEMO_PORT)\n'
 	@printf '  serve     build + run the proxy on http://localhost:8080\n'
 	@printf '  test      canonical RandomX hash smoke test\n'
 	@printf '  bench     full-memory hashrate sweep (mirrors the webui)\n'
@@ -64,6 +67,7 @@ help:
 	@printf '\n'
 	@printf 'Bench knobs:  SWEEP=$(SWEEP)  INIT_THREADS=$(INIT_THREADS)  DURATION=$(DURATION)  EXTRA=<bench_webui flags>\n'
 	@printf '              PROFILE=$(PROFILE)  JIT generator profile: auto (x86 on x86-64 hosts, else arm) | arm | x86\n'
+	@printf 'Demo knobs:   DEMO_PORT=$(DEMO_PORT)  DEMO_ARGS=--no-isolation (serve the page without COOP/COEP)\n'
 
 # ─── install / toolchain check ──────────────────────────────────────────
 # Per-platform install hints surfaced inline on failure — no sub-make.
@@ -129,6 +133,11 @@ embed: build
 
 test-embed:
 	@node --test tests/embed.test.cjs
+
+# The configurator as Netlify serves it (netlify-demo/_headers), with the
+# jsDelivr pin rewritten to this checkout's dist/. No build: dist/ is committed.
+demo:
+	@node scripts/serve-demo.mjs --port $(DEMO_PORT) $(DEMO_ARGS)
 
 # ─── serve ──────────────────────────────────────────────────────────────
 serve: build

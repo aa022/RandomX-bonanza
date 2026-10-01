@@ -1,30 +1,99 @@
-# Netlify embed test
+# Embed configurator (Netlify)
 
-Drag this entire directory into Netlify's manual deploy interface. Its contents
-are the site's publish directory; keep `_headers` beside `index.html`.
-No build command or dependency installation is needed.
+This directory is the operator's pre-deployment configurator for the RandomX
+embed, published as a static Netlify site. Drag the entire directory into
+Netlify's manual deploy interface. Its contents are the site's publish
+directory; keep `_headers` beside `index.html`. No build command or
+dependency installation is needed.
 
-The page imports the embed and its runtime from jsDelivr, pinned to commit
-`cdebaa57f2855d657c0424fe0e405c4aad8af839` on `embed-v0.2.0-demo`. The files
-in `dist/` are not uploaded to Netlify. All runtime assets resolve from the
-same pinned CDN directory.
+## The page
 
-Configured endpoint: `wss://proxy.randomx.cc/embed-ws`, with pool
-`pool.supportxmr.com:3333`. `demo.js` contains the operator-confirmed donation
-wallet from `config.js`. Explicit NiceHash mode preserves byte 42 even if the
-relay omits extension flags; required `keepalived` runs every 15 seconds after
-login. The proxy must accept the deployed site's Origin if it restricts origins.
+- `index.html`: the form, from top to bottom.
+  1. **Payout and bridge**: wallet, pool, port and WebSocket bridge.
+     **Advanced** holds the worker name, bridge routing, nonce mode, keepalive
+     and script URL.
+  2. **Engine mode**: the Full / Light switch.
+     - **Full** shows a warning panel: the COOP/COEP/Permissions-Policy
+       headers the embedding page must send, what arming them can break, and
+       two choices. Either arm the headers (copyable block, Netlify / nginx /
+       Apache hints) or **Switch to light** in one click. It also says whether
+       this page itself is isolated (`RandomXEmbed.diagnose('full').modes`).
+     - **Light** shows its own panel: what light workers cost, and
+       full-dataset replicas 0 / 1 / 2 with their RAM and seed-change
+       rebuilds.
+     - Both modes take a CPU workload % and an optional thread/worker ceiling
+       (`maxThreads`). An "On this device" estimate comes from
+       `RandomXEmbed.plan()`: threads or workers, replicas and RAM. Visitors'
+       devices differ.
+  3. **Visitor interface**: widget or headless API, and quickstart consent.
+  4. **Snippet**: regenerated on every change and validated by `plan()`; it
+     creates no instance and opens no network connection. A full-mode snippet
+     starts with an HTML comment listing the required headers. **Copy
+     snippet** copies it, and **Deployment notes** cover asset hosting, CSP
+     and the bridge's Origin policy.
+  5. **Preview on this device**: runs the configured settings through the
+     embed this page loaded. Its mining is real: it pays the configured wallet
+     through the configured pool and bridge, but only after consent and Start.
+- `configurator.js`: the form logic. The snippet generation, HTML/JSON
+  escaping and the consent notice follow `public/embed-builder.js`.
+- `configurator.css`: the widget's look (monospace, paper/ink, pink accent,
+  hard offset shadow) with dark mode via `prefers-color-scheme`.
+- `_headers`: COOP `same-origin`, COEP `require-corp` and
+  `Permissions-Policy: cross-origin-isolated=(self)`. These make this page
+  cross-origin isolated, so the preview can run full mode. Light mode runs
+  with or without them.
 
-The normal widget displays the payout, pool and resource disclosure. Mining
-requires a checked consent box and a trusted Start click; loading the page
-does not initialize the engine or connect to the proxy. Stop and page unload
-end the session and require fresh consent. Approved mining continues in
-background tabs, subject to browser throttling or suspension. Default mining workload is 50%;
-full dataset initialization uses 32 threads and roughly 2.5 GiB of RAM.
+Loading the page does not start an engine, a worker or a WebSocket. The
+preview follows the embed's consent rules: the widget's checkbox and a trusted
+Start click (or the site consent notice for headless/quickstart). Stop,
+**Remove preview** and leaving the page end the session.
 
-After deploying, check the widget, consent, hashrate and genuine pool-accepted
-shares. Test a proxy restart, including while the tab is in the background: transport retries
-should reuse the same-seed dataset. Browser diagnostics are available in the
-widget's Deployment details and in `window.demoMiner.state` /
-`window.demoMiner.diagnostics`. The public VPS/pool path still needs this live
-acceptance test; local fixtures did not validate acceptance by the real pool.
+## The pin
+
+The page loads `embed.js` (`data-auto="false"`, `crossorigin`) from jsDelivr,
+pinned to commit `2f5603ecb1f3b5291649b7c661ee5cd94912a5e3` on
+`embed-v0.2.0-demo` (embed 0.3.0). The engine assets resolve from the same
+pinned `dist/` directory, and nothing from `dist/` is uploaded to Netlify. The
+**Script URL** field defaults to the embed this page loaded, so exported
+snippets carry the same pin.
+
+jsDelivr serves that commit only once it is pushed to GitHub. To move the
+pin, commit `dist/` first. Then change the SHA in `index.html` (and here) in
+a later commit, and never rewrite the pinned commit.
+
+## Defaults
+
+The form is prefilled with the former test page's values:
+
+- bridge `wss://proxy.randomx.cc/embed-ws`;
+- pool `pool.supportxmr.com:3333`;
+- the operator-confirmed donation wallet from `config.js`;
+- worker `netlify-demo`;
+- NiceHash nonce mode, which preserves byte 42 even if the relay omits
+  extension flags;
+- required `keepalived` every 15 seconds;
+- full mode at 50 % workload.
+
+The bridge must accept the deployed site's Origin if it restricts origins.
+
+## Local testing
+
+    make demo                            # http://localhost:8090, with _headers (isolated)
+    make demo DEMO_ARGS=--no-isolation   # the same page without COOP/COEP
+    make demo DEMO_PORT=9000             # another port
+
+`scripts/serve-demo.mjs` (Node built-ins only) serves this directory. It
+rewrites the jsDelivr pin in the HTML to a local `/dist/` route, served from
+the checkout's `dist/` with `Access-Control-Allow-Origin: *` and
+`Cross-Origin-Resource-Policy: cross-origin`, as jsDelivr does. `_headers`
+applies to the page as on Netlify. `--no-isolation` drops COOP/COEP, which
+shows the full-mode warning on a page that is not isolated and lets light
+mode be tested there. Snippets exported from the local page point at
+`http://localhost:8090/dist/embed.js`, so they also work from other local
+origins.
+
+For a preview that does not touch a real pool, point the bridge field at a
+local test bridge (for example the reference `proxy/index.js` configured for a
+fixture pool, as `tests/embed-browser.cjs` does). After deploying, check the
+live page's isolation headers and that the pinned jsDelivr assets return
+HTTP 200 with the hashes in `dist/manifest.json`.

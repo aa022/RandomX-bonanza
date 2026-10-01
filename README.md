@@ -47,12 +47,16 @@ waits for consent; **Clear** stops and removes it. Worker, memory mode and
 script URL, proxy routing, nonce mode and keepalive are under **Advanced**;
 host setup is under **Deployment / CORS**.
 
-For the public proxy test, deploy the contents of [netlify-demo](netlify-demo/README.md)
-directly to Netlify with no build step. It includes the operator-confirmed
-donation wallet, `wss://proxy.randomx.cc/embed-ws`, explicit NiceHash/required
-keepalive settings and isolation headers. The page and builder default pin
-the published runtime commit `cdebaa57f2855d657c0424fe0e405c4aad8af839`
-from the `embed-v0.2.0-demo` delivery branch.
+[netlify-demo](netlify-demo/README.md) is the operator's embed configurator:
+payout and bridge, a Full / Light switch with the isolation-header warning,
+light workers and replicas with a `RandomXEmbed.plan()` estimate, the
+snippet and a consent-gated preview. Deploy the directory to Netlify with no
+build step; `make demo` serves it locally against `dist/` (`DEMO_ARGS=--no-isolation`
+for a page without COOP/COEP). It is prefilled with the operator-confirmed
+donation wallet, `wss://proxy.randomx.cc/embed-ws` and explicit
+NiceHash/required keepalive settings. The page and builder default pin embed
+0.3.0 at commit `2f5603ecb1f3b5291649b7c661ee5cd94912a5e3` on the
+`embed-v0.2.0-demo` delivery branch; jsDelivr serves it once that commit is pushed.
 
 ## jsDelivr embed
 

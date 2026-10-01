@@ -2,7 +2,7 @@
 
 Updated: 2026-10-01.
 
-**Status: runtime 0.2.1 is committed and pushed on `embed-v0.2.0-demo` at `cdebaa57f2855d657c0424fe0e405c4aad8af839`; the user deployed `netlify-demo/` at https://fluffy-elf-267140.netlify.app/ against it. Runtime 0.2.1 fixes background sessions; genuine public-pool share acceptance is still pending. Embed 0.3.0 (light-mode worker pool, [below](#embed-030-2026-10-01)) is committed locally only; the demo does not pin it yet.**
+**Status: runtime 0.2.1 is committed and pushed on `embed-v0.2.0-demo` at `cdebaa57f2855d657c0424fe0e405c4aad8af839`; the user deployed `netlify-demo/` at https://fluffy-elf-267140.netlify.app/ against it. Runtime 0.2.1 fixes background sessions; genuine public-pool share acceptance is still pending. Embed 0.3.0 (light-mode worker pool, [below](#embed-030-2026-10-01)) is committed locally at `2f5603ecb1f3b5291649b7c661ee5cd94912a5e3`, and `netlify-demo/` is now the operator configurator pinned to it ([below](#configurator-2026-10-01)); neither is pushed, so jsDelivr and the live site still serve 0.2.1.**
 
 ## Completed
 
@@ -103,7 +103,7 @@ commit above; all five CDN assets returned HTTP 200 and matching hashes.
 After the `perf/amd64` merge (the no-SharedArrayBuffer fallback), the embed
 gains a light mode that runs without isolation headers and a wider control
 API. Full mode is unchanged. Committed locally on `embed-v0.2.0-demo`, not
-pushed; the Netlify demo still pins 0.2.1.
+pushed; the configurator below pins it.
 
 - **Light mode is the `randomx_st` worker pool**, a port of `NoSabPool`:
   one single-thread worker per mining thread, ~300 MB each, disjoint nonce
@@ -162,3 +162,33 @@ pushed; the Netlify demo still pins 0.2.1.
 
 These checks used a fixture pool; they do not establish acceptance by a
 real pool.
+
+## Configurator, 2026-10-01
+
+`netlify-demo/` replaces the single-widget test page with the operator's
+pre-deployment configurator (first draft; the form design is to be iterated
+with the user). The page is `index.html`, `configurator.js` and
+`configurator.css`. It pins embed 0.3.0 at `2f5603ecb1f3b5291649b7c661ee5cd94912a5e3`.
+It has payout/bridge fields with Advanced options, a Full / Light switch, and
+a full-mode panel: the headers, what they can break, and a choice between
+arming them and switching to light. A light panel covers replicas, and a
+`RandomXEmbed.plan()` estimate shows this device. The page produces the
+snippet (full mode prefixed with a header comment) and a consent-gated
+preview. `coi-sw.js` stays out of it. `make demo`
+(`scripts/serve-demo.mjs`) serves it locally with the pin rewritten to
+`dist/`, applying `_headers` or, with `DEMO_ARGS=--no-isolation`, no
+COOP/COEP.
+
+Checked in headless Chrome against a local fake bridge only:
+- both servers: no engine, worker or WebSocket on load;
+- panels, header block and "Switch to light";
+- estimates against `plan()`, including the replica drop under 4 GB `deviceMemory`;
+- Copy snippet;
+- no horizontal scroll at 390 px;
+- full preview on the non-isolated page stops at preflight;
+- light preview mining without isolation;
+- full preview mining on the isolated page;
+- exported light, full and headless-quickstart snippets on blank isolated and
+  non-isolated fixture pages, light mining on the non-isolated one.
+
+No hashrate numbers were recorded.
