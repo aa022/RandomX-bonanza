@@ -87,11 +87,13 @@ Options and API members marked (0.3.0) need a 0.3.0 or later pin.
 ```
 
 This appends a widget to the document body after DOM readiness. It has
-the randomx.cc miner widget's look (light, or dark with the visitor's
-preference; IBM Plex Mono where the page loads that font), a progress bar,
+the randomx.cc miner widget's look (light, or dark where the page declares a
+dark `color-scheme`, as `color-scheme: light dark` on a dark-preferring
+device; IBM Plex Mono where the page loads that font), a progress bar,
 hashrate, share counts, workload control, consent statement, Start/Stop
 controls and a collapsed view with Stop still available. Shadow DOM isolates
-its styling. No mining engine, dataset or
+its styling. The widget is at most 600px wide; the page's own CSS can change
+that on its host element, e.g. `.randomx-embed { max-width: none; }`. No mining engine, dataset or
 pool connection is loaded before consent. Consent is session-only, never
 stored. Stop, navigation and destruction terminate
 the engine and **every pthread or light-mode worker**, including during dataset initialization.

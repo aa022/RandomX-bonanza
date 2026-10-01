@@ -375,20 +375,26 @@
   // cannot rescale it. IBM Plex Mono renders where the host page loads it (as
   // randomx.cc does); elsewhere the stack falls back. The noise texture is a
   // data: image and purely decorative: a host CSP that blocks data: images
-  // drops the texture and nothing else.
+  // drops the texture and nothing else. The widget is light unless the host
+  // page declares a dark color-scheme (it inherits the page's color-scheme
+  // and picks each token with light-dark()), so it follows the page, not the
+  // visitor's OS. Its width is a :host default the page can override.
   const noise = `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.4' numOctaves='1' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.18'/></svg>")`;
   const css = `
-    :host{all:initial;display:block;color-scheme:light dark}
+    :host{all:initial;display:block;max-width:600px;color-scheme:inherit}
     *{box-sizing:border-box} p{margin:0}
     .widget{--w-bg:#fefefc;--w-rule:#a8a59c;--w-ink:#1a1815;--w-ink-dim:#4a4640;--w-ink-faint:#888579;--w-amber:#ff3b8a;
     --w-amber-bright:#ff6da6;--w-stone-border:#6e6b62;--w-log-bg:#f4f4f2;--w-log-ink:#1a1815;--w-frame:#000;
-    max-width:600px;font:16px/normal 'IBM Plex Mono','SF Mono',Menlo,'Cascadia Mono','Roboto Mono',monospace;color:var(--w-ink);
+    font:16px/normal 'IBM Plex Mono','SF Mono',Menlo,'Cascadia Mono','Roboto Mono',monospace;color:var(--w-ink);
     background:var(--w-bg) ${noise} repeat;background-size:220px 220px;background-blend-mode:multiply;
     border:1px solid var(--w-frame);font-variant-numeric:tabular-nums}
+    @supports(color:light-dark(#000,#fff)){.widget{--w-bg:light-dark(#fefefc,#1a1815);--w-rule:light-dark(#a8a59c,#4a4640);
+    --w-ink:light-dark(#1a1815,#f2ede4);--w-ink-dim:light-dark(#4a4640,#c0b9aa);--w-log-bg:light-dark(#f4f4f2,#211e1a);
+    --w-log-ink:light-dark(#1a1815,#f2ede4);--w-frame:light-dark(#000,#888579)}}
     header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:11.2px 17.6px 9.6px;border-bottom:1px solid var(--w-rule)}
     .title{font-size:11.2px;letter-spacing:.12em} .mini{background:transparent;border:0;padding:0;color:var(--w-ink-dim);font:inherit;
     font-size:11.5px;letter-spacing:.15em;line-height:1;cursor:pointer} .mini:hover{color:var(--w-amber)}
-    .body{padding:16.8px 17.6px 18.4px}.collapsed .body{display:none}
+    .body{padding:16.8px 17.6px 18.4px;container-type:inline-size}.collapsed .body{display:none}
     .lead,.stats span:nth-child(odd),.init span:first-child,.cpu span{font-size:9.9px;color:var(--w-ink-dim);text-transform:uppercase;letter-spacing:.15em}
     .lead,.init span:first-child,.cpu span{display:block;margin-bottom:3.5px} .details{font-size:11.2px;line-height:1.6;color:var(--w-ink-dim);overflow-wrap:anywhere}
     .stats{display:grid;grid-template-columns:128px minmax(0,1fr);gap:12px 9.6px;align-items:baseline;margin:15.2px 0;padding:11.7px 0;
@@ -396,9 +402,16 @@
     .stats span:nth-child(even),.summary .rate{font-size:14.7px;letter-spacing:.02em;overflow-wrap:anywhere}
     .init{display:grid;grid-template-columns:minmax(0,max-content) auto;justify-content:start;column-gap:.7em;align-items:baseline;margin-bottom:12px}
     .init[hidden]{display:none}.init span:first-child{grid-column:1/-1}
-    .bar,.pct,output{font-size:14.1px;letter-spacing:.06em;white-space:nowrap}.bar{color:var(--w-amber);overflow:hidden}
+    .bar,.pct,output{font-size:14.1px;letter-spacing:.06em;white-space:nowrap}.bar{color:var(--w-ink);overflow:hidden}
     .cpu{display:block;padding-bottom:15.2px;border-bottom:1px solid var(--w-rule);margin-bottom:15.2px} output{display:block;letter-spacing:.02em}
-    input[type=range]{display:block;width:100%;margin:8px 0 0;accent-color:var(--w-amber)}
+    input[type=range]{-webkit-appearance:none;appearance:none;display:block;width:100%;height:14px;margin:8px 0 0;background:transparent;cursor:pointer}
+    input[type=range]::-webkit-slider-runnable-track{height:1px;background:linear-gradient(var(--w-ink),var(--w-ink)) 0 0/calc(4px + (100% - 8px) * var(--fill,0)) 100% no-repeat,var(--w-rule)}
+    input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:8px;height:14px;margin-top:-6.5px;border:0;border-radius:0;background:var(--w-ink)}
+    input[type=range]:hover::-webkit-slider-thumb,input[type=range]:focus-visible::-webkit-slider-thumb{background:var(--w-amber)}
+    input[type=range]::-moz-range-track{height:1px;background:var(--w-rule)}
+    input[type=range]::-moz-range-progress{height:1px;background:var(--w-ink)}
+    input[type=range]::-moz-range-thumb{width:8px;height:14px;border:0;border-radius:0;background:var(--w-ink)}
+    input[type=range]:hover::-moz-range-thumb,input[type=range]:focus-visible::-moz-range-thumb{background:var(--w-amber)}
     .consent{display:flex;gap:9.6px;align-items:flex-start;margin-bottom:15.2px;font-size:11.2px;line-height:1.6;cursor:pointer}
     input[type=checkbox]{flex:none;margin:3px 0 0;accent-color:var(--w-amber);cursor:pointer}
     .controls{display:flex;flex-wrap:wrap;gap:25.6px}
@@ -425,9 +438,8 @@
     .init{margin-bottom:8.8px}.bar,.pct,output{font-size:12.2px;letter-spacing:.04em}output{letter-spacing:.02em}
     .cpu{padding-bottom:10.4px;margin-bottom:10.4px}.consent{margin-bottom:10.4px}.status{margin-top:10.4px}.controls{gap:19.2px}
     .controls button,.summary button{font-size:11.5px;letter-spacing:.2em}}
-    @media(prefers-color-scheme:dark){.widget{--w-bg:#1a1815;--w-rule:#4a4640;--w-ink:#f2ede4;--w-ink-dim:#c0b9aa;
-    --w-log-bg:#211e1a;--w-log-ink:#f2ede4;--w-frame:#888579}
-    .widget,.status,.diagnostics pre{background-blend-mode:screen}}
+    @container(max-width:400px){.stats{grid-template-columns:minmax(0,1fr);row-gap:0}.stats span:nth-child(odd){padding-bottom:0}
+    .stats span:nth-child(even){padding-top:2px;padding-bottom:9px}.stats span:last-child{padding-bottom:0}}
   `;
 
   function create(input = {}) {
@@ -916,7 +928,7 @@
         <div class="body"><p class="lead">Monero mining</p><p class="details"></p>
         <div class="stats"><span>Hashrate</span><span class="rate">0 H/s</span><span>Shares</span><span class="shares">0 / 0</span>
         <span>Threads</span><span class="engine"></span><span>RAM</span><span class="ram"></span></div>
-        <div class="init"><span>Dataset init</span><span class="bar" aria-hidden="true">${'▱'.repeat(24)}</span><span class="pct">0%</span></div>
+        <div class="init"><span>Dataset init</span><span class="bar" aria-hidden="true">${'▱'.repeat(40)}</span><span class="pct">0%</span></div>
         <label class="cpu"><span>CPU</span><output></output><input class="workload" type="range" min="0" max="${MAX_WORKLOAD}" step="1" aria-label="CPU percentage"></label>
         ${config.quickstart ? '' : '<label class="consent"><input type="checkbox"> I understand and agree to use my device for this session.</label>'}
         <div class="controls"><button class="start">Start</button><button class="stop" disabled>Stop</button></div>
@@ -934,7 +946,11 @@
         $('.mini').setAttribute('aria-expanded', String(!collapsed));
       });
       $('.summary .stop').addEventListener('click', () => stop());
+      // The slider's filled part, drawn by the track (WebKit has no progress pseudo-element).
+      const range = $('.workload'), fill = () => range.style.setProperty('--fill', String(Math.min(1, range.value / range.max || 0)));
+      range.addEventListener('input', fill);
       api.on('state', (s) => {
+        fill();
         $('.diagnostics').hidden = !s.error;
         $('output').textContent = `${Number(s.effectivePercentage.toFixed(1))}% · ${s.threads}/${s.limits.cores} threads`;
         $('.shares').textContent = `${s.accepted} accepted / ${s.rejected} rejected`;
@@ -945,8 +961,8 @@
         $('.ram').textContent = e.mode === 'full' ? 'about 2.5 GiB' : `about ${(e.memoryMiB / 1000).toFixed(1)} GB`;
         // Light mode without replicas has no dataset to initialize.
         $('.init').hidden = e.mode === 'light' && !e.replicas;
-        const filled = Math.round(s.progress * 24);
-        $('.bar').textContent = '▰'.repeat(filled) + '▱'.repeat(24 - filled);
+        const filled = Math.round(s.progress * 40);
+        $('.bar').textContent = '▰'.repeat(filled) + '▱'.repeat(40 - filled);
         $('.pct').textContent = Math.round(s.progress * 100) + '%';
         $('.summary .rate').textContent = s.hashrate.toFixed(0) + ' H/s · ' + s.phase;
         $('.summary .stop').disabled = !s.running && s.phase !== 'consent';
