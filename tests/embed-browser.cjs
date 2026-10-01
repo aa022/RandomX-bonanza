@@ -445,7 +445,8 @@ async function waitUntil(check, timeout = 30000) {
     const open = await openLight('/open', { maxThreads: 3, nonceMode: 'nicehash' });
     const openChecks = await open.evaluate(() => ({ isolated: crossOriginIsolated, sab: typeof SharedArrayBuffer,
       full: RandomXEmbed.diagnose(), light: RandomXEmbed.diagnose('light'), error: rxMiner.state.error, engine: rxMiner.state.engine,
-      disclosure: document.querySelector('.randomx-embed').shadowRoot.querySelector('.details').textContent,
+      disclosure: RandomXEmbed.plan(rxMiner.config).disclosure,
+      widgetText: document.querySelector('.randomx-embed').shadowRoot.querySelector('.details'),
       rows: (r => ({ engine: r.querySelector('.engine').textContent, ram: r.querySelector('.ram').textContent,
         init: r.querySelector('.init').hidden }))(document.querySelector('.randomx-embed').shadowRoot) }));
     assert.deepEqual(openChecks.rows, { engine: '3 light threads', ram: 'about 0.9 GB', init: true }, 'no dataset row without replicas');
@@ -456,6 +457,7 @@ async function waitUntil(check, timeout = 30000) {
       openChecks.engine.memoryMiB], ['light', 'workers', 3, 0, 900]);
     assert.match(openChecks.disclosure, /as 3 light-mode workers at about 300 MB each\. Mining needs about 0\.9 GB of RAM\./);
     assert.doesNotMatch(openChecks.disclosure, /isolation headers/);
+    assert.equal(openChecks.widgetText, null, 'the widget carries no disclosure paragraph');
     // Full mode on the same page stops at preflight and points at light mode.
     const fullAttempt = await open.evaluate(config => {
       const miner = RandomXEmbed.create({ ...config, mode: 'full', headless: true });
@@ -515,7 +517,7 @@ async function waitUntil(check, timeout = 30000) {
     lightServed = served.length;
     const replica = await openLight('/open', { maxThreads: 3, replicas: 1, memoryCap: 8 });
     const replicaPlan = await replica.evaluate(() => ({ engine: rxMiner.state.engine, deviceMemory: navigator.deviceMemory,
-      disclosure: document.querySelector('.randomx-embed').shadowRoot.querySelector('.details').textContent }));
+      disclosure: RandomXEmbed.plan(rxMiner.config).disclosure }));
     assert.deepEqual([replicaPlan.engine.workers, replicaPlan.engine.replicas, replicaPlan.engine.memoryMiB], [3, 1, 3200],
       'a replica is planned (navigator.deviceMemory ' + replicaPlan.deviceMemory + ')');
     assert.match(replicaPlan.disclosure, /1 of them also holds a private full dataset .*which the workers build before mining starts.*Mining needs about 3\.2 GB of RAM/);

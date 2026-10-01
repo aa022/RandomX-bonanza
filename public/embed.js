@@ -395,10 +395,11 @@
     .title{font-size:11.2px;letter-spacing:.12em} .mini{background:transparent;border:0;padding:0;color:var(--w-ink-dim);font:inherit;
     font-size:11.5px;letter-spacing:.15em;line-height:1;cursor:pointer} .mini:hover{color:var(--w-amber)}
     .body{padding:16.8px 17.6px 18.4px;container-type:inline-size}.collapsed .body{display:none}
-    .lead,.stats span:nth-child(odd),.init span:first-child,.cpu span{font-size:9.9px;color:var(--w-ink-dim);text-transform:uppercase;letter-spacing:.15em}
-    .lead,.init span:first-child,.cpu span{display:block;margin-bottom:3.5px} .details{font-size:11.2px;line-height:1.6;color:var(--w-ink-dim);overflow-wrap:anywhere}
+    .stats span:nth-child(odd),.init span:first-child,.cpu span{font-size:9.9px;color:var(--w-ink-dim);text-transform:uppercase;letter-spacing:.15em}
+    .init span:first-child,.cpu span{display:block;margin-bottom:3.5px}
     .stats{display:grid;grid-template-columns:128px minmax(0,1fr);gap:12px 9.6px;align-items:baseline;margin:15.2px 0;padding:11.7px 0;
     border-top:1px solid var(--w-rule);border-bottom:1px solid var(--w-rule)} .stats span{padding:3.5px 0}
+    .body>.stats:first-child{margin-top:0;padding-top:0;border-top:0}
     .stats span:nth-child(even),.summary .rate{font-size:14.7px;letter-spacing:.02em;overflow-wrap:anywhere}
     .init{display:grid;grid-template-columns:minmax(0,max-content) auto;justify-content:start;column-gap:.7em;align-items:baseline;margin-bottom:12px}
     .init[hidden]{display:none}.init span:first-child{grid-column:1/-1}
@@ -433,8 +434,8 @@
     .summary{display:flex;gap:16px;align-items:baseline;padding:12px 17.6px}.summary[hidden]{display:none}.summary .rate{flex:1;min-width:0}
     @media(max-width:1280px),(max-height:820px){header{padding:8.8px 14.4px 8px}.title{font-size:9.6px;letter-spacing:.1em}.mini{font-size:9.9px}
     .body{padding:12.8px 14.4px 14.4px}.summary{padding:9.6px 14.4px}.stats{grid-template-columns:96px minmax(0,1fr);gap:8.8px 8px;margin:10.4px 0;padding:7.8px 0}
-    .stats span{padding:2.6px 0}.lead,.stats span:nth-child(odd),.init span:first-child,.cpu span{font-size:8.6px}
-    .lead,.init span:first-child,.cpu span{margin-bottom:2.6px;letter-spacing:.13em}.stats span:nth-child(even),.summary .rate{font-size:12.8px}
+    .stats span{padding:2.6px 0}.stats span:nth-child(odd),.init span:first-child,.cpu span{font-size:8.6px}
+    .init span:first-child,.cpu span{margin-bottom:2.6px;letter-spacing:.13em}.stats span:nth-child(even),.summary .rate{font-size:12.8px}
     .init{margin-bottom:8.8px}.bar,.pct,output{font-size:12.2px;letter-spacing:.04em}output{letter-spacing:.02em}
     .cpu{padding-bottom:10.4px;margin-bottom:10.4px}.consent{margin-bottom:10.4px}.status{margin-top:10.4px}.controls{gap:19.2px}
     .controls button,.summary button{font-size:11.5px;letter-spacing:.2em}}
@@ -925,7 +926,7 @@
       const panel = document.createElement('section');
       panel.className = 'widget'; panel.setAttribute('aria-label', 'Monero mining controls');
       panel.innerHTML = `<header><span class="title">v${VERSION}</span><button class="mini" aria-expanded="true">[ − ]</button></header>
-        <div class="body"><p class="lead">Monero mining</p><p class="details"></p>
+        <div class="body">
         <div class="stats"><span>Hashrate</span><span class="rate">0 H/s</span><span>Shares</span><span class="shares">0 / 0</span>
         <span>Threads</span><span class="engine"></span><span>RAM</span><span class="ram"></span></div>
         <div class="init"><span>Dataset init</span><span class="bar" aria-hidden="true">${'▱'.repeat(40)}</span><span class="pct">0%</span></div>
@@ -938,7 +939,7 @@
       root.appendChild(panel); target.appendChild(widget);
       const $ = (s) => root.querySelector(s);
       bindControls({ start: $('.start'), stop: $('.stop'), consent: $('input[type=checkbox]'),
-        workload: $('.workload'), status: $('.status'), hashrate: $('.rate'), disclosure: $('.details'), diagnostics: $('.diagnostics pre') });
+        workload: $('.workload'), status: $('.status'), hashrate: $('.rate'), diagnostics: $('.diagnostics pre') });
       $('.mini').addEventListener('click', () => {
         const collapsed = panel.classList.toggle('collapsed');
         $('.summary').hidden = !collapsed;
