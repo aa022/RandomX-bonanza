@@ -924,7 +924,7 @@
       root.appendChild(style);
       const panel = document.createElement('section');
       panel.className = 'widget'; panel.setAttribute('aria-label', 'Monero mining controls');
-      panel.innerHTML = `<header><span class="title">randomx bonanza · v${VERSION}</span><button class="mini" aria-expanded="true">[ − ]</button></header>
+      panel.innerHTML = `<header><span class="title">v${VERSION}</span><button class="mini" aria-expanded="true">[ − ]</button></header>
         <div class="body"><p class="lead">Monero mining</p><p class="details"></p>
         <div class="stats"><span>Hashrate</span><span class="rate">0 H/s</span><span>Shares</span><span class="shares">0 / 0</span>
         <span>Threads</span><span class="engine"></span><span>RAM</span><span class="ram"></span></div>

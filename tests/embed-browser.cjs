@@ -30,6 +30,8 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'randomx-browser-'));
 const listen = (server, port) => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
 const pool = net.createServer(socket => {
   poolSockets.add(socket); socket.on('close', () => poolSockets.delete(socket));
+  // Reconnect scenarios reset these connections; a reset is not a test failure.
+  socket.on('error', () => {});
   let buffer = '';
   let nicehash = false, prefix = 0;
   const seenNonces = new Set();
@@ -47,6 +49,7 @@ const pool = net.createServer(socket => {
     return nextJob.job_id;
   };
   socket.on('close', () => fixedPeers.delete(socket));
+  socket.on('error', () => {});
   socket.on('data', chunk => {
     buffer += chunk.toString(); const lines = buffer.split('\n'); buffer = lines.pop();
     for (const line of lines) {
