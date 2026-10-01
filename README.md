@@ -55,7 +55,7 @@ build step; `make demo` serves it locally against `dist/` (`DEMO_ARGS=--no-isola
 for a page without COOP/COEP). It is prefilled with the operator-confirmed
 donation wallet, `wss://proxy.randomx.cc/embed-ws` and explicit
 NiceHash/required keepalive settings. The page and builder default pin embed
-0.3.0 at commit `d71ea8b607af072452edb3268c1fdf7225a7a4bf` on the
+0.3.0 at commit `cedc1a30a048240824d63860202a798a1d589f8f` on the
 `embed-v0.2.0-demo` delivery branch; jsDelivr serves it once that commit is pushed.
 
 ## jsDelivr embed
