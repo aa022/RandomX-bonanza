@@ -2,7 +2,7 @@
 
 Updated: 2026-10-01.
 
-**Status: runtime 0.2.1 is committed and pushed on `embed-v0.2.0-demo` at `cdebaa57f2855d657c0424fe0e405c4aad8af839`; the user deployed `netlify-demo/` at https://fluffy-elf-267140.netlify.app/ against it. Runtime 0.2.1 fixes background sessions; genuine public-pool share acceptance is still pending. Embed 0.3.0 (light-mode worker pool, [below](#embed-030-2026-10-01), plus the RAM budget [below](#light-mode-budget-2026-10-01-after-the-configurator)) is committed locally at `9473ea5eca0fca6d7ab7ec3fff2d645b8c344bd4` (it supersedes the unpushed `2f5603e`, `d71ea8b` and `cedc1a3`), and `netlify-demo/` is now the operator configurator pinned to it ([below](#configurator-2026-10-01)); neither is pushed, so jsDelivr and the live site still serve 0.2.1.**
+**Status: runtime 0.2.1 is committed and pushed on `embed-v0.2.0-demo` at `cdebaa57f2855d657c0424fe0e405c4aad8af839`; the user deployed `netlify-demo/` at https://fluffy-elf-267140.netlify.app/ against it. Runtime 0.2.1 fixes background sessions; genuine public-pool share acceptance is still pending. Embed 0.3.0 (light-mode worker pool, [below](#embed-030-2026-10-01), plus the RAM budget [below](#light-mode-budget-2026-10-01-after-the-configurator)) is committed locally at `f2594c79882775d17fa916aaedc0c5a6c927c7d9` (it supersedes the unpushed `2f5603e`, `d71ea8b`, `cedc1a3` and `9473ea5`), and `netlify-demo/` is now the operator configurator pinned to it ([below](#configurator-2026-10-01)); neither is pushed, so jsDelivr and the live site still serve 0.2.1.**
 
 ## Completed
 
@@ -184,6 +184,11 @@ visitor device (README "Light mode").
 - The 2.25 weight is an x86 (5600X) figure; it needs the idle-machine bench
   pass on the M4 (0/1/2 replicas), along with the build time per worker count.
 
+## Widget look, 2026-10-01
+
+`f2594c7`: the built-in widget takes the randomx.cc miner widget's look (tokens, IBM Plex Mono stack, noise, rules, `[ START ]` buttons, log boxes), light and dark.
+Checked: unit tests, the real-Chrome suite, and 600 / 390 px screenshots (idle, consent, collapsed, dark, local fake-pool mining, preflight error) beside randomx.cc.
+
 ## Presets and widget rows, 2026-10-01
 
 - `netlify-demo/presets/`: six one-widget pages (full 20 / 50 / 80 %; gentle
@@ -199,7 +204,7 @@ visitor device (README "Light mode").
 `netlify-demo/` replaces the single-widget test page with the operator's
 pre-deployment configurator (first draft; the form design is to be iterated
 with the user). The page is `index.html`, `configurator.js` and
-`configurator.css`. It pins embed 0.3.0 at `9473ea5eca0fca6d7ab7ec3fff2d645b8c344bd4`.
+`configurator.css`. It pins embed 0.3.0 at `f2594c79882775d17fa916aaedc0c5a6c927c7d9`.
 It has payout/bridge fields with Advanced options, a Full / Light switch, and
 a full-mode panel: the headers, what they can break, and a choice between
 arming them and switching to light. A light panel covers replicas, and a
