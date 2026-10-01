@@ -105,25 +105,26 @@
 
           <div class="grid">
             <label>CPU workload %<input name="workload" type="number" min="0" max="80" step="any" required value="50">
-              <small>Of the visitor's reported cores; Arm devices are capped at 50 %, others at 80 %.</small></label>
-            <label><span id="maxLabel">Max mining threads</span><input name="maxThreads" type="number" min="1" max="32" step="1" placeholder="no limit">
-              <small id="maxHint">Optional ceiling, 1–32.</small></label>
+              <small>Of the visitor's reported cores, at most 80 %.</small></label>
+            <label data-only="full">Max mining threads<input name="maxThreads" type="number" min="1" max="32" step="1" placeholder="no limit">
+              <small>Optional ceiling, 1–32.</small></label>
+            <label data-only="light">RAM %<input name="memory" type="number" min="1" max="80" step="any" required value="50">
+              <small>Of the RAM the visitor's browser reports, at most 80 %.</small></label>
+            <label data-only="light">RAM cap, GB<input name="memoryCap" type="number" min="0.25" max="64" step="any" required value="2">
+              <small>The budget where the browser reports no RAM (Firefox, Safari).</small></label>
           </div>
 
-          <fieldset data-only="light" class="replicas">
-            <legend>Full-dataset replicas</legend>
-            <div class="row">
-              <label><input type="radio" name="replicas" value="0" checked> None</label>
-              <label><input type="radio" name="replicas" value="1"> 1 replica</label>
-              <label><input type="radio" name="replicas" value="2"> 2 replicas</label>
-            </div>
-            <p class="note">A replica gives one worker a private copy of the full dataset: about 2.3 GB more RAM each,
-              and that worker then mines roughly twice as fast as a light one. All workers build the replicas together
-              when a session starts and again after every seed change (about every three days), while they keep mining.
-              Use 1 only where visitors have 8 GB or more and 2 only with 16 GB or more. The embed drops replicas when
-              the browser reports under 8 GB, but some browsers report nothing, so a page killed for lack of memory is
-              possible.</p>
-          </fieldset>
+          <label data-only="full" class="check"><input name="optimizeArm" type="checkbox">
+            Optimise ARM performance: count half the reported cores on ARM devices, about their performance cores</label>
+
+          <div data-only="light" class="replicas">
+            <label class="check"><input name="boost" type="checkbox" checked> <strong>Full-dataset boost</strong></label>
+            <p class="note">Gives up to two workers a private copy of the full dataset (about 2.3 GB each), which mines
+              roughly 2.25 times as fast as a light worker. The embed works out the best mix of light workers and
+              full-dataset ones within the RAM budget on each visitor's device, and uses none where it doesn't pay.
+              The datasets are built at the start and after each seed change (about every three days) on 32 threads
+              for a few seconds; the extra build threads take about 0.3 GB each while that runs.</p>
+          </div>
 
           <div class="estimate" aria-live="polite">
             <h4>On this device</h4>

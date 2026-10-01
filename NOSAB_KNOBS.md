@@ -103,11 +103,12 @@ The embed's `mode: 'light'` is this path: a `NoSabPool` port (`workerPool` in `p
 | Demo URL | Embed option |
 |---|---|
 | no-SAB path (`?sab=0`, or not isolated) | `mode: 'light'` |
-| `?threads=N` | `workload` (% of cores, default 50, 80% cap, ARM 50%), bounded by `maxThreads: N` |
-| `?fb_full=K` | `replicas: K` (0–2); dropped when `navigator.deviceMemory` reports under 8 |
+| `?threads=N` | `workload` (% of cores, default 50, 80% cap), bounded by `maxThreads: N` and the RAM budget (`memory` % of reported RAM, or `memoryCap` GB) |
+| `?fb_full=K` | `replicas: 'auto'` (default: the best 0–2 for the RAM budget, a replica counted as 2.25 light workers per §4) or a fixed `K` |
+| build threads = the pool | `initThreads` (default 32): the pool plus temporary build helpers, ~300 MB each during the build |
 | `?jit_profile=…` | `tuning.profile` |
 | `?jit_exp=light_mlp=N` / `kernel_k=N` | `tuning.lightMlp` / `tuning.kernelK` |
 | other `?jit_exp=` tokens | `tuning.experiment`: hash-safe tokens only; `reuse`/`reuse2` throw |
 | `?nojit=1` | `tuning.jit: false` |
-| `?init_threads=N` (SAB full mode) | `initThreads: N` (full mode only) |
+| `?init_threads=N` (SAB full mode) | `initThreads: N` |
 | `?coi=1` | none yet (`coi-sw.js` is not in `dist/`) |

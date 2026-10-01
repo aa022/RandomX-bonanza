@@ -879,6 +879,16 @@ self.onmessage = function(e) {
       postMessage({ type: 'error', message: `Job failed: ${err && err.message ? err.message : String(err)}` });
     });
       break;
+    case 'seed':
+      // Embed replica-build helper (init helper:true): a cache for this seed
+      // and fb_* chunk work only; it never gets a job, so it never mines.
+      (async () => {
+        if (initPromise) await initPromise;
+        await ensureCache(msg.seed_hash);
+      })().catch((err) => {
+        postMessage({ type: 'error', message: `Cache failed: ${err && err.message ? err.message : String(err)}` });
+      });
+      break;
     case 'stop':
       ++jobGeneration;
       mining = false;

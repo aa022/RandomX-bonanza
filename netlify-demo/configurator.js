@@ -37,11 +37,15 @@
   function settings() {
     const light = field('mode').value === 'light';
     const max = field('maxThreads').value.trim();
+    // Full: an optional thread ceiling and ARM halving. Light: the RAM budget
+    // and the boost; the embed derives workers and replicas from them.
     return { wallet: field('wallet').value.trim(), pool: field('pool').value.trim(), port: Number(field('port').value),
       proxy: field('proxy').value.trim(), routeQuery: field('routeQuery').value !== 'false',
       workerName: field('workerName').value.trim(), workload: Number(field('workload').value),
-      mode: light ? 'light' : 'full', ...(max ? { maxThreads: Number(max) } : {}),
-      ...(light ? { replicas: Number(field('replicas').value) } : {}),
+      mode: light ? 'light' : 'full',
+      ...(light ? { memory: Number(field('memory').value), memoryCap: Number(field('memoryCap').value),
+        replicas: field('boost').checked ? 'auto' : 0 } :
+        { ...(max ? { maxThreads: Number(max) } : {}), ...(field('optimizeArm').checked ? { optimizeArm: true } : {}) }),
       nonceMode: field('nonceMode').value, keepalive: field('keepalive').value,
       headless: field('display').value === 'headless', quickstart: field('quickstart').checked };
   }
@@ -92,23 +96,28 @@ document.addEventListener('randomx:consent-request', function (event) {
   }
 
   const gb = mib => (mib / 1000).toFixed(1) + ' GB';
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   function estimate(p, config) {
-    const { cores, workloadCap, maxThreads } = p.limits;
+    const { cores, reportedCores, arm, armOptimized } = p.limits;
     const memory = navigator.deviceMemory;
-    const percent = Math.min(config.workload, workloadCap);
-    const rows = [['Reported cores', `${cores}; at most ${maxThreads} mining thread${maxThreads === 1 ? '' : 's'}` +
-        (workloadCap < 80 ? ` (Arm: workload capped at ${workloadCap} %)` : '')],
-      ['Workload', `${percent} % → ${p.threads} thread${p.threads === 1 ? '' : 's'}`]];
+    const rows = [['Reported cores', String(reportedCores) + (armOptimized ? `, counted as ${cores} (ARM: half)` :
+        config.optimizeArm && !arm ? ' (not ARM: no halving)' : '')],
+      ['Workload', `${config.workload} % → ${plural(p.wantedThreads, 'thread')}`]];
     if (p.mode === 'light') {
-      rows.push(['Light workers', String(p.workers)],
-        ['Replicas', p.replicasDemoted ? `0: dropped, this browser reports ${memory} GB of memory` :
-          p.replicas < config.replicas ? `${p.replicas}: at most one per worker` : String(p.replicas)],
-        ['RAM', `about ${gb(p.memoryMiB)} (${p.workers} × 0.3 GB${p.replicas ? ` + ${p.replicas} × 2.3 GB` : ''})`]);
+      rows.push(['RAM budget', `${(p.memoryBudgetMiB / 1024).toFixed(1)} GB, ` + (p.memorySource === 'reported' ?
+          `${config.memory} % of the reported ${memory} GB` : `the ${config.memoryCap} GB cap (no RAM reported)`)],
+        ['Light workers', String(p.workers - p.replicas) + (p.threads < p.wantedThreads ? ` (the budget holds ${p.threads} of ${p.wantedThreads} threads)` : '')],
+        ['Full-dataset', p.replicas ? `${p.replicas} (${config.replicas === 'auto' ? 'best mix for this budget' : 'fixed'})` :
+          config.replicas === 'auto' ? '0: none pays off within this budget' : 'off'],
+        ['RAM', `about ${gb(p.memoryMiB)} while mining`]);
+      if (p.replicas) rows.push(['Dataset build', `${plural(p.initThreads, 'thread')} (${p.helpers} temporary), ` +
+        `up to about ${gb(p.peakMemoryMiB)} for a few seconds`]);
     } else {
       rows.push(['Dataset build', `${p.initThreads} threads, at the start and after each seed change`], ['RAM', 'about 2.5 GiB']);
     }
-    rows.push(['Browser memory', typeof memory === 'number' ? `reports ${memory} GB (rounded; browsers cap it, some omit it)` : 'not reported']);
-    if (!p.threads) rows.push(['Note', 'No mining thread at this workload: raise it so Start can run']);
+    rows.push(['Browser memory', typeof memory === 'number' ? `reports ${memory} GB (rounded; some browsers omit it)` : 'not reported']);
+    if (!p.threads) rows.push(['Note', p.wantedThreads ? 'The RAM budget holds no worker: raise RAM % or the cap' :
+      'No mining thread at this workload: raise it so Start can run']);
     $('estimate').replaceChildren(...rows.flatMap(([term, value]) => {
       const dt = document.createElement('dt'), dd = document.createElement('dd');
       dt.textContent = term; dd.textContent = value; return [dt, dd];
@@ -118,10 +127,9 @@ document.addEventListener('randomx:consent-request', function (event) {
   function render() {
     const mode = field('mode').value;
     form.querySelectorAll('[data-only]').forEach(el => { el.hidden = el.dataset.only !== mode; });
-    $('maxLabel').textContent = mode === 'light' ? 'Max workers' : 'Max mining threads';
-    $('maxHint').textContent = mode === 'light' ? 'Optional ceiling, 1–32. Bounds RAM: about 0.3 GB per worker.' : 'Optional ceiling, 1–32.';
     try {
-      const invalid = form.querySelector('input:invalid, select:invalid');
+      // Only the fields of the shown mode count.
+      const invalid = [...form.querySelectorAll('input:invalid, select:invalid')].find(el => !el.closest('[hidden]'));
       if (invalid) throw new Error(invalid.closest('label').firstChild.textContent.trim() + ': ' + invalid.validationMessage);
       const config = settings();
       try { new URL(config.proxy); } catch (_) { throw new Error('WebSocket bridge: enter a wss:// URL'); }

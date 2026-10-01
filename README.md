@@ -99,7 +99,8 @@ background execution cannot be guaranteed. Returning after navigation requires c
 
 Configuration accepts the same keys through `RandomXEmbed.create({...})`;
 script attributes use kebab-case (for example `data-worker-name`,
-`data-max-threads`, `data-replicas`, `data-init-threads`); `tuning` is API
+`data-max-threads`, `data-replicas`, `data-init-threads`, `data-memory`,
+`data-memory-cap`, `data-optimize-arm`); `tuning` is API
 only. Set `data-auto="false"` when creating instances yourself.
 
 | Setting | Meaning |
@@ -113,8 +114,11 @@ only. Set `data-auto="false"` when creating instances yourself.
 | `workload` | Percentage of reported CPU cores, including decimals; default 50, maximum 80 |
 | `mode` | `full` (default): the pthread engine on one shared dataset, about 2.5 GiB RAM, needs cross-origin isolation. `light` (0.3.0 semantics): one `randomx_st` worker per mining thread, about 300 MB each, **no isolation headers**. Omitted or `''` means `full`; any other value throws |
 | `maxThreads` | (0.3.0) Absolute ceiling on mining threads, and so on light workers and their RAM; integer 1–32 |
-| `replicas` | (0.3.0) Light only, 0–2, default 0: workers that also mine on a private full dataset, about 2.3 GB each |
-| `initThreads` | (0.3.0) Full only: dataset initialization threads, 1–32, default 32; light mode ignores it |
+| `optimizeArm` | (0.3.0) Full only, default `false`: on ARM devices count half the reported cores (about the performance cores) |
+| `memory` | (0.3.0) Light only: RAM budget as a percentage of the RAM the browser reports; default 50, maximum 80 |
+| `memoryCap` | (0.3.0) Light only: RAM budget in GB where the browser reports none (Firefox, Safari, insecure pages); default 2 |
+| `replicas` | (0.3.0) Light only: `'auto'` (default) or a fixed 0–2. Workers that also mine on a private full dataset, about 2.3 GB each; `'auto'` picks the best count for the RAM budget |
+| `initThreads` | (0.3.0) Dataset build threads, 1–32, default 32: full mode's initialization pthreads; in light mode the replica build (the workers plus temporary helpers) |
 | `tuning` | (0.3.0) API-only engine knobs `{profile, jit, lightMlp, kernelK, experiment}`; see below |
 | `headless` | `true` creates only the API; it appends no widget |
 | `quickstart` | `true` requests consent on the first trusted click or non-navigation key interaction |
@@ -122,11 +126,13 @@ only. Set `data-auto="false"` when creating instances yourself.
 | `assetBase` | Optional directory containing the engine assets; otherwise derived from the embed script URL |
 | `nonce` | CSP nonce for the widget's injected stylesheet |
 
-Mining threads are `floor(reported cores × workload / 100)`, bounded by
-80% of the reported cores, 32 mining threads and `maxThreads`. The default is **50%** on
+Mining threads are `floor(cores × workload / 100)`, bounded by
+80% of the cores, 32 mining threads and `maxThreads`. The default is **50%** on
 all platforms, including ARM and Safari. API values from 80–100 are clamped
-to 80%; ARM sessions are further capped at 50% of reported cores. There
-is no efficiency-core configuration. The form accepts 0–80%; runtime
+to 80%. In full mode, `optimizeArm: true` counts half the reported cores on
+ARM devices, so the threads land on about the performance cores of Apple
+silicon and big.LITTLE parts; light mode ignores it (its workers are
+independent, so efficiency cores only add). The form accepts 0–80%; runtime
 controls follow the device's cap. A percentage
 too small to allow one thread cannot start. The widget shows the effective
 CPU percentage and resulting thread count. Changing workload stops the session and requires
@@ -139,14 +145,26 @@ in both the widget and consent event.
 **Light mode** runs one `randomx_st` worker per mining thread. Each has its
 own 256 MiB cache (about 300 MB) and a disjoint slice of the nonce space. It
 uses no SharedArrayBuffer, so it needs only Worker and WebAssembly support and
-runs on pages without COOP/COEP. RAM is about `workers × 300 MB + replicas ×
-2.3 GB`, as the disclosure states; `maxThreads` bounds it. With `replicas`,
-workers `0..replicas-1` also mine on a private full dataset that all workers
-build together after each seed change, while the light workers keep mining.
-A replica that cannot allocate its dataset stays light. Replicas are dropped
-where `navigator.deviceMemory` reports under 8 (it caps at 8; Firefox omits it).
-Light mode trades hashrate per thread for running anywhere; see
-[NOSAB_KNOBS.md](NOSAB_KNOBS.md).
+runs on pages without COOP/COEP. The operator chooses a CPU `workload`, a RAM
+budget (`memory` % of the RAM the browser reports, or `memoryCap` GB where it
+reports none) and whether full-dataset replicas may be used; the embed does the
+rest on each visitor's device:
+
+- workers = the workload's threads, cut to what the budget holds at about 300 MB each;
+- replicas (`'auto'`) = the count of 0–2 that maximizes `light workers + 2.25 ×
+  replicas` within the budget, fewer on a tie (a replica worker mines about
+  2.25× a light one; Ryzen 5600X, `NOSAB_KNOBS.md` §4). A fixed count falls
+  back to the most that fits;
+- RAM while mining is about `workers × 300 MB + replicas × 2.3 GB`, as the disclosure states.
+
+Workers `0..replicas-1` also mine on a private full dataset. It is built after
+each seed change by `initThreads` threads (default 32): the pool's workers
+plus temporary helper workers that exist only during the build, each with its
+own cache (about 300 MB), so the build briefly needs up to
+`peakMemoryMiB` (the disclosure states it). The light workers keep mining
+meanwhile, a helper that fails only leaves the build, and a replica that
+cannot allocate its dataset stays light. Light mode trades hashrate per thread
+for running anywhere; see [NOSAB_KNOBS.md](NOSAB_KNOBS.md).
 
 `tuning` is for engine experiments; normal deployments leave it unset.
 `profile` (`auto`, `arm`, `x86`) picks the JIT generator profile; `jit: false`
@@ -199,17 +217,21 @@ their details contain `instance` so handlers can identify their embed.
 Attribute-based startup also emits `randomx:ready` on `window` with the instance.
 
 (0.3.0) `state.engine` is `{mode, runtime: 'pthreads' | 'workers', workers,
-replicas, replicasActive, memoryMiB}`; a running session keeps the plan it
-started with, and `replicasActive` counts replicas mining on their dataset.
+replicas, replicasActive, helpers, memoryMiB, peakMemoryMiB, memoryBudgetMiB,
+memorySource}`; a running session keeps the plan it started with, and
+`replicasActive` counts replicas mining on their dataset.
 
 (0.3.0) `RandomXEmbed.plan(config, nav = navigator)` validates a configuration
-like `create()` and returns the resolved `{mode, runtime, threads, workers,
-replicas, replicasDemoted, initThreads, memoryMiB, disclosure, limits}`
-without an instance, DOM, engine or network; `create()` uses the same math.
+like `create()` and returns the resolved `{mode, runtime, threads,
+wantedThreads, workers, replicas, helpers, initThreads, memoryMiB,
+peakMemoryMiB, memoryBudgetMiB, memorySource: 'reported' | 'cap' | null,
+disclosure, limits}` without an instance, DOM, engine or network; `create()`
+uses the same math. `limits` adds `reportedCores`, `arm` and `armOptimized`.
 Pass `nav` (`hardwareConcurrency`, `platform`, `userAgent`, `architecture`,
 `deviceMemory`) to plan for another device. Chromium reports the CPU
 architecture asynchronously just after the script loads; until then a Mac
-counts as ARM (50% cap).
+counts as ARM for `optimizeArm`. A session approved before the hint never
+runs more threads than its consent stated.
 
 ### Quickstart and deployer-owned consent
 

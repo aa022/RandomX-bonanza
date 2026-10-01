@@ -12,6 +12,10 @@
   // no-SAB docs): the pthread full mode, one randomx_st light worker (its own
   // 256 MiB cache), one light-mode full-dataset replica.
   const FULL_MIB = 2560, WORKER_MIB = 300, REPLICA_MIB = 2300;
+  // A replica worker mines about 2.25× a light one (Ryzen 5600X, no-SAB
+  // pool: 2.24 at 6 workers, 2.31 at 12; NOSAB_KNOBS.md §4). Light mode picks
+  // the replica count that maximizes light-worker equivalents within budget.
+  const REPLICA_WEIGHT = 2.25;
   const LIGHT_HINT = "Or set mode: 'light', which needs no isolation headers.";
   const count = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
 
@@ -89,12 +93,19 @@
     if (input.keepalive !== undefined && !['auto', 'required'].includes(input.keepalive)) throw new Error('keepalive must be auto or required');
     const mode = input.mode || 'full';
     const maxThreads = integer(input.maxThreads, null, 'maxThreads', 1, 32);
-    const replicas = integer(input.replicas, 0, 'replicas', 0, 2);
-    if (replicas && mode !== 'light') throw new Error("replicas need mode: 'light' (full mode already mines on one shared dataset)");
+    const replicas = input.replicas === 'auto' || input.replicas === undefined || input.replicas === '' ? 'auto' :
+      integer(input.replicas, 'auto', 'replicas', 0, 2);
+    if (replicas !== 'auto' && replicas && mode !== 'light') throw new Error("replicas need mode: 'light' (full mode already mines on one shared dataset)");
     const initThreads = integer(input.initThreads, 32, 'initThreads', 1, 32);
+    const memory = number(input.memory, 50, 'memory');
+    if (memory <= 0 || memory > MAX_WORKLOAD) throw new Error(`memory must be a percentage of reported RAM above 0, at most ${MAX_WORKLOAD}`);
+    const memoryCap = number(input.memoryCap, 2, 'memoryCap');
+    if (memoryCap <= 0 || memoryCap > 64) throw new Error('memoryCap must be a size in GB above 0, at most 64');
+    if (input.optimizeArm !== undefined && typeof input.optimizeArm !== 'boolean') throw new Error('optimizeArm must be a boolean');
     return Object.freeze({ wallet, pool, port, proxy: proxy.href, assetBase: base.href,
       workerName: String(input.workerName || 'embed').slice(0, 64), workload,
-      mode, maxThreads, replicas, initThreads, tuning: tuning(input.tuning), routeQuery: input.routeQuery !== false,
+      mode, maxThreads, replicas, initThreads, memory, memoryCap, optimizeArm: input.optimizeArm === true,
+      tuning: tuning(input.tuning), routeQuery: input.routeQuery !== false,
       nonceMode: input.nonceMode || 'auto', keepalive: input.keepalive || 'auto',
       headless: input.headless === true, quickstart: input.quickstart === true,
       container: input.container, nonce: input.nonce || (script && script.nonce) || '' });
@@ -112,44 +123,82 @@
     const reported = Number(nav.hardwareConcurrency);
     // An unknown topology gets a single mining thread; a reported one-core
     // device gets none, since one thread would violate the 80% cap.
-    const cores = Number.isFinite(reported) && reported >= 1 ? Math.floor(reported) : 2;
+    const reportedCores = Number.isFinite(reported) && reported >= 1 ? Math.floor(reported) : 2;
     const architecture = String(nav.architecture || (nav === navigator && hintedArchitecture) || '');
     const platform = String(nav.platform || (nav.userAgentData && nav.userAgentData.platform) || '');
     const arm = architecture ? /^(arm|aarch64)/i.test(architecture) :
       /arm|aarch64|iPhone|iPad|iPod/i.test(String(nav.userAgent || '') + ' ' + platform) || /Mac/.test(platform);
-    const workloadCap = arm ? 50 : MAX_WORKLOAD;
+    // optimizeArm (full mode only): count half the reported cores, about the
+    // performance cores of big.LITTLE / Apple silicon parts. Light workers are
+    // independent, so efficiency cores only add to them; it never applies there.
+    const armOptimized = arm && config.optimizeArm === true && config.mode !== 'light';
+    const cores = armOptimized ? Math.max(1, Math.floor(reportedCores / 2)) : reportedCores;
+    const workloadCap = MAX_WORKLOAD;
     const maxThreads = Math.min(32, Math.floor(cores * workloadCap / 100), config.maxThreads || 32);
-    return Object.freeze({ cores, maxThreads, maxPercentage: maxThreads / cores * 100,
+    return Object.freeze({ cores, reportedCores, arm, armOptimized, maxThreads, maxPercentage: maxThreads / cores * 100,
       workloadCap,
       initThreads: config.initThreads || 32 });
   }
 
+  // Light mode's RAM budget and worker/replica split. The budget is
+  // config.memory % of the RAM the browser reports, or config.memoryCap GB
+  // where it reports none (Firefox, Safari, insecure contexts). Workers come
+  // from the CPU workload, cut to what the budget holds; replicas (0–2, or
+  // 'auto') take REPLICA_MIB more each and replace a light worker's rate with
+  // REPLICA_WEIGHT of it. 'auto' maximizes that, fewer replicas on a tie; a
+  // fixed count falls back to the most that fits. Replica builds run on
+  // initThreads threads: the pool plus temporary helper workers (own cache
+  // each, WORKER_MIB) that exist only while a build runs.
+  function lightSplit(config, wanted, deviceMemory) {
+    const reported = typeof deviceMemory === 'number' && deviceMemory > 0;
+    const budgetMiB = Math.floor(reported ? deviceMemory * 1024 * config.memory / 100 : config.memoryCap * 1024);
+    const fit = k => Math.min(wanted, Math.floor((budgetMiB - k * REPLICA_MIB) / WORKER_MIB));
+    const options = config.replicas === 'auto' ? [0, 1, 2] : Array.from({ length: config.replicas + 1 }, (_, k) => config.replicas - k);
+    let best = null;
+    for (const k of options) {
+      const workers = fit(k);
+      if (workers < Math.max(1, k)) continue;
+      const score = workers - k + REPLICA_WEIGHT * k;
+      if (config.replicas !== 'auto') { best = { workers, replicas: k }; break; }
+      if (!best || score > best.score) best = { workers, replicas: k, score };
+    }
+    const workers = best ? best.workers : 0, replicas = best ? best.replicas : 0;
+    const helpers = replicas ? Math.max(0, config.initThreads - workers) : 0;
+    return { workers, replicas, helpers, budgetMiB, memorySource: reported ? 'reported' : 'cap',
+      buildThreads: replicas ? workers + helpers : 0 };
+  }
+
   // Single source of truth for the thread, memory and disclosure math, shared
   // by create() and RandomXEmbed.plan(). Full: one engine worker owning the
-  // mining pthreads. Light: one randomx_st worker per mining thread; replicas
-  // are dropped where the browser reports under 8 GB (deviceMemory caps at 8).
+  // mining pthreads. Light: one randomx_st worker per mining thread (lightSplit).
   function resolve(config, budget, percentage, deviceMemory) {
-    const threads = Math.min(budget.maxThreads, Math.floor(budget.cores * percentage / 100 + 1e-9));
+    const wanted = Math.min(budget.maxThreads, Math.floor(budget.cores * percentage / 100 + 1e-9));
     const light = config.mode === 'light';
-    const workers = light ? threads : Math.min(threads, 1);
-    const wanted = light ? Math.min(config.replicas, workers) : 0;
-    const replicasDemoted = wanted > 0 && typeof deviceMemory === 'number' && deviceMemory < 8;
-    const replicas = replicasDemoted ? 0 : wanted;
-    // Light has no init threads of its own: every worker helps build the replicas.
-    const initThreads = light ? (replicas ? workers : 0) : config.initThreads;
+    const split = light ? lightSplit(config, wanted, deviceMemory) : null;
+    const threads = light ? split.workers : wanted;
+    const workers = light ? split.workers : Math.min(threads, 1);
+    const replicas = light ? split.replicas : 0;
+    const helpers = light ? split.helpers : 0;
+    const initThreads = light ? split.buildThreads : config.initThreads;
     const memoryMiB = light ? workers * WORKER_MIB + replicas * REPLICA_MIB : FULL_MIB;
+    const peakMemoryMiB = memoryMiB + helpers * WORKER_MIB;
+    const gb = mib => (mib / 1000).toFixed(1) + ' GB';
+    const share = (threads / budget.reportedCores * 100).toFixed(1);
     const disclosure = `Mine Monero for wallet ${config.wallet} via ${config.pool}:${config.port} (bridge ${config.proxy}). ` +
-      `Mining uses ${threads} of ${budget.cores} reported CPU cores (${(threads / budget.cores * 100).toFixed(1)}%), ` +
-      `at most ${budget.maxThreads}. ` + (light ?
-        `Light mode runs ${count(workers, 'worker')} at about ${WORKER_MIB} MB${workers === 1 ? '' : ' each'}` +
+      `Mining uses ${threads} of ${budget.reportedCores} reported CPU cores (${share}%), ` + (light ? '' : `at most ${budget.maxThreads}. `) +
+      (budget.armOptimized ? `On this ARM device it counts half of them, about its performance cores. ` : '') + (light ?
+        `${threads < wanted ? 'limited by memory, ' : ''}as ${count(workers, 'light-mode worker')} at about ${WORKER_MIB} MB${workers === 1 ? '' : ' each'}` +
         (replicas ? `; ${replicas} of them also ${replicas === 1 ? 'holds' : 'hold'} a private full dataset ` +
-          `(about ${REPLICA_MIB / 1000} GB${replicas === 1 ? '' : ' each'}), which all workers rebuild after each seed change` : '') +
-        `. It needs about ${(memoryMiB / 1000).toFixed(1)} GB of RAM in total and no isolation headers. ` :
+          `(about ${REPLICA_MIB / 1000} GB${replicas === 1 ? '' : ' each'}). Building ${replicas === 1 ? 'it' : 'them'}, at the start and after ` +
+          `each seed change (every few days), briefly uses ${count(initThreads, 'thread')} and up to about ${gb(peakMemoryMiB)} of RAM` : '') +
+        `. Mining needs about ${gb(memoryMiB)} of RAM. ` :
         `Dataset initialization uses ${count(initThreads, 'thread')}. Full mode needs about 2.5 GiB of RAM. `) +
       'This uses electricity and can heat your device or drain its battery. Stop at any time. ' +
       'Mining continues in background tabs until you stop it or leave this page; your browser may throttle or suspend it.';
-    return Object.freeze({ mode: config.mode, runtime: light ? 'workers' : 'pthreads', threads, workers, replicas,
-      replicasDemoted, initThreads, memoryMiB, disclosure, limits: budget });
+    return Object.freeze({ mode: config.mode, runtime: light ? 'workers' : 'pthreads', threads, wantedThreads: wanted, workers,
+      replicas, helpers, initThreads, memoryMiB, peakMemoryMiB,
+      memoryBudgetMiB: light ? split.budgetMiB : null, memorySource: light ? split.memorySource : null,
+      disclosure, limits: budget });
   }
 
   function plan(input = {}, nav = navigator) {
@@ -226,18 +275,56 @@
   // 'nonce_exhausted' once every slot ran out on that job, and chatty messages
   // from worker 0 only. 'mode' reports the full/light split. With replicas,
   // workers 0..replicas-1 also mine on a private full dataset that an
-  // RxFbFull.FbCoordinator on the page builds from all workers per seed.
-  function workerPool(n, url, replicas, Fb) {
+  // RxFbFull.FbCoordinator on the page builds from all workers per seed,
+  // joined by `helpers` build-only workers (indices n..n+helpers-1): spawned
+  // per seed, given its cache and chunks, terminated once the build is done.
+  // A helper that fails only leaves the build (its chunks are requeued).
+  function workerPool(n, url, replicas, Fb, helpers = 0) {
     const pool = { onmessage: null, onerror: null, onmessageerror: null };
     const workers = [], rates = new Array(n).fill(0), modes = new Array(n).fill(null), ready = new Set();
     const exhausted = new Map(); // `${job_id}/${job_seq}` -> exhausted slots
+    const builders = new Map(); // helper index -> Worker, while a build runs
+    let init = null;
     const emit = data => { if (pool.onmessage) pool.onmessage({ data }); };
     const fail = message => { if (pool.onerror) pool.onerror({ message }); };
     const sum = () => rates.reduce((a, b) => a + b, 0);
-    const fb = replicas ? new Fb.FbCoordinator({ n, full: [...Array(replicas).keys()],
-      send: (i, m, transfer) => workers[i].postMessage(m, transfer || []),
-      progress: (done, total, etaSec) => emit({ type: 'dataset_progress', done, total, etaSec, threads: n }),
-      done: (seed, full) => emit({ type: 'status', message: `Replica datasets ready: ${full.length} of ${replicas} mining in full mode` }) }) : null;
+    const fb = replicas ? new Fb.FbCoordinator({ n: n + helpers, full: [...Array(replicas).keys()],
+      send: (i, m, transfer) => {
+        const worker = i < n ? workers[i] : builders.get(i);
+        if (worker) worker.postMessage(m, transfer || []);
+        else Promise.resolve().then(() => fb.lost(i)); // a helper gone since: hand its chunk back
+      },
+      progress: (done, total, etaSec) => emit({ type: 'dataset_progress', done, total, etaSec, threads: n + builders.size }),
+      done: (seed, full) => {
+        retire();
+        emit({ type: 'status', message: `Replica datasets ready: ${full.length} of ${replicas} mining in full mode` });
+      } }) : null;
+    function retire() { builders.forEach(worker => { try { worker.terminate(); } catch (_) {} }); builders.clear(); }
+    function drop(i) {
+      const worker = builders.get(i);
+      if (!worker) return;
+      builders.delete(i);
+      try { worker.terminate(); } catch (_) {}
+      fb.lost(i);
+    }
+    function recruit(seed) {
+      retire();
+      for (let i = n; i < n + helpers; i++) {
+        let worker;
+        try { worker = new Worker(url, { name: 'rx-build-' + (i - n) }); } catch (_) { break; } // the pool builds alone
+        builders.set(i, worker);
+        worker.onmessage = ({ data }) => {
+          if (builders.get(i) !== worker || !data || typeof data !== 'object') return;
+          if (typeof data.type === 'string' && data.type.startsWith('rx:')) emit(data);
+          else if (data.type === 'error') drop(i);
+          else fb.recv(i, data);
+        };
+        worker.onerror = () => { if (builders.get(i) === worker) drop(i); };
+        worker.postMessage({ ...init, fullMemory: false, datasetThreads: 1, datasetInitThreads: 1,
+          nonceSlot: 0, nonceSlots: 1, fbRole: 'light', helper: true });
+        worker.postMessage({ type: 'seed', seed_hash: seed });
+      }
+    }
     function recv(i, msg) {
       if (!msg || typeof msg !== 'object' || (fb && fb.recv(i, msg))) return;
       if (typeof msg.type === 'string' && msg.type.startsWith('rx:')) { emit(msg); return; }
@@ -285,13 +372,18 @@
     pool.postMessage = msg => {
       if (msg.type === 'stop') rates.fill(0);
       if (msg.type === 'stop' || msg.type === 'job') exhausted.clear();
-      // A new seed starts a replica build (the workers report fb_cache once rekeyed).
-      if (fb && msg.type === 'job') fb.epoch(msg.seed_hash);
+      if (msg.type === 'init') init = msg;
+      // A new seed starts a replica build (the workers report fb_cache once
+      // rekeyed) and recruits its helpers.
+      if (fb && msg.type === 'job' && msg.seed_hash !== fb.seed) {
+        fb.epoch(msg.seed_hash);
+        if (helpers && init) recruit(msg.seed_hash);
+      }
       workers.forEach((worker, i) => worker.postMessage(msg.type !== 'init' ? msg : { ...msg, fullMemory: false,
         datasetThreads: 1, datasetInitThreads: 1, nonceSlot: i, nonceSlots: n,
         ...(fb ? { fbRole: i < replicas ? 'full' : 'light' } : {}) }));
     };
-    pool.terminate = () => workers.forEach(worker => { try { worker.terminate(); } catch (_) {} });
+    pool.terminate = () => { retire(); workers.forEach(worker => { try { worker.terminate(); } catch (_) {} }); };
     return pool;
   }
 
@@ -367,7 +459,8 @@
       return Object.freeze({ ...state, workload: percentage, threads: p.threads,
         effectivePercentage: p.threads / budget.cores * 100, nicehash: !!(session && session.nicehash), limits: budget, config,
         engine: Object.freeze({ mode: p.mode, runtime: p.runtime, workers: p.workers, replicas: p.replicas,
-          replicasActive: session ? session.replicasActive : 0, memoryMiB: p.memoryMiB }) });
+          replicasActive: session ? session.replicasActive : 0, helpers: p.helpers, memoryMiB: p.memoryMiB,
+          peakMemoryMiB: p.peakMemoryMiB, memoryBudgetMiB: p.memoryBudgetMiB, memorySource: p.memorySource }) });
     }
     function emit(name, detail) {
       for (const fn of listeners.get(name) || []) { try { fn(detail); } catch (error) { console.error(error); } }
@@ -435,6 +528,10 @@
     }
     function supportCheck() {
       if (!budget.maxThreads) throw new Error('This device has no mining threads within the configured core limit');
+      const p = planNow();
+      if (light && !p.threads && p.wantedThreads) throw new Error(p.memorySource === 'reported' ?
+        `The memory share (${config.memory}% of reported RAM) is below one light worker (about ${WORKER_MIB} MB)` :
+        `The memory cap (${config.memoryCap} GB, used where the browser reports no RAM) is below one light worker (about ${WORKER_MIB} MB)`);
       if (!threads()) throw new Error('Increase workload enough to allow at least one mining thread');
       const report = diagnose(config.mode);
       if (!report.supported) throw Object.assign(new Error(unsupported), { code: 'DEPLOYMENT_UNSUPPORTED', hints: flatHints(report) });
@@ -648,10 +745,13 @@
     async function begin() {
       if (destroyed || state.running) return;
       const ticket = consentTicket;
-      const approvedWorkload = percentage;
+      const approvedWorkload = percentage, approved = planNow();
       await architectureReady;
       if (destroyed || state.running || ticket !== consentTicket) return;
       percentage = Math.min(approvedWorkload, budget.workloadCap);
+      // Late architecture discovery (optimizeArm) may lower the approved
+      // thread count, never raise it.
+      const resolved = planNow(), p = resolved.threads > approved.threads ? approved : resolved;
       try { supportCheck(); } catch (error) {
         fail({ code: error.code || 'START_UNAVAILABLE', stage: 'preflight', message: error.message, hints: error.hints }); return;
       }
@@ -660,7 +760,6 @@
       }
       global[ownerKey] = api;
       attempt = 0;
-      const p = planNow();
       const s = { epoch: ++epoch, children: new Map(), urls: [], abort: new AbortController(), ready: false, datasetReady: false,
         plan: p, replicasActive: 0 };
       session = s;
@@ -687,7 +786,7 @@
         const url = URL.createObjectURL(new Blob([bootstrap], { type: 'application/javascript' }));
         s.urls.push(url);
         policyAttempt.stage = 'worker';
-        s.worker = light ? workerPool(p.workers, url, p.replicas, global.RxFbFull) : new Worker(url);
+        s.worker = light ? workerPool(p.workers, url, p.replicas, global.RxFbFull, p.helpers) : new Worker(url);
         s.worker.onmessage = ({ data }) => { try { workerMessage(s, data); } catch (error) { if (isCurrent(s)) workerFailure('Engine message failed: ' + error.message); } };
         s.worker.onerror = (event) => { if (isCurrent(s)) workerFailure('Engine worker failed: ' + (event.message || 'unknown error')); };
         s.worker.onmessageerror = () => { if (isCurrent(s)) workerFailure('Engine message could not be decoded'); };
@@ -883,7 +982,8 @@
   }
 
   global.RandomXEmbed = Object.freeze({ version: VERSION, create, diagnose, plan,
-    limits: (input = {}, nav) => limits({ maxThreads: integer(input.maxThreads, null, 'maxThreads', 1, 32),
+    limits: (input = {}, nav) => limits({ mode: input.mode === 'light' ? 'light' : 'full', optimizeArm: input.optimizeArm === true,
+      maxThreads: integer(input.maxThreads, null, 'maxThreads', 1, 32),
       initThreads: integer(input.initThreads, 32, 'initThreads', 1, 32) }, nav) });
   function autoMount() {
     if (!script || !script.hasAttribute('data-wallet') || script.dataset.auto === 'false') return;
@@ -892,7 +992,9 @@
       const instance = create({ wallet: data.wallet, pool: data.pool, port: data.port, proxy: data.proxy,
         workload: data.workload, workerName: data.workerName, routeQuery: data.routeQuery !== 'false',
         nonceMode: data.nonceMode, keepalive: data.keepalive,
-        mode: data.mode, maxThreads: data.maxThreads, replicas: data.replicas, initThreads: data.initThreads, headless: data.headless === 'true', quickstart: data.quickstart === 'true',
+        mode: data.mode, maxThreads: data.maxThreads, replicas: data.replicas, initThreads: data.initThreads,
+        memory: data.memory, memoryCap: data.memoryCap, optimizeArm: data.optimizeArm === undefined ? undefined : data.optimizeArm === 'true',
+        headless: data.headless === 'true', quickstart: data.quickstart === 'true',
         container: data.container, assetBase: data.assetBase, nonce: script.nonce });
       global.dispatchEvent(new CustomEvent('randomx:ready', { detail: { instance } }));
     } catch (error) {

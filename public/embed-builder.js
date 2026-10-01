@@ -19,6 +19,8 @@
       workerName: field('workerName').value.trim(), workload: Number(field('workload').value),
       nonceMode: field('nonceMode').value, keepalive: field('keepalive').value,
       mode: field('mode').value, headless: field('display').value === 'headless', quickstart: field('quickstart').checked };
+    // This builder has no full-dataset control: its light snippets stay replica-free.
+    if (config.mode === 'light') config.replicas = 0;
     return config;
   }
   const html = text => String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

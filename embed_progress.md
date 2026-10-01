@@ -163,6 +163,28 @@ pushed; the configurator below pins it.
 These checks used a fixture pool; they do not establish acceptance by a
 real pool.
 
+## Light-mode budget, 2026-10-01 (after the configurator)
+
+Operator ergonomics for light mode: choose a CPU `workload`, a RAM budget and
+whether the full-dataset boost may be used; the embed derives the rest per
+visitor device (README "Light mode").
+
+- `memory` (% of reported RAM, default 50) and `memoryCap` (GB where the
+  browser reports none, default 2) form the budget; workers are cut to it.
+- `replicas: 'auto'` (new default) picks 0–2 by `light workers + 2.25 ×
+  replicas` within the budget; fixed counts fall back to what fits. The old
+  "drop below 8 GB" rule is gone.
+- Replica builds use `initThreads` (default 32, the user's choice) threads:
+  the pool plus temporary helper workers (`seed` message in `worker.js`,
+  `FbCoordinator.lost()` requeues a failed helper's chunks). Helpers take
+  ~300 MB each while the build runs; `plan().peakMemoryMiB` and the
+  disclosure state the peak, which is above the RAM budget by design.
+- The ARM 50% workload cap is gone; `optimizeArm` (full mode only, default
+  off) counts half the reported cores on ARM devices. A session approved
+  before Chromium's architecture hint never runs more threads than approved.
+- The 2.25 weight and the build-helper speedup are x86 (5600X) figures; they
+  need the idle-machine bench pass on the M4.
+
 ## Configurator, 2026-10-01
 
 `netlify-demo/` replaces the single-widget test page with the operator's
