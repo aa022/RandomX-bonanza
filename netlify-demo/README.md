@@ -51,7 +51,7 @@ Start click (or the site consent notice for headless/quickstart). Stop,
 ## The pin
 
 The page loads `embed.js` (`data-auto="false"`, `crossorigin`) from jsDelivr,
-pinned to commit `2f5603ecb1f3b5291649b7c661ee5cd94912a5e3` on
+pinned to commit `d71ea8b607af072452edb3268c1fdf7225a7a4bf` on
 `embed-v0.2.0-demo` (embed 0.3.0). The engine assets resolve from the same
 pinned `dist/` directory, and nothing from `dist/` is uploaded to Netlify. The
 **Script URL** field defaults to the embed this page loaded, so exported
