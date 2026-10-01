@@ -48,7 +48,9 @@
   const html = text => String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const json = value => JSON.stringify(value, null, 2).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
   function snippet(config) {
-    const src = new URL(field('scriptURL').value.trim(), location.href);
+    // Absolute only: the snippet runs on the operator's site, not on this page.
+    let src;
+    try { src = new URL(field('scriptURL').value.trim()); } catch (_) { throw new Error('Script URL must be absolute: https://…/dist/embed.js'); }
     if (!['http:', 'https:'].includes(src.protocol) || src.username || src.password) throw new Error('Use an HTTP(S) embed script URL');
     const lines = [];
     if (config.mode === 'full') {
@@ -99,7 +101,8 @@ document.addEventListener('randomx:consent-request', function (event) {
       ['Workload', `${percent} % → ${p.threads} thread${p.threads === 1 ? '' : 's'}`]];
     if (p.mode === 'light') {
       rows.push(['Light workers', String(p.workers)],
-        ['Replicas', p.replicasDemoted ? `0: dropped, this browser reports ${memory} GB of memory` : String(p.replicas)],
+        ['Replicas', p.replicasDemoted ? `0: dropped, this browser reports ${memory} GB of memory` :
+          p.replicas < config.replicas ? `${p.replicas}: at most one per worker` : String(p.replicas)],
         ['RAM', `about ${gb(p.memoryMiB)} (${p.workers} × 0.3 GB${p.replicas ? ` + ${p.replicas} × 2.3 GB` : ''})`]);
     } else {
       rows.push(['Dataset build', `${p.initThreads} threads, at the start and after each seed change`], ['RAM', 'about 2.5 GiB']);
@@ -121,6 +124,7 @@ document.addEventListener('randomx:consent-request', function (event) {
       const invalid = form.querySelector('input:invalid, select:invalid');
       if (invalid) throw new Error(invalid.closest('label').firstChild.textContent.trim() + ': ' + invalid.validationMessage);
       const config = settings();
+      try { new URL(config.proxy); } catch (_) { throw new Error('WebSocket bridge: enter a wss:// URL'); }
       // The embed's own validation and thread/memory math, without an instance.
       estimate(RandomXEmbed.plan(config), config);
       output.value = snippet(config);
@@ -137,14 +141,18 @@ document.addEventListener('randomx:consent-request', function (event) {
     }
   }
 
-  async function copy(text, done, fallback) {
-    try { await navigator.clipboard.writeText(text); status.textContent = done; }
-    catch (_) { if (fallback) { fallback.focus(); fallback.select(); } status.textContent = 'Select the text and copy it'; }
+  // Confirms beside the button that was pressed; without clipboard access, selects the text instead.
+  async function copy(text, done, out, select) {
+    try { await navigator.clipboard.writeText(text); out.textContent = done; }
+    catch (_) { select(); out.textContent = 'Select the text and copy it'; }
   }
   form.addEventListener('submit', event => event.preventDefault());
   form.addEventListener('input', render);
-  $('copySnippet').addEventListener('click', () => { if (render()) copy(output.value, 'Snippet copied', output); });
-  $('copyHeaders').addEventListener('click', () => copy(HEADERS.join('\n'), 'Headers copied'));
+  $('copySnippet').addEventListener('click', () => {
+    if (render()) copy(output.value, 'Snippet copied', status, () => { output.focus(); output.select(); });
+  });
+  $('copyHeaders').addEventListener('click', () =>
+    copy(HEADERS.join('\n'), 'Headers copied', $('headerStatus'), () => getSelection().selectAllChildren($('headerBlock'))));
   $('switchLight').addEventListener('click', () => {
     const light = form.querySelector('input[name=mode][value=light]');
     light.checked = true; render(); light.focus();
@@ -158,8 +166,10 @@ document.addEventListener('randomx:consent-request', function (event) {
     previewStatus.textContent = message;
     render();
   }
-  $('showPreview').addEventListener('click', () => {
-    if (!render()) { form.reportValidity(); return; }
+  $('showPreview').addEventListener('click', event => {
+    // A quickstart instance arms a document listener below; this click must not be its first interaction.
+    event.stopPropagation();
+    if (!render()) { previewStatus.textContent = 'Fix the settings first: ' + status.textContent; form.reportValidity(); return; }
     if (instance) instance.destroy();
     preview.replaceChildren();
     // The configured settings as they are, with the embed this page loaded.

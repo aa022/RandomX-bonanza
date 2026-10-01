@@ -192,3 +192,23 @@ Checked in headless Chrome against a local fake bridge only:
   non-isolated fixture pages, light mining on the non-isolated one.
 
 No hashrate numbers were recorded.
+
+Operator review (same day): 1280 / 390 px, light / dark, isolated,
+`--no-isolation` and behind an HTTPS front, against a local fake bridge.
+Fixed:
+- at 390 px the headless preview's disclosure and the consent notice
+  overflowed: the unbroken wallet widened the mobile layout viewport;
+- a relative Script URL resolved against the configurator's own origin; it
+  must now be absolute;
+- Copy headers confirmed in the snippet section, far below the button;
+- the Show preview click itself opened a quickstart preview's consent notice
+  instead of the next interaction;
+- Show preview with invalid settings said nothing beside the button, and an
+  unparsable bridge URL showed the URL constructor's message;
+- the estimate now says why replicas are capped at one per worker.
+
+Re-checked after the fixes: the full widget snippet on an isolated blank page
+and the light headless + quickstart snippet with 1 replica on a non-isolated
+one mine only after consent, with the chosen `state.engine` (replica active),
+NiceHash byte 42 kept and shares re-hashing in Node. Preview mining works in
+both modes, and Stop and Remove preview end every worker and the socket.

@@ -55,7 +55,8 @@ pinned to commit `2f5603ecb1f3b5291649b7c661ee5cd94912a5e3` on
 `embed-v0.2.0-demo` (embed 0.3.0). The engine assets resolve from the same
 pinned `dist/` directory, and nothing from `dist/` is uploaded to Netlify. The
 **Script URL** field defaults to the embed this page loaded, so exported
-snippets carry the same pin.
+snippets carry the same pin. It must be absolute: the snippet runs on the
+operator's site, not on this page.
 
 jsDelivr serves that commit only once it is pushed to GitHub. To move the
 pin, commit `dist/` first. Then change the SHA in `index.html` (and here) in
