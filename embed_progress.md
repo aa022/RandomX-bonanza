@@ -1,8 +1,8 @@
 # Embed progress
 
-Updated: 2026-09-30.
+Updated: 2026-10-01.
 
-**Status: the runtime is committed and pushed on `embed-v0.2.0-demo` at `cdebaa57f2855d657c0424fe0e405c4aad8af839`. The user deployed `netlify-demo/` at https://fluffy-elf-267140.netlify.app/. Runtime 0.2.1 fixes background sessions; genuine public-pool share acceptance is still pending.**
+**Status: runtime 0.2.1 is committed and pushed on `embed-v0.2.0-demo` at `cdebaa57f2855d657c0424fe0e405c4aad8af839`; the user deployed `netlify-demo/` at https://fluffy-elf-267140.netlify.app/ against it. Runtime 0.2.1 fixes background sessions; genuine public-pool share acceptance is still pending. Embed 0.3.0 (light-mode worker pool, [below](#embed-030-2026-10-01)) is committed locally only; the demo does not pin it yet.**
 
 ## Completed
 
@@ -97,3 +97,68 @@ instead of an empty close frame. All 38 deterministic checks and the real-browse
 regression suite passed, including hidden-tab shares/reconnects with identical
 workers and one cache/dataset build. Runtime 0.2.1 is published at the status
 commit above; all five CDN assets returned HTTP 200 and matching hashes.
+
+## Embed 0.3.0, 2026-10-01
+
+After the `perf/amd64` merge (the no-SharedArrayBuffer fallback), the embed
+gains a light mode that runs without isolation headers and a wider control
+API. Full mode is unchanged. Committed locally on `embed-v0.2.0-demo`, not
+pushed; the Netlify demo still pins 0.2.1.
+
+- **Light mode is the `randomx_st` worker pool**, a port of `NoSabPool`:
+  one single-thread worker per mining thread, ~300 MB each, disjoint nonce
+  slots, no SharedArrayBuffer. It replaces 0.2.1's one-thread pthread light
+  mode, on isolated pages too. Reconnects keep every worker and cache; Stop
+  and pagehide terminate all of them.
+- **Replicas** (`replicas: 0–2`, light only): workers that also mine on a
+  private full dataset (~2.3 GB each), built by all workers after each seed
+  change. The page loads `fb_full.js` after consent as a `<script>` from the
+  asset base. Dropped when `navigator.deviceMemory` reports under 8.
+- **New options:** `maxThreads` (absolute ceiling), `initThreads` (full mode,
+  disclosed), API-only `tuning` (`profile`, `jit`, `lightMlp`, `kernelK`,
+  and `experiment` limited to hash-safe `jit_exp` tokens), and
+  `data-max-threads` / `data-replicas` / `data-init-threads`. Modes stay
+  strictly `full` | `light`; the embed never switches mode by itself.
+- **New API:** `RandomXEmbed.plan()` (threads, workers, RAM and disclosure
+  without an instance or network), `diagnose(mode)` with `modes: {full,
+  light}`, and `state.engine`. Full mode on a non-isolated page fails at
+  preflight with the header hints plus one pointer to `mode: 'light'`.
+- **Disclosure and status** state the light worker count, per-worker and
+  replica RAM and the total; full mode states its initialization threads.
+- **Packaging:** `dist/` ships 8 engine files (adds `randomx_st.js`/`.wasm`
+  and `fb_full.js`); `coi-sw.js` is deferred and not shipped. The login
+  agent is `randomx-embed/0.3.0`.
+- **Review fixes before the commit:** `tuning.experiment` rejects the
+  timing-only `reuse`/`reuse2` tokens (wrong hashes on purpose) and unknown
+  tokens; `mode: null`, `false` or `0` throws instead of becoming full;
+  Chromium's architecture hint is requested once per page, so `plan()`
+  agrees with `create()` on Intel Macs and Windows on ARM; status lines say
+  "1 worker" / "1 thread". The builder's light-mode label and budget line
+  follow the plan.
+
+### Validation, 2026-10-01
+
+- `make test-embed`: **57 tests passed**. The new tests cover the pool
+  bootstrap and `init` fields, aggregation, Stop, non-isolated light starts,
+  replicas and their demotion, `plan()`, `diagnose(mode)` and validation
+  (worker nonce slots were covered in the merge step). Each review fix's test fails against the code before
+  the fix (checked in scratch copies).
+- `make embed`: 8 files, each identical to its `public/` source and matching
+  the manifest's size, SHA-256 and SHA-384; version 0.3.0.
+- Real Chrome (headless `tests/embed-browser.cjs`, fixture pool and local
+  bridge only): all 21 checks passed. Light mode on a page without COOP/COEP
+  with 3 workers was consent-gated, loaded only the `randomx_st` build, got
+  accepted NiceHash shares in each worker's own nonce slot, kept the same
+  workers and caches across a pool reconnect, and Stop terminated every
+  worker. Light mode on an isolated page and `replicas: 1` also passed, the
+  latter with worker 0 mining on its replica. Full mode on a header-less
+  page failed at preflight with one light-mode hint, and the CSP/policy cases
+  passed in both modes. 15 submitted light-mode shares (5 from the replica's
+  full dataset) re-hash in Node to their submitted results. The 0.2.1 full-mode
+  checks passed unchanged.
+- **No hashrate numbers.** The machine was heavily loaded by other work
+  during this validation, so H/s figures would mean nothing. They are
+  pending one bench pass on an idle machine.
+
+These checks used a fixture pool; they do not establish acceptance by a
+real pool.

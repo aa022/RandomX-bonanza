@@ -6,14 +6,61 @@
   const script = document.currentScript;
   const defaultBase = new URL('.', script && script.src || location.href).href;
   const ownerKey = Symbol.for('randomx.bonanza.active-session');
-  const VERSION = '0.2.1';
+  const VERSION = '0.3.0';
   const MAX_WORKLOAD = 80;
+  // Approximate RAM (MiB; light-mode texts state them as MB/GB, like the
+  // no-SAB docs): the pthread full mode, one randomx_st light worker (its own
+  // 256 MiB cache), one light-mode full-dataset replica.
+  const FULL_MIB = 2560, WORKER_MIB = 300, REPLICA_MIB = 2300;
+  const LIGHT_HINT = "Or set mode: 'light', which needs no isolation headers.";
+  const count = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
 
   function number(value, fallback, label) {
     if (value === undefined || value === '') return fallback;
     const n = Number(value);
     if (!Number.isFinite(n)) throw new Error(label + ' must be a finite number');
     return n;
+  }
+
+  function integer(value, fallback, label, min, max) {
+    if (value === undefined || value === null || value === '') return fallback;
+    const n = ['number', 'string'].includes(typeof value) ? Number(value) : NaN;
+    if (!Number.isInteger(n) || n < min || n > max) throw new Error(`${label} must be an integer from ${min} to ${max}`);
+    return n;
+  }
+
+  // API-only engine knobs, passed to every worker's init (worker.js jitProfile,
+  // enableJit, jitExperiment). Only the keys the operator set are kept.
+  // experiment takes only the hash-safe worker.js jit_exp tokens: reuse and
+  // reuse2 (timing-only, wrong hashes on purpose) and unknown tokens throw.
+  const EXPERIMENT = /^(?:no_(?:threaded|inline_fprc|regs_mem|split_id|fuse|inline_round|supjit)|unroll2|(?:fuse_n|triples_n|unroll2|shared_code|aes_simd|aes_relaxed|light_mlp|kernel_k)=\d+)$/i;
+  const TUNING = {
+    profile: [v => ['auto', 'arm', 'x86'].includes(v), 'auto, arm or x86'],
+    jit: [v => typeof v === 'boolean', 'a boolean'],
+    lightMlp: [v => Number.isInteger(v) && v >= 0 && v <= 2, 'an integer from 0 to 2'],
+    kernelK: [v => Number.isInteger(v) && v >= 1 && v <= 4, 'an integer from 1 to 4'],
+    experiment: [v => typeof v === 'string' && v.length <= 256 && v.split(',').every(t => !t || EXPERIMENT.test(t)),
+      'a comma-separated list of hash-safe engine tokens (see README), at most 256 characters'],
+  };
+  function tuning(input) {
+    if (input === undefined || input === null) return Object.freeze({});
+    const proto = input && typeof input === 'object' && !Array.isArray(input) ? Object.getPrototypeOf(input) : undefined;
+    // Realm-agnostic: the embed and its caller may have different Object.prototypes.
+    if (!(proto === null || (proto && Object.getPrototypeOf(proto) === null))) throw new Error('tuning must be a plain object');
+    const out = {};
+    for (const [key, value] of Object.entries(input)) {
+      if (!Object.prototype.hasOwnProperty.call(TUNING, key)) throw new Error('Unknown tuning option ' + key);
+      if (value === undefined) continue;
+      if (!TUNING[key][0](value)) throw new Error(`tuning.${key} must be ${TUNING[key][1]}`);
+      out[key] = value;
+    }
+    return Object.freeze(out);
+  }
+  // worker.js jit_exp tokens: the typed knobs first (the worker takes the
+  // first k=N match), then the free-form experiment tokens.
+  function jitExperiment(t) {
+    return [t.lightMlp !== undefined && 'light_mlp=' + t.lightMlp, t.kernelK !== undefined && 'kernel_k=' + t.kernelK,
+      ...(t.experiment || '').split(',')].filter(Boolean).join(',');
   }
 
   function configure(input) {
@@ -36,35 +83,83 @@
     if (location.protocol === 'https:' && base.protocol !== 'https:') throw new Error('HTTPS pages require HTTPS assets');
     if (!base.pathname.endsWith('/')) base.pathname += '/';
     base.search = ''; base.hash = '';
-    if (input.mode && !['full', 'light'].includes(input.mode)) throw new Error('Mode must be full or light');
+    if (![undefined, '', 'full', 'light'].includes(input.mode)) throw new Error('Mode must be full or light');
     if (input.routeQuery !== undefined && typeof input.routeQuery !== 'boolean') throw new Error('routeQuery must be a boolean');
     if (input.nonceMode !== undefined && !['auto', 'nicehash'].includes(input.nonceMode)) throw new Error('nonceMode must be auto or nicehash');
     if (input.keepalive !== undefined && !['auto', 'required'].includes(input.keepalive)) throw new Error('keepalive must be auto or required');
+    const mode = input.mode || 'full';
+    const maxThreads = integer(input.maxThreads, null, 'maxThreads', 1, 32);
+    const replicas = integer(input.replicas, 0, 'replicas', 0, 2);
+    if (replicas && mode !== 'light') throw new Error("replicas need mode: 'light' (full mode already mines on one shared dataset)");
+    const initThreads = integer(input.initThreads, 32, 'initThreads', 1, 32);
     return Object.freeze({ wallet, pool, port, proxy: proxy.href, assetBase: base.href,
       workerName: String(input.workerName || 'embed').slice(0, 64), workload,
-      mode: input.mode || 'full', routeQuery: input.routeQuery !== false,
+      mode, maxThreads, replicas, initThreads, tuning: tuning(input.tuning), routeQuery: input.routeQuery !== false,
       nonceMode: input.nonceMode || 'auto', keepalive: input.keepalive || 'auto',
       headless: input.headless === true, quickstart: input.quickstart === true,
       container: input.container, nonce: input.nonce || (script && script.nonce) || '' });
   }
+
+  // Chromium reports the CPU architecture only asynchronously: asked once per
+  // page, so plan() and create() agree once it resolves. Until then (and in
+  // other browsers) limits() infers it from the platform string.
+  let hintedArchitecture = '';
+  const architectureHint = navigator.userAgentData && navigator.userAgentData.getHighEntropyValues ?
+    navigator.userAgentData.getHighEntropyValues(['architecture'])
+      .then(({ architecture }) => { hintedArchitecture = String(architecture || ''); }).catch(() => {}) : null;
 
   function limits(config, nav = navigator) {
     const reported = Number(nav.hardwareConcurrency);
     // An unknown topology gets a single mining thread; a reported one-core
     // device gets none, since one thread would violate the 80% cap.
     const cores = Number.isFinite(reported) && reported >= 1 ? Math.floor(reported) : 2;
-    const architecture = String(nav.architecture || '');
+    const architecture = String(nav.architecture || (nav === navigator && hintedArchitecture) || '');
     const platform = String(nav.platform || (nav.userAgentData && nav.userAgentData.platform) || '');
     const arm = architecture ? /^(arm|aarch64)/i.test(architecture) :
       /arm|aarch64|iPhone|iPad|iPod/i.test(String(nav.userAgent || '') + ' ' + platform) || /Mac/.test(platform);
     const workloadCap = arm ? 50 : MAX_WORKLOAD;
-    const maxThreads = Math.min(32, Math.floor(cores * workloadCap / 100), config.mode === 'light' ? 1 : 32);
+    const maxThreads = Math.min(32, Math.floor(cores * workloadCap / 100), config.maxThreads || 32);
     return Object.freeze({ cores, maxThreads, maxPercentage: maxThreads / cores * 100,
       workloadCap,
-      initThreads: 32 });
+      initThreads: config.initThreads || 32 });
   }
 
-  function diagnose() {
+  // Single source of truth for the thread, memory and disclosure math, shared
+  // by create() and RandomXEmbed.plan(). Full: one engine worker owning the
+  // mining pthreads. Light: one randomx_st worker per mining thread; replicas
+  // are dropped where the browser reports under 8 GB (deviceMemory caps at 8).
+  function resolve(config, budget, percentage, deviceMemory) {
+    const threads = Math.min(budget.maxThreads, Math.floor(budget.cores * percentage / 100 + 1e-9));
+    const light = config.mode === 'light';
+    const workers = light ? threads : Math.min(threads, 1);
+    const wanted = light ? Math.min(config.replicas, workers) : 0;
+    const replicasDemoted = wanted > 0 && typeof deviceMemory === 'number' && deviceMemory < 8;
+    const replicas = replicasDemoted ? 0 : wanted;
+    // Light has no init threads of its own: every worker helps build the replicas.
+    const initThreads = light ? (replicas ? workers : 0) : config.initThreads;
+    const memoryMiB = light ? workers * WORKER_MIB + replicas * REPLICA_MIB : FULL_MIB;
+    const disclosure = `Mine Monero for wallet ${config.wallet} via ${config.pool}:${config.port} (bridge ${config.proxy}). ` +
+      `Mining uses ${threads} of ${budget.cores} reported CPU cores (${(threads / budget.cores * 100).toFixed(1)}%), ` +
+      `at most ${budget.maxThreads}. ` + (light ?
+        `Light mode runs ${count(workers, 'worker')} at about ${WORKER_MIB} MB${workers === 1 ? '' : ' each'}` +
+        (replicas ? `; ${replicas} of them also ${replicas === 1 ? 'holds' : 'hold'} a private full dataset ` +
+          `(about ${REPLICA_MIB / 1000} GB${replicas === 1 ? '' : ' each'}), which all workers rebuild after each seed change` : '') +
+        `. It needs about ${(memoryMiB / 1000).toFixed(1)} GB of RAM in total and no isolation headers. ` :
+        `Dataset initialization uses ${count(initThreads, 'thread')}. Full mode needs about 2.5 GiB of RAM. `) +
+      'This uses electricity and can heat your device or drain its battery. Stop at any time. ' +
+      'Mining continues in background tabs until you stop it or leave this page; your browser may throttle or suspend it.';
+    return Object.freeze({ mode: config.mode, runtime: light ? 'workers' : 'pthreads', threads, workers, replicas,
+      replicasDemoted, initThreads, memoryMiB, disclosure, limits: budget });
+  }
+
+  function plan(input = {}, nav = navigator) {
+    const config = configure(input);
+    const budget = limits(config, nav);
+    return resolve(config, budget, Math.min(config.workload, budget.workloadCap), nav.deviceMemory);
+  }
+
+  function diagnose(mode = 'full') {
+    if (!['full', 'light'].includes(mode)) throw new Error('Mode must be full or light');
     let isolationAllowed = null;
     try {
       const policy = document.permissionsPolicy || document.featurePolicy;
@@ -77,22 +172,31 @@
       sharedArrayBuffer: typeof SharedArrayBuffer !== 'undefined',
       workers: typeof global.Worker === 'function', webAssembly: !!global.WebAssembly,
       isolationAllowed, embedded: !!global.top && global.top !== global });
+    // Light mode (randomx_st workers) needs only Worker and WebAssembly.
+    const engine = checks.workers && checks.webAssembly;
+    const light = engine ? [] : [Object.freeze({ code: 'ENGINE_UNSUPPORTED', message: 'Worker or WebAssembly support is unavailable.',
+      hints: Object.freeze(['Use a browser with Web Workers and WebAssembly support.']) })];
     const issues = [];
     const add = (code, message, hints) => issues.push(Object.freeze({ code, message, hints: Object.freeze(hints) }));
+    const alt = engine ? [LIGHT_HINT] : [];
     if (!checks.secureContext) add('INSECURE_CONTEXT', 'This page is not a secure context.',
       ['Serve the embedding page over HTTPS. Trusted localhost is suitable for local browser testing.']);
     if (!checks.crossOriginIsolated) add('CROSS_ORIGIN_ISOLATION', 'This page is not cross-origin isolated.',
       ['Check the HTML response: Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp.',
        'Set these on the embedding page, not just the CDN or WebSocket bridge. Reload after fixing the headers.',
-       ...(checks.embedded ? ['For an iframe, the parent page must also provide isolation and allow cross-origin-isolated for the frame.'] : [])]);
+       ...(checks.embedded ? ['For an iframe, the parent page must also provide isolation and allow cross-origin-isolated for the frame.'] : []), ...alt]);
     if (checks.isolationAllowed === false) add('PERMISSIONS_POLICY', 'Permissions Policy denies cross-origin isolation.',
-      ['Allow cross-origin-isolated for this page (for example, Permissions-Policy: cross-origin-isolated=(self)); check parent/frame delegation if embedded.']);
+      ['Allow cross-origin-isolated for this page (for example, Permissions-Policy: cross-origin-isolated=(self)); check parent/frame delegation if embedded.', ...alt]);
     if (checks.crossOriginIsolated && !checks.sharedArrayBuffer) add('SHARED_MEMORY_UNAVAILABLE', 'SharedArrayBuffer is unavailable in this browser.',
-      ['Use a browser with shared WebAssembly memory support; inspect browser restrictions and Permissions Policy.']);
-    if (!checks.workers || !checks.webAssembly) add('ENGINE_UNSUPPORTED', 'Worker or WebAssembly support is unavailable.',
+      ['Use a browser with shared WebAssembly memory support; inspect browser restrictions and Permissions Policy.', ...alt]);
+    if (!engine) add('ENGINE_UNSUPPORTED', 'Worker or WebAssembly support is unavailable.',
       ['Use a browser with Web Workers, WebAssembly and shared memory support.']);
-    return Object.freeze({ supported: issues.length === 0, checks, issues: Object.freeze(issues) });
+    const report = mode === 'light' ? light : issues;
+    return Object.freeze({ supported: report.length === 0, checks, issues: Object.freeze(report),
+      modes: Object.freeze({ full: issues.length === 0, light: engine }) });
   }
+  // Issue messages and hints, once each (the light-mode hint repeats per isolation issue).
+  const flatHints = report => [...new Set(report.issues.flatMap(issue => [issue.message, ...issue.hints]))];
 
   function safeResource(value) {
     if (String(value).startsWith('blob:')) return 'blob:';
@@ -113,6 +217,82 @@
       self.postMessage({ type: 'rx:policy-error', effectiveDirective: event.effectiveDirective,
         blockedURI: event.blockedURI, disposition: event.disposition });
     });
+  }
+
+  // Light mode: a Worker-shaped facade over n single-thread randomx_st workers
+  // (ported from miner.js NoSabPool). init fans out with a disjoint nonce slot
+  // each; 'ready' once every worker is, hashrates summed, shares and policy
+  // reports passed through, errors tagged with the worker index,
+  // 'nonce_exhausted' once every slot ran out on that job, and chatty messages
+  // from worker 0 only. 'mode' reports the full/light split. With replicas,
+  // workers 0..replicas-1 also mine on a private full dataset that an
+  // RxFbFull.FbCoordinator on the page builds from all workers per seed.
+  function workerPool(n, url, replicas, Fb) {
+    const pool = { onmessage: null, onerror: null, onmessageerror: null };
+    const workers = [], rates = new Array(n).fill(0), modes = new Array(n).fill(null), ready = new Set();
+    const exhausted = new Map(); // `${job_id}/${job_seq}` -> exhausted slots
+    const emit = data => { if (pool.onmessage) pool.onmessage({ data }); };
+    const fail = message => { if (pool.onerror) pool.onerror({ message }); };
+    const sum = () => rates.reduce((a, b) => a + b, 0);
+    const fb = replicas ? new Fb.FbCoordinator({ n, full: [...Array(replicas).keys()],
+      send: (i, m, transfer) => workers[i].postMessage(m, transfer || []),
+      progress: (done, total, etaSec) => emit({ type: 'dataset_progress', done, total, etaSec, threads: n }),
+      done: (seed, full) => emit({ type: 'status', message: `Replica datasets ready: ${full.length} of ${replicas} mining in full mode` }) }) : null;
+    function recv(i, msg) {
+      if (!msg || typeof msg !== 'object' || (fb && fb.recv(i, msg))) return;
+      if (typeof msg.type === 'string' && msg.type.startsWith('rx:')) { emit(msg); return; }
+      switch (msg.type) {
+        case 'ready':
+          ready.add(i);
+          if (ready.size === n) emit(msg);
+          break;
+        case 'hashrate':
+          rates[i] = Number.isFinite(msg.rate) ? msg.rate : 0;
+          emit({ type: 'hashrate', rate: sum() });
+          break;
+        case 'mode': {
+          // Every report: a worker with a cache for the new seed can mine.
+          modes[i] = msg.mode;
+          const full = modes.filter(m => m === 'full').length;
+          emit({ type: 'mode', mode: full === n ? 'full' : full ? 'mixed' : 'light', full, light: n - full });
+          break;
+        }
+        case 'nonce_exhausted': {
+          // A worker exhausts only its own slot: its rate leaves the sum now;
+          // the page is out of nonces once every slot is, for the same job.
+          rates[i] = 0;
+          emit({ type: 'hashrate', rate: sum() });
+          const key = msg.job_id + '/' + msg.job_seq;
+          const slots = (exhausted.get(key) || new Set()).add(i);
+          exhausted.set(key, slots);
+          if (slots.size === n) { exhausted.delete(key); emit(msg); }
+          break;
+        }
+        case 'share': emit(msg); break;
+        case 'error': emit({ ...msg, message: `[worker ${i}] ${msg.message}` }); break;
+        default: if (i === 0) emit(msg);
+      }
+    }
+    try {
+      for (let i = 0; i < n; i++) {
+        const worker = new Worker(url, { name: 'rx-st-' + i });
+        workers.push(worker);
+        worker.onmessage = ({ data }) => { try { recv(i, data); } catch (error) { fail(`[worker ${i}] ${error.message}`); } };
+        worker.onerror = event => fail(`[worker ${i}] ${event.message || 'unknown error'}`);
+        worker.onmessageerror = event => { if (pool.onmessageerror) pool.onmessageerror(event); };
+      }
+    } catch (error) { workers.forEach(worker => worker.terminate()); throw error; }
+    pool.postMessage = msg => {
+      if (msg.type === 'stop') rates.fill(0);
+      if (msg.type === 'stop' || msg.type === 'job') exhausted.clear();
+      // A new seed starts a replica build (the workers report fb_cache once rekeyed).
+      if (fb && msg.type === 'job') fb.epoch(msg.seed_hash);
+      workers.forEach((worker, i) => worker.postMessage(msg.type !== 'init' ? msg : { ...msg, fullMemory: false,
+        datasetThreads: 1, datasetInitThreads: 1, nonceSlot: i, nonceSlots: n,
+        ...(fb ? { fbRole: i < replicas ? 'full' : 'light' } : {}) }));
+    };
+    pool.terminate = () => workers.forEach(worker => { try { worker.terminate(); } catch (_) {} });
+    return pool;
   }
 
   function diagnosticText(error) {
@@ -166,25 +346,28 @@
     let minerId = null;
     let requestId = 1;
     const pendingRequests = new Map();
+    const light = config.mode === 'light';
+    const unsupported = light ? 'This page cannot run the mining engine.' : 'This page cannot run the multithreaded mining engine.';
     let state = { running: false, phase: 'idle', status: 'Waiting for consent', hashrate: 0,
       accepted: 0, rejected: 0, progress: 0, retries: 0, error: null };
-    const architectureReady = navigator.userAgentData && navigator.userAgentData.getHighEntropyValues ?
-      navigator.userAgentData.getHighEntropyValues(['architecture']).then(({ architecture }) => {
-        if (destroyed) return;
-        budget = limits(config, { hardwareConcurrency: navigator.hardwareConcurrency,
-          userAgent: navigator.userAgent, platform: navigator.platform,
-          userAgentData: navigator.userAgentData, architecture });
-        percentage = Math.min(state.phase === 'consent' ? percentage : requestedPercentage, budget.workloadCap);
-        if (controls && controls.disclosure) controls.disclosure.textContent = disclosure();
-        update({});
-      }).catch(() => {}) : Promise.resolve();
+    const architectureReady = architectureHint ? architectureHint.then(() => {
+      if (destroyed) return;
+      budget = limits(config);
+      percentage = Math.min(state.phase === 'consent' ? percentage : requestedPercentage, budget.workloadCap);
+      if (controls && controls.disclosure) controls.disclosure.textContent = disclosure();
+      update({});
+    }).catch(() => {}) : Promise.resolve();
 
-    function threads() {
-      return Math.min(budget.maxThreads, Math.floor(budget.cores * percentage / 100 + 1e-9));
-    }
+    // A session keeps the plan it was approved with.
+    function planNow() { return session ? session.plan : resolve(config, budget, percentage, navigator.deviceMemory); }
+    function threads() { return planNow().threads; }
+    function disclosure() { return planNow().disclosure; }
     function snapshot() {
-      return Object.freeze({ ...state, workload: percentage, threads: threads(),
-        effectivePercentage: threads() / budget.cores * 100, nicehash: !!(session && session.nicehash), limits: budget, config });
+      const p = planNow();
+      return Object.freeze({ ...state, workload: percentage, threads: p.threads,
+        effectivePercentage: p.threads / budget.cores * 100, nicehash: !!(session && session.nicehash), limits: budget, config,
+        engine: Object.freeze({ mode: p.mode, runtime: p.runtime, workers: p.workers, replicas: p.replicas,
+          replicasActive: session ? session.replicasActive : 0, memoryMiB: p.memoryMiB }) });
     }
     function emit(name, detail) {
       for (const fn of listeners.get(name) || []) { try { fn(detail); } catch (error) { console.error(error); } }
@@ -207,7 +390,7 @@
     }
     function fail(issue) {
       if (destroyed) return;
-      const report = Object.freeze({ ...issue, hints: Object.freeze(issue.hints || []), checks: diagnose().checks });
+      const report = Object.freeze({ ...issue, hints: Object.freeze(issue.hints || []), checks: diagnose(config.mode).checks });
       const attempt = ['ASSET_DOWNLOAD_FAILED', 'ENGINE_WORKER_FAILED', 'CSP_BLOCKED'].includes(report.code) ? policyAttempt : null;
       stop(report.message);
       // Keep only resource/stage metadata so a delayed document CSP event
@@ -246,23 +429,15 @@
     function workerFailure(message, stage = 'worker') {
       fail({ code: 'ENGINE_WORKER_FAILED', stage, message,
         hints: ["Check worker-src 'self' blob:, script-src for the asset origin and 'wasm-unsafe-eval', and asset CORS/CORP.",
-          'Serve matching runtime/worker/WASM files from the same build. Full mode needs about 2.5 GiB of RAM.',
+          'Serve matching runtime/worker/WASM files from the same build. ' + (config.mode === 'full' ? 'Full mode needs about 2.5 GiB of RAM.' :
+            `This light-mode session needs about ${(planNow().memoryMiB / 1000).toFixed(1)} GB of RAM.`),
           'The browser did not identify a single cause; inspect its console and network errors.'] });
-    }
-    function disclosure() {
-      return `Mine Monero for wallet ${config.wallet} via ${config.pool}:${config.port} (bridge ${config.proxy}). ` +
-        `Mining uses ${threads()} of ${budget.cores} reported CPU cores (${(threads() / budget.cores * 100).toFixed(1)}%), ` +
-        `at most ${budget.maxThreads}. Dataset initialization uses 32 threads. ` +
-        (config.mode === 'full' ? 'Full mode needs about 2.5 GiB of RAM. ' : 'Light mode needs about 256 MiB of RAM. ') +
-        'This uses electricity and can heat your device or drain its battery. Stop at any time. ' +
-        'Mining continues in background tabs until you stop it or leave this page; your browser may throttle or suspend it.';
     }
     function supportCheck() {
       if (!budget.maxThreads) throw new Error('This device has no mining threads within the configured core limit');
       if (!threads()) throw new Error('Increase workload enough to allow at least one mining thread');
-      const report = diagnose();
-      if (!report.supported) throw Object.assign(new Error('This page cannot run the multithreaded mining engine.'), {
-        code: 'DEPLOYMENT_UNSUPPORTED', hints: report.issues.flatMap(issue => [issue.message, ...issue.hints]) });
+      const report = diagnose(config.mode);
+      if (!report.supported) throw Object.assign(new Error(unsupported), { code: 'DEPLOYMENT_UNSUPPORTED', hints: flatHints(report) });
       if (document.hidden) throw new Error('Keep the page visible to start mining');
     }
     function isCurrent(s) { return !destroyed && state.running && session === s && s.epoch === epoch; }
@@ -321,7 +496,9 @@
       lastJob = { type: 'job', blob: job.blob, seed_hash: seed, target: job.target,
         job_id: job.job_id, job_seq: ++jobSeq, nicehash: s.nicehash };
       if (s.ready) s.worker.postMessage(lastJob);
-      update({ phase: s.datasetReady ? 'mining' : 'initializing', status: s.datasetReady ? 'Mining' : 'Building dataset (32 initialization threads)…' });
+      update({ phase: s.datasetReady ? 'mining' : 'initializing', status: s.datasetReady ? 'Mining' : light ?
+        `Initializing light-mode caches (${count(s.plan.workers, 'worker')})…` :
+        `Building dataset (${count(config.initThreads, 'initialization thread')})…` });
       return true;
     }
     function connect(s) {
@@ -416,6 +593,8 @@
     function workerMessage(s, msg) {
       if (!isCurrent(s)) return;
       if (msg.type === 'rx:policy-error') { policyViolation(msg, true); return; }
+      // Pool workers run randomx_st and never create pthreads.
+      if (/^rx:thread-/.test(msg.type) && s.plan.runtime !== 'pthreads') { stop('Unexpected engine thread request'); return; }
       if (msg.type === 'rx:thread-create') {
         if (s.children.size >= 32 || msg.url !== s.glueURL) { stop('Unexpected engine thread request'); return; }
         try {
@@ -448,12 +627,21 @@
       } else if (msg.type === 'share' && lastJob && msg.job_id === lastJob.job_id && msg.job_seq === lastJob.job_seq && minerId !== null && s.ws && s.ws.readyState === WebSocket.OPEN) {
         request(s, 'submit', { id: minerId, job_id: msg.job_id, nonce: msg.nonce, result: msg.result }, 'share');
       } else if (msg.type === 'dataset_progress') {
-        s.datasetReady = msg.done >= msg.total;
-        update({ progress: Math.max(0, Math.min(1, msg.done / msg.total)),
-          status: s.datasetReady ? 'Dataset ready' : `Building dataset: ${(msg.done / msg.total * 100).toFixed(0)}% (32 threads)` });
+        const progress = Math.max(0, Math.min(1, msg.done / msg.total));
+        // Light: a replica build; the light workers keep mining meanwhile.
+        if (light) update({ progress });
+        else {
+          s.datasetReady = msg.done >= msg.total;
+          update({ progress, status: s.datasetReady ? 'Dataset ready' :
+            `Building dataset: ${(msg.done / msg.total * 100).toFixed(0)}% (${count(config.initThreads, 'thread')})` });
+        }
       } else if (msg.type === 'nonce_exhausted' && lastJob && msg.job_id === lastJob.job_id && msg.job_seq === lastJob.job_seq) {
         update({ hashrate: 0, phase: 'waiting', status: 'Nonce range exhausted — waiting for a new pool job' });
-      } else if (msg.type === 'mode') { s.datasetReady = true; }
+      } else if (msg.type === 'mode') {
+        // Light pools report the full/light split: replicas mining on a full dataset.
+        s.datasetReady = true;
+        if (Number.isInteger(msg.full) && msg.full !== s.replicasActive) { s.replicasActive = msg.full; update({}); }
+      }
       else if (msg.type === 'error') workerFailure('Engine error: ' + msg.message, 'engine');
       else if (msg.type === 'status' && state.phase !== 'reconnecting') update({ status: msg.message });
     }
@@ -472,29 +660,42 @@
       }
       global[ownerKey] = api;
       attempt = 0;
-      const s = { epoch: ++epoch, children: new Map(), urls: [], abort: new AbortController(), ready: false, datasetReady: false };
+      const p = planNow();
+      const s = { epoch: ++epoch, children: new Map(), urls: [], abort: new AbortController(), ready: false, datasetReady: false,
+        plan: p, replicasActive: 0 };
       session = s;
-      policyAttempt = { urls: s.urls, assetURL: new URL('randomx.js', config.assetBase).href, stage: 'assets' };
+      // Full: the pthread build behind the embed-worker.js thread broker.
+      // Light: the randomx_st build in a pool of plain workers (workerPool).
+      const glue = light ? 'randomx_st.js' : 'randomx.js';
+      policyAttempt = { urls: s.urls, assetURL: new URL(glue, config.assetBase).href, stage: 'assets' };
       update({ running: true, phase: 'loading', status: 'Loading mining engine…', progress: 0, hashrate: 0, error: null });
       try {
-        const response = await fetch(new URL('randomx.js', config.assetBase), { signal: s.abort.signal, mode: 'cors', credentials: 'omit' });
+        const response = await fetch(new URL(glue, config.assetBase), { signal: s.abort.signal, mode: 'cors', credentials: 'omit' });
         if (!response.ok) throw new Error('Runtime download failed: HTTP ' + response.status);
         const source = await response.text();
         if (!isCurrent(s)) return;
+        if (p.replicas) {
+          await replicaCoordinator();
+          if (!isCurrent(s)) return;
+        }
         const monitor = '(' + workerPolicyReporter.toString() + ')();\n';
         s.glueURL = URL.createObjectURL(new Blob([monitor, source], { type: 'application/javascript' }));
         s.urls.push(s.glueURL);
-        const bootstrap = monitor + 'self.__randomxAssets=' + JSON.stringify({ baseURL: config.assetBase, glueURL: s.glueURL }) +
-          ';importScripts(' + JSON.stringify(new URL('embed-worker.js', config.assetBase).href) + ');';
+        const assets = { baseURL: config.assetBase, glueURL: s.glueURL, ...(light ? { build: 'st' } : {}) };
+        const bootstrap = monitor + 'self.__randomxAssets=' + JSON.stringify(assets) +
+          ';importScripts(' + JSON.stringify(new URL(light ? 'worker.js' : 'embed-worker.js', config.assetBase).href) + ');';
         const url = URL.createObjectURL(new Blob([bootstrap], { type: 'application/javascript' }));
         s.urls.push(url);
         policyAttempt.stage = 'worker';
-        s.worker = new Worker(url);
+        s.worker = light ? workerPool(p.workers, url, p.replicas, global.RxFbFull) : new Worker(url);
         s.worker.onmessage = ({ data }) => { try { workerMessage(s, data); } catch (error) { if (isCurrent(s)) workerFailure('Engine message failed: ' + error.message); } };
         s.worker.onerror = (event) => { if (isCurrent(s)) workerFailure('Engine worker failed: ' + (event.message || 'unknown error')); };
         s.worker.onmessageerror = () => { if (isCurrent(s)) workerFailure('Engine message could not be decoded'); };
-        s.worker.postMessage({ type: 'init', fullMemory: config.mode === 'full', datasetThreads: threads(),
-          datasetInitThreads: 32, enableJit: true, jitProfile: 'auto' });
+        // The pool overrides the memory and thread fields per worker.
+        const tune = config.tuning;
+        s.worker.postMessage({ type: 'init', fullMemory: !light, datasetThreads: p.threads,
+          datasetInitThreads: config.initThreads, enableJit: tune.jit !== false, jitProfile: tune.profile || 'auto',
+          jitExperiment: jitExperiment(tune) });
       } catch (error) {
         if (isCurrent(s)) fail({ code: policyAttempt.stage === 'assets' ? 'ASSET_DOWNLOAD_FAILED' : 'ENGINE_WORKER_FAILED',
           stage: policyAttempt.stage, message: 'Unable to start: ' + error.message,
@@ -503,6 +704,20 @@
             'Check connect-src, asset CORS/CORP, redirects and the HTTP status in the network panel.'] : [
             "Check worker-src 'self' blob: and script-src for engine assets and WebAssembly compilation."] });
       }
+    }
+    // Replicas need an RxFbFull.FbCoordinator on the page: fb_full.js, loaded
+    // once as a classic script from the asset base (script-src allows it).
+    function replicaCoordinator() {
+      if (global.RxFbFull) return Promise.resolve();
+      policyAttempt.assetURL = new URL('fb_full.js', config.assetBase).href;
+      return new Promise((resolve, reject) => {
+        const element = document.createElement('script');
+        element.src = policyAttempt.assetURL; element.crossOrigin = 'anonymous';
+        if (config.nonce) element.nonce = config.nonce;
+        element.onload = () => { element.remove(); global.RxFbFull ? resolve() : reject(new Error('fb_full.js did not define RxFbFull')); };
+        element.onerror = () => { element.remove(); reject(new Error('Replica coordinator download failed')); };
+        (document.head || document.documentElement).appendChild(element);
+      });
     }
     function stop(reason = 'Stopped — consent is required to restart') {
       ++consentTicket; ++epoch;
@@ -641,7 +856,7 @@
       version: VERSION, config,
       get limits() { return budget; },
       get state() { return snapshot(); },
-      get diagnostics() { return Object.freeze({ ...diagnose(), error: state.error }); },
+      get diagnostics() { return Object.freeze({ ...diagnose(config.mode), error: state.error }); },
       on(name, fn) { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(fn); return () => listeners.get(name).delete(fn); },
       requestConsent, start: requestConsent, stop, setWorkload, bindControls, mount,
       destroy() {
@@ -660,15 +875,16 @@
     global.addEventListener('pagehide', onPageHide);
     global.addEventListener('offline', onOffline); global.addEventListener('online', onOnline);
     if (!config.headless) mount(config.container);
-    const preflight = diagnose();
+    const preflight = diagnose(config.mode);
     if (!preflight.supported) fail({ code: 'DEPLOYMENT_UNSUPPORTED', stage: 'preflight',
-      message: 'This page cannot run the multithreaded mining engine.',
-      hints: preflight.issues.flatMap(issue => [issue.message, ...issue.hints]) });
+      message: unsupported, hints: flatHints(preflight) });
     if (config.quickstart) armQuickstart();
     return api;
   }
 
-  global.RandomXEmbed = Object.freeze({ version: VERSION, create, diagnose, limits: (input = {}, nav) => limits({ mode: 'full', ...input }, nav) });
+  global.RandomXEmbed = Object.freeze({ version: VERSION, create, diagnose, plan,
+    limits: (input = {}, nav) => limits({ maxThreads: integer(input.maxThreads, null, 'maxThreads', 1, 32),
+      initThreads: integer(input.initThreads, 32, 'initThreads', 1, 32) }, nav) });
   function autoMount() {
     if (!script || !script.hasAttribute('data-wallet') || script.dataset.auto === 'false') return;
     const data = script.dataset;
@@ -676,7 +892,7 @@
       const instance = create({ wallet: data.wallet, pool: data.pool, port: data.port, proxy: data.proxy,
         workload: data.workload, workerName: data.workerName, routeQuery: data.routeQuery !== 'false',
         nonceMode: data.nonceMode, keepalive: data.keepalive,
-        mode: data.mode, headless: data.headless === 'true', quickstart: data.quickstart === 'true',
+        mode: data.mode, maxThreads: data.maxThreads, replicas: data.replicas, initThreads: data.initThreads, headless: data.headless === 'true', quickstart: data.quickstart === 'true',
         container: data.container, assetBase: data.assetBase, nonce: script.nonce });
       global.dispatchEvent(new CustomEvent('randomx:ready', { detail: { instance } }));
     } catch (error) {

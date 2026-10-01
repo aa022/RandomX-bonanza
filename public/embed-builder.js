@@ -65,11 +65,12 @@ document.addEventListener('randomx:consent-request', function (event) {
       // Validate through the actual API, without a widget, engine or network.
       const probe = RandomXEmbed.create({ ...config, headless: true, quickstart: false });
       const budget = probe.limits;
-      const threads = probe.state.threads;
+      const { threads, engine } = probe.state;
       probe.destroy();
       output.value = snippet(config);
-      document.getElementById('embedBudget').textContent =
-        `${threads}/${budget.cores} mining threads on this device · initialization 32 threads`;
+      document.getElementById('embedBudget').textContent = `${threads}/${budget.cores} mining threads on this device · ` +
+        (engine.runtime === 'workers' ? `${engine.workers} light worker${engine.workers === 1 ? '' : 's'}, about ${(engine.memoryMiB / 1000).toFixed(1)} GB` :
+          `initialization ${probe.config.initThreads} threads`);
       status.textContent = 'Script generated';
       return true;
     } catch (error) { status.textContent = error.message; return false; }

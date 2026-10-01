@@ -12,12 +12,25 @@ class Target {
   removeEventListener(name, fn) { this.handlers.get(name)?.delete(fn); }
   dispatchEvent(event) { for (const fn of [...this.handlers.get(event.type) || []]) fn(event); return true; }
 }
+// fb_full.js as the page's <script> defines it (window.RxFbFull).
+const fbSource = readFileSync(require.resolve('../public/fb_full.js'), 'utf8');
 function harness(options = {}) {
   const win = new Target();
   const doc = new Target();
-  doc.currentScript = null; doc.readyState = 'complete'; doc.hidden = false;
-  const sockets = [], workers = [], downloads = [], timers = new Map(), revoked = [], reports = [];
+  doc.currentScript = options.script || null; doc.readyState = 'complete'; doc.hidden = false;
+  const sockets = [], workers = [], downloads = [], timers = new Map(), revoked = [], reports = [], scripts = [], ready = [];
+  const blobs = new Map();
   doc.permissionsPolicy = options.permissionsPolicy;
+  // Script elements (fb_full.js) load, or fail with options.scriptError, a microtask after insertion.
+  doc.createElement = tagName => ({ tagName, remove() { this.removed = true; } });
+  doc.head = { appendChild(element) {
+    scripts.push(element);
+    queueMicrotask(() => {
+      if (options.scriptError) { element.onerror(); return; }
+      const sandbox = {}; vm.runInNewContext(fbSource, sandbox); win.RxFbFull = sandbox.RxFbFull; element.onload();
+    });
+  } };
+  win.addEventListener('randomx:ready', event => ready.push(event.detail.instance));
   let timerId = 0, blobId = 0;
   class Socket {
     static OPEN = 1;
@@ -28,19 +41,19 @@ function harness(options = {}) {
     message(value) { this.onmessage?.({ data: JSON.stringify(value) }); }
   }
   class Worker {
-    constructor(url) {
+    constructor(url, init) {
       if (options.workerError) throw new Error(options.workerError);
-      this.url = url; this.sent = []; this.terminated = false; workers.push(this);
+      this.url = url; this.options = init; this.sent = []; this.terminated = false; workers.push(this);
     }
     postMessage(msg) { this.sent.push(msg); }
     terminate() { this.terminated = true; }
     message(msg) { this.onmessage?.({ data: msg }); }
   }
   class BrowserURL extends URL {
-    static createObjectURL() { return 'blob:http://localhost/' + ++blobId; }
+    static createObjectURL(blob) { const url = 'blob:http://localhost/' + ++blobId; blobs.set(url, blob); return url; }
     static revokeObjectURL(url) { revoked.push(url); }
   }
-  win.Worker = Worker; win.WebAssembly = WebAssembly;
+  win.Worker = options.workers === false ? undefined : Worker; win.WebAssembly = WebAssembly;
   win.isSecureContext = options.secure !== false; win.crossOriginIsolated = options.isolated !== false;
   win.top = options.embedded ? {} : win;
   const context = { window: win, document: doc, navigator: options.navigator || { hardwareConcurrency: 12, userAgent: 'Chrome/130', platform: 'Linux x86_64' },
@@ -56,7 +69,7 @@ function harness(options = {}) {
     Date: options.Date || Date };
   vm.runInNewContext(readFileSync(require.resolve('../public/embed.js'), 'utf8'), context);
   const config = { wallet: 'test-wallet', pool: 'pool.example', port: 3333, workload: 50, headless: true };
-  return { win, doc, sockets, workers, downloads, timers, revoked, reports,
+  return { win, doc, sockets, workers, downloads, timers, revoked, reports, scripts, blobs, ready,
     create: (extra = {}) => win.RandomXEmbed.create({ ...config, ...extra }),
     runTimer(delay) { const pair = [...timers].find(([, t]) => t.delay === delay); assert.ok(pair, 'expected timer ' + delay); if (!pair[1].repeat) timers.delete(pair[0]); pair[1].fn(); } };
 }
@@ -104,7 +117,10 @@ test('50% default, global 80% cap, and ARM half-core cap', () => {
     const api = harness({ navigator: nav }).create({ workload: 100 });
     assert.equal(api.state.threads, 5); assert.equal(api.state.workload, 50); api.destroy();
   }
-  assert.equal(h.win.RandomXEmbed.limits({ mode: 'light' }, safari).maxThreads, 1);
+  assert.equal(h.win.RandomXEmbed.limits({ mode: 'light' }, safari).maxThreads, 5, 'light mode has no one-thread cap');
+  assert.equal(h.win.RandomXEmbed.limits({ maxThreads: 2 }, safari).maxThreads, 2);
+  assert.equal(h.win.RandomXEmbed.limits({ maxThreads: 32 }, safari).maxThreads, 5, 'maxThreads is a ceiling only');
+  assert.throws(() => h.win.RandomXEmbed.limits({ maxThreads: 0 }, safari), /maxThreads/);
   for (const workload of [NaN, Infinity, -1, 101]) assert.throws(() => h.create({ workload }));
 });
 test('Chromium ARM architecture is resolved before mining starts', async () => {
@@ -122,6 +138,23 @@ test('Intel Macs can use 80%, and late architecture discovery never increases ap
   const early = harness({ navigator: nav }); const approved = await approve(early, { workload: 80 });
   assert.equal(approved.api.state.workload, 50); assert.equal(approved.root.sent[0].datasetThreads, 5);
   approved.api.destroy();
+});
+test('plan() and create() agree once the Chromium architecture hint resolves', async () => {
+  const intelMac = { hardwareConcurrency: 10, userAgent: 'Chrome/130', platform: 'MacIntel',
+    userAgentData: { getHighEntropyValues: async () => ({ architecture: 'x86' }) } };
+  const h = harness({ isolated: false, navigator: intelMac });
+  const input = { wallet: 'test-wallet', pool: 'pool.example', mode: 'light', workload: 80 };
+  assert.equal(h.win.RandomXEmbed.plan(input).workers, 5, 'before the hint: the platform guess (Mac is ARM, 50%)');
+  await flush();
+  const p = h.win.RandomXEmbed.plan(input);
+  assert.equal(p.workers, 8); assert.equal(p.memoryMiB, 2400); assert.equal(p.limits.workloadCap, 80);
+  assert.equal(h.win.RandomXEmbed.plan(input, { hardwareConcurrency: 10, platform: 'MacIntel' }).workers, 5, 'an explicit nav ignores the hint');
+  const api = h.create(input);
+  assert.deepEqual({ ...api.state.engine }, { mode: 'light', runtime: 'workers', workers: 8, replicas: 0, replicasActive: 0, memoryMiB: 2400 });
+  let consent; api.on('consent-request', detail => { consent = detail; }); api.requestConsent();
+  assert.equal(consent.disclosure, p.disclosure);
+  consent.accept(); await flush(); assert.equal(h.workers.length, 8);
+  api.destroy();
 });
 test('quickstart emits exactly one request on first trusted interaction with no built-in DOM', async () => {
   const h = harness(); const api = h.create({ quickstart: true });
@@ -212,7 +245,8 @@ test('VPS contract preserves route/query and the exact configured wallet/login p
   assert.equal(url.searchParams.get('pool'), 'selected.example'); assert.equal(url.searchParams.get('port'), '4444');
   assert.equal(url.searchParams.has('wallet'), false);
   assert.deepEqual(ws.sent, [{ id: 1, jsonrpc: '2.0', method: 'login', params: {
-    login: 'own-wallet', pass: 'own-worker', rigid: 'own-worker', agent: 'randomx-embed/0.2.1', algo: ['rx/0'] } }]);
+    login: 'own-wallet', pass: 'own-worker', rigid: 'own-worker', agent: 'randomx-embed/0.3.0', algo: ['rx/0'] } }]);
+  assert.equal(h.win.RandomXEmbed.version, '0.3.0'); assert.equal(api.version, '0.3.0');
   assert.throws(() => h.create({ wallet: '' }), /wallet/);
   assert.equal(ws.sent.some(message => ['set_target', 'ping'].includes(message.method)), false);
   api.destroy();
@@ -551,6 +585,343 @@ test('blocked bridge reports stop retries and remove URL queries from diagnostic
   api.destroy();
 });
 
+// Light mode: a pool of randomx_st workers (workerPool) behind the same
+// session lifecycle. nav(cores) is an x86 browser, so 50% gives cores / 2.
+const nav = (cores, extra) => ({ hardwareConcurrency: cores, userAgent: 'Chrome/130', platform: 'Linux x86_64', ...extra });
+const statusesOf = api => { const seen = []; api.on('state', s => seen.push(s.status)); return seen; };
+test('light mode runs a randomx_st worker pool on a non-isolated page, one nonce slot per worker', async () => {
+  const h = harness({ isolated: false, sharedMemory: false });
+  const api = h.create({ mode: 'light' });
+  assert.equal(api.state.error, null); assert.notEqual(api.state.phase, 'error');
+  assert.deepEqual({ ...api.state.engine }, { mode: 'light', runtime: 'workers', workers: 6, replicas: 0, replicasActive: 0, memoryMiB: 1800 });
+  assert.ok(Object.isFrozen(api.state.engine));
+  let consent; api.on('consent-request', detail => { consent = detail; });
+  api.requestConsent();
+  assert.equal(h.downloads.length + h.workers.length + h.sockets.length + h.scripts.length, 0);
+  assert.match(consent.disclosure, /Mining uses 6 of 12 reported CPU cores \(50\.0%\), at most 9\. Light mode runs 6 workers at about 300 MB each\. /);
+  assert.match(consent.disclosure, /about 1\.8 GB of RAM in total and no isolation headers\. This uses electricity.*battery\. Stop at any time\. Mining continues in background tabs/);
+  assert.doesNotMatch(consent.disclosure, /initialization|full dataset/);
+  consent.accept(); await flush();
+  assert.deepEqual(h.downloads.map(download => download.url), ['http://localhost/randomx_st.js']);
+  assert.equal(h.workers.length, 6);
+  const glue = await h.blobs.get('blob:http://localhost/1').text();
+  assert.ok(glue.includes('__rxPolicyReporter') && glue.endsWith(')();\nruntime'), 'the glue blob carries the policy reporter');
+  const bootstrap = await h.blobs.get(h.workers[0].url).text();
+  assert.ok(bootstrap.includes('__rxPolicyReporter'));
+  assert.ok(bootstrap.endsWith('self.__randomxAssets=' + JSON.stringify({ baseURL: 'http://localhost/',
+    glueURL: 'blob:http://localhost/1', build: 'st' }) + ';importScripts("http://localhost/worker.js");'));
+  assert.ok(h.workers.every(worker => worker.url === h.workers[0].url));
+  assert.deepEqual(h.workers.map(worker => worker.options.name), [0, 1, 2, 3, 4, 5].map(i => 'rx-st-' + i));
+  assert.deepEqual(h.workers.map(worker => ({ ...worker.sent[0] })), [0, 1, 2, 3, 4, 5].map(nonceSlot => ({ type: 'init',
+    fullMemory: false, datasetThreads: 1, datasetInitThreads: 1, enableJit: true, jitProfile: 'auto', jitExperiment: '',
+    nonceSlot, nonceSlots: 6 })));
+  assert.equal(h.scripts.length, 0); assert.equal(api.state.running, true); assert.equal(api.state.error, null);
+  api.destroy();
+});
+test('the light pool reports ready once, sums hashrates, passes shares through and exhausts a job only when every slot has', async () => {
+  const h = harness({ isolated: false, navigator: nav(6) });
+  const { api } = await approve(h, { mode: 'light' });
+  const pool = h.workers; assert.equal(pool.length, 3);
+  pool[0].message({ type: 'ready' }); pool[1].message({ type: 'ready' });
+  assert.equal(h.sockets.length, 0, 'ready once every worker is');
+  pool[2].message({ type: 'ready' }); assert.equal(h.sockets.length, 1);
+  let ws = h.sockets[0]; ws.open(); ws.message({ id: 1, result: { id: 'miner', job } });
+  const work = pool[0].sent.at(-1);
+  assert.equal(work.type, 'job'); assert.ok(pool.every(worker => worker.sent.at(-1) === work));
+  assert.equal(api.state.status, 'Initializing light-mode caches (3 workers)…');
+  pool[1].message({ type: 'status', message: 'chatty' }); assert.notEqual(api.state.status, 'chatty');
+  pool[0].message({ type: 'status', message: 'Ready to mine' }); assert.equal(api.state.status, 'Ready to mine');
+  pool.forEach(worker => worker.message({ type: 'mode', mode: 'light' }));
+  [10, 20, 30].forEach((rate, i) => pool[i].message({ type: 'hashrate', rate }));
+  assert.equal(api.state.hashrate, 60); assert.equal(api.state.phase, 'mining');
+  pool[1].message({ type: 'hashrate', rate: 25 }); assert.equal(api.state.hashrate, 65);
+  pool[2].message({ type: 'share', job_id: work.job_id, job_seq: work.job_seq, nonce: 'aabbccdd', result: '00'.repeat(32) });
+  assert.equal(ws.sent.at(-1).method, 'submit'); assert.equal(ws.sent.at(-1).params.nonce, 'aabbccdd');
+  for (const i of [0, 1]) pool[i].message({ type: 'nonce_exhausted', job_id: work.job_id, job_seq: work.job_seq });
+  assert.equal(api.state.phase, 'mining'); assert.equal(api.state.hashrate, 30, 'exhausted slots leave the sum');
+  pool[2].message({ type: 'nonce_exhausted', job_id: work.job_id, job_seq: work.job_seq - 1 });
+  assert.notEqual(api.state.phase, 'waiting', 'another job sequence does not complete this one');
+  pool[2].message({ type: 'nonce_exhausted', job_id: work.job_id, job_seq: work.job_seq });
+  assert.equal(api.state.phase, 'waiting'); assert.equal(api.state.hashrate, 0); assert.equal(api.state.running, true);
+  ws.message({ method: 'job', params: { ...job, job_id: 'fresh' } });
+  const fresh = pool[0].sent.at(-1); assert.equal(fresh.job_id, 'fresh'); assert.notEqual(api.state.phase, 'waiting');
+  for (const i of [0, 1]) pool[i].message({ type: 'nonce_exhausted', job_id: 'fresh', job_seq: fresh.job_seq });
+  assert.notEqual(api.state.phase, 'waiting');
+  // A new seed waits for a rekeyed cache; one worker with it is enough to mine.
+  ws.message({ method: 'job', params: { ...job, job_id: 'reseed', seed_hash: '11'.repeat(32) } });
+  assert.equal(api.state.status, 'Initializing light-mode caches (3 workers)…');
+  pool[2].message({ type: 'mode', mode: 'light' });
+  ws.message({ method: 'job', params: { ...job, job_id: 'same-seed', seed_hash: '11'.repeat(32) } });
+  assert.equal(api.state.status, 'Mining'); assert.equal(api.state.phase, 'mining');
+  // Reconnects keep the same workers and their resident caches.
+  ws.close(); assert.ok(pool.every(worker => worker.sent.at(-1).type === 'stop')); h.runTimer(1000);
+  ws = h.sockets.at(-1); ws.open(); ws.message({ id: 1, result: { id: 'again', job } });
+  assert.equal(h.workers.length, 3); assert.ok(pool.every(worker => worker.sent.filter(m => m.type === 'init').length === 1));
+  assert.ok(pool.every(worker => worker.sent.at(-1).type === 'job'));
+  pool[1].message({ type: 'error', message: 'Failed to allocate cache' });
+  assert.equal(api.state.error.code, 'ENGINE_WORKER_FAILED');
+  assert.match(api.state.error.message, /\[worker 1\] Failed to allocate cache/);
+  assert.match(api.state.error.hints.join(' '), /light-mode session needs about 0\.9 GB of RAM/);
+  assert.ok(pool.every(worker => worker.terminated)); assert.equal(h.revoked.length, 2); assert.equal(api.state.running, false);
+  api.destroy();
+});
+test('Stop and pagehide terminate every pool worker and revoke its URLs; late messages start nothing', async () => {
+  const h = harness({ isolated: false });
+  const { api } = await approve(h, { mode: 'light' });
+  assert.equal(h.workers.length, 6);
+  api.stop();
+  assert.ok(h.workers.every(worker => worker.terminated));
+  assert.deepEqual(h.revoked, ['blob:http://localhost/1', 'blob:http://localhost/2']);
+  h.workers.forEach(worker => worker.message({ type: 'ready' })); assert.equal(h.sockets.length, 0);
+  let consent; api.on('consent-request', detail => { consent = detail; });
+  api.requestConsent(); consent.accept(); await flush();
+  assert.equal(h.workers.length, 12, 'a new consent starts a new pool');
+  h.workers.slice(6).forEach(worker => worker.message({ type: 'ready' })); assert.equal(h.sockets.length, 1);
+  h.win.dispatchEvent({ type: 'pagehide' });
+  assert.ok(h.workers.every(worker => worker.terminated)); assert.equal(h.revoked.length, 4);
+  assert.equal(api.state.running, false); assert.equal(h.timers.size, 0); assert.equal(h.sockets[0].closeReason, 'Session stopped');
+  api.destroy();
+  let resolve;
+  const pending = harness({ isolated: false, fetch: () => new Promise(r => { resolve = r; }) });
+  const p = await approve(pending, { mode: 'light' }); p.api.stop();
+  assert.equal(pending.downloads[0].init.signal.aborted, true);
+  resolve({ ok: true, text: async () => 'runtime' }); await flush();
+  assert.equal(pending.workers.length, 0);
+});
+test('pool workers cannot create pthreads; their policy reports identify the cause', async () => {
+  const h = harness({ isolated: false });
+  const { api } = await approve(h, { mode: 'light' });
+  h.workers[3].message({ type: 'rx:thread-create', id: 1, url: 'blob:http://localhost/1', options: {} });
+  assert.equal(h.workers.length, 6, 'no pthread worker is created');
+  assert.ok(h.workers.every(worker => worker.terminated)); assert.equal(api.state.running, false);
+  assert.equal(api.state.status, 'Unexpected engine thread request');
+  const c = harness({ isolated: false }); const second = await approve(c, { mode: 'light' });
+  c.workers[4].message({ type: 'rx:policy-error', disposition: 'enforce', effectiveDirective: 'script-src', blockedURI: 'wasm-eval' });
+  assert.equal(second.api.state.error.code, 'CSP_BLOCKED');
+  assert.match(second.api.state.error.hints.join(' '), /wasm-unsafe-eval/);
+  assert.ok(c.workers.every(worker => worker.terminated)); assert.equal(c.revoked.length, 2);
+  api.destroy(); second.api.destroy();
+});
+test('replicas load fb_full.js once, take the first worker roles and build through the page coordinator', async () => {
+  const h = harness({ isolated: false, navigator: nav(6, { deviceMemory: 16 }) });
+  const api = h.create({ mode: 'light', replicas: 2, nonce: 'page-nonce' });
+  const statuses = statusesOf(api);
+  assert.deepEqual({ ...api.state.engine }, { mode: 'light', runtime: 'workers', workers: 3, replicas: 2, replicasActive: 0, memoryMiB: 5500 });
+  let consent; api.on('consent-request', detail => { consent = detail; });
+  api.requestConsent(); assert.equal(h.scripts.length + h.downloads.length + h.workers.length, 0, 'nothing loads before consent');
+  assert.match(consent.disclosure, /runs 3 workers at about 300 MB each; 2 of them also hold a private full dataset \(about 2\.3 GB each\), which all workers rebuild after each seed change\. It needs about 5\.5 GB of RAM in total/);
+  consent.accept(); await flush();
+  assert.equal(h.scripts.length, 1);
+  const [element] = h.scripts;
+  assert.equal(element.tagName, 'script'); assert.equal(element.src, 'http://localhost/fb_full.js');
+  assert.equal(element.crossOrigin, 'anonymous'); assert.equal(element.nonce, 'page-nonce'); assert.equal(element.removed, true);
+  const pool = h.workers; assert.equal(pool.length, 3);
+  assert.deepEqual(pool.map(worker => worker.sent[0].fbRole), ['full', 'full', 'light']);
+  assert.deepEqual(pool.map(worker => worker.sent[0].nonceSlot), [0, 1, 2]);
+  pool.forEach(worker => worker.message({ type: 'ready' })); const ws = h.sockets[0]; ws.open();
+  ws.message({ id: 1, result: { id: 'miner', job } });
+  const seed = job.seed_hash, items = 2 * 65536, sent = (worker, type) => worker.sent.filter(m => m.type === type);
+  pool.forEach((worker, i) => {
+    worker.message({ type: 'mode', mode: 'light' });
+    worker.message({ type: 'fb_cache', seed, full: i < 2, items });
+  });
+  assert.equal(api.state.progress, 0);
+  assert.deepEqual(pool.map(worker => sent(worker, 'fb_compute').map(m => m.chunk)), [[0], [1], []]);
+  pool[0].message({ type: 'hashrate', rate: 40 }); assert.equal(api.state.phase, 'mining', 'light workers mine while replicas build');
+  pool[0].message({ type: 'fb_chunk', seed, chunk: 0, own: true, buf: new ArrayBuffer(8) });
+  assert.deepEqual(sent(pool[1], 'fb_write').map(m => m.chunk), [0]);
+  pool[1].message({ type: 'fb_written', seed, chunk: 0 });
+  pool[1].message({ type: 'fb_chunk', seed, chunk: 1, own: true, buf: new ArrayBuffer(8) });
+  pool[0].message({ type: 'fb_written', seed, chunk: 1 });
+  assert.equal(sent(pool[0], 'fb_finalize').length, 1); assert.equal(sent(pool[1], 'fb_finalize').length, 1);
+  pool[0].message({ type: 'mode', mode: 'full' }); pool[0].message({ type: 'fb_final', seed, ok: true });
+  assert.equal(api.state.engine.replicasActive, 1);
+  pool[1].message({ type: 'mode', mode: 'full' }); pool[1].message({ type: 'fb_final', seed, ok: true });
+  assert.equal(api.state.engine.replicasActive, 2); assert.equal(api.state.progress, 1);
+  assert.equal(api.state.status, 'Replica datasets ready: 2 of 2 mining in full mode');
+  assert.ok(!statuses.some(status => /Building dataset|fb_/.test(status)), 'replica progress never takes over the status line');
+  api.stop(); assert.ok(pool.every(worker => worker.terminated)); assert.equal(api.state.engine.replicasActive, 0);
+  api.requestConsent(); consent.accept(); await flush();
+  assert.equal(h.scripts.length, 1, 'window.RxFbFull is reused'); assert.equal(h.workers.length, 6);
+  assert.equal(h.workers[3].sent[0].fbRole, 'full');
+  api.destroy();
+});
+test('replicas demote on low reported memory; a failed fb_full.js load is a diagnosable asset failure', async () => {
+  const base = { wallet: 'test-wallet', pool: 'pool.example', mode: 'light', replicas: 1 };
+  const low = harness({ isolated: false, navigator: nav(6, { deviceMemory: 4 }) });
+  const plan = low.win.RandomXEmbed.plan(base);
+  assert.equal(plan.replicas, 0); assert.equal(plan.replicasDemoted, true); assert.equal(plan.memoryMiB, 900);
+  assert.doesNotMatch(plan.disclosure, /full dataset/);
+  for (const deviceMemory of [8, undefined]) {
+    const kept = low.win.RandomXEmbed.plan(base, nav(6, { deviceMemory }));
+    assert.equal(kept.replicas, 1); assert.equal(kept.replicasDemoted, false);
+  }
+  const { api } = await approve(low, { mode: 'light', replicas: 1 });
+  assert.equal(low.scripts.length, 0); assert.equal(low.workers.length, 3);
+  assert.ok(low.workers.every(worker => !('fbRole' in worker.sent[0])));
+  assert.equal(api.state.engine.replicas, 0); api.destroy();
+  const blocked = harness({ isolated: false, scriptError: true, navigator: nav(6) });
+  const failed = await approve(blocked, { mode: 'light', replicas: 1 });
+  assert.equal(failed.api.state.error.code, 'ASSET_DOWNLOAD_FAILED'); assert.equal(failed.api.state.error.stage, 'assets');
+  assert.match(failed.api.state.error.hints.join(' '), /http:\/\/localhost\/fb_full\.js exists/);
+  assert.equal(blocked.workers.length, 0); assert.equal(blocked.scripts[0].removed, true);
+  blocked.doc.dispatchEvent({ type: 'securitypolicyviolation', disposition: 'enforce',
+    effectiveDirective: 'script-src-elem', blockedURI: 'http://localhost/fb_full.js' });
+  assert.equal(failed.api.state.error.code, 'CSP_BLOCKED'); assert.equal(failed.api.state.error.directive, 'script-src-elem');
+  failed.api.destroy();
+});
+test('mode, replica, thread and tuning options are validated strictly and frozen into config', () => {
+  const h = harness();
+  assert.throws(() => h.create({ replicas: 1 }), /replicas need mode: 'light'/);
+  for (const mode of ['auto', null, false, 0, 'Light']) assert.throws(() => h.create({ mode }), /full or light/);
+  const blank = h.create({ mode: '' }); assert.equal(blank.config.mode, 'full'); blank.destroy();
+  for (const maxThreads of [0, 33, 1.5, 'x', true]) assert.throws(() => h.create({ maxThreads }), /maxThreads/);
+  for (const replicas of [-1, 3, 0.5]) assert.throws(() => h.create({ mode: 'light', replicas }), /replicas/);
+  for (const initThreads of [0, 33, 2.5]) assert.throws(() => h.create({ initThreads }), /initThreads/);
+  // 256 characters of hash-safe tokens; one more is too long.
+  const long = 'no_supjit,'.repeat(24) + 'fuse_n=3,no_fuse';
+  for (const tuning of [[], 'x86', { speed: 1 }, { profile: 'arm64' }, { jit: 'false' }, { lightMlp: 3 }, { kernelK: 0 },
+    { kernelK: '2' }, { experiment: 'fuse_n=3 no_supjit' }, { experiment: long + '1' }, { experiment: 'a;b' },
+    // reuse/reuse2 cache the first JIT module: wrong hashes on purpose.
+    { experiment: 'reuse' }, { experiment: 'no_threaded,reuse' }, { experiment: 'REUSE2' }, { experiment: 'fuse_n=3,reuse2' },
+    { experiment: 'threaded' }, { experiment: 'fuse_n=x' }, { experiment: 'kernel_k' }]) {
+    assert.throws(() => h.create({ tuning }), /tuning/);
+  }
+  assert.throws(() => h.win.RandomXEmbed.plan({ wallet: 'w', pool: 'p', tuning: { experiment: 'no_threaded,reuse' } }), /hash-safe/);
+  const api = h.create({ mode: 'light', maxThreads: '4', replicas: '2', initThreads: '8',
+    tuning: { profile: 'arm', experiment: long, lightMlp: undefined } });
+  assert.equal(long.length, 256);
+  assert.equal(api.config.maxThreads, 4); assert.equal(api.config.replicas, 2); assert.equal(api.config.initThreads, 8);
+  assert.deepEqual({ ...api.config.tuning }, { profile: 'arm', experiment: long });
+  const safe = 'no_threaded,no_inline_fprc,no_regs_mem,no_split_id,no_fuse,no_inline_round,no_supjit,unroll2,unroll2=0,' +
+    'fuse_n=3,triples_n=2,shared_code=1,aes_simd=0,aes_relaxed=1,light_mlp=2,kernel_k=4';
+  const tuned = h.create({ tuning: { experiment: safe } }); assert.equal(tuned.config.tuning.experiment, safe); tuned.destroy();
+  assert.ok(Object.isFrozen(api.config) && Object.isFrozen(api.config.tuning));
+  const defaults = h.create();
+  assert.equal(defaults.config.mode, 'full'); assert.equal(defaults.config.maxThreads, null);
+  assert.equal(defaults.config.replicas, 0); assert.equal(defaults.config.initThreads, 32);
+  assert.deepEqual({ ...defaults.config.tuning }, {});
+  api.destroy(); defaults.destroy();
+});
+test('maxThreads is an absolute ceiling on mining threads and light workers', async () => {
+  const unbounded = harness({ navigator: nav(32) }).create({ workload: 80 });
+  assert.equal(unbounded.state.threads, 25); unbounded.destroy();
+  const h = harness({ isolated: false, navigator: nav(32) });
+  const { api } = await approve(h, { mode: 'light', workload: 80, maxThreads: 4 });
+  assert.equal(api.limits.maxThreads, 4); assert.equal(api.state.threads, 4); assert.equal(api.state.engine.workers, 4);
+  assert.equal(h.workers.length, 4); assert.ok(h.workers.every(worker => worker.sent[0].nonceSlots === 4));
+  api.destroy();
+  const full = harness({ navigator: nav(32) }); const f = await approve(full, { workload: 80, maxThreads: 3 });
+  assert.equal(f.root.sent[0].datasetThreads, 3); assert.equal(f.api.state.engine.workers, 1);
+  assert.match(f.consent.disclosure, /Mining uses 3 of 32 reported CPU cores \(9\.4%\), at most 3\./);
+  f.api.destroy();
+});
+test('plan() resolves threads, memory and disclosure without an instance, engine or network', () => {
+  const h = harness({ isolated: false });
+  const { plan } = h.win.RandomXEmbed;
+  const base = { wallet: 'test-wallet', pool: 'pool.example', port: 3333 };
+  const full = plan(base, nav(12));
+  assert.ok(Object.isFrozen(full));
+  assert.deepEqual({ ...full, disclosure: 0, limits: 0 }, { mode: 'full', runtime: 'pthreads', threads: 6, workers: 1,
+    replicas: 0, replicasDemoted: false, initThreads: 32, memoryMiB: 2560, disclosure: 0, limits: 0 });
+  assert.match(full.disclosure, /Dataset initialization uses 32 threads\. Full mode needs about 2\.5 GiB of RAM\./);
+  assert.equal(full.limits.maxThreads, 9); assert.equal(full.limits.cores, 12);
+  assert.match(plan({ ...base, initThreads: 1 }, nav(12)).disclosure, /initialization uses 1 thread\./);
+  const light = plan({ ...base, mode: 'light', replicas: 1, workload: 25 }, nav(12, { deviceMemory: 8 }));
+  assert.deepEqual({ ...light, disclosure: 0, limits: 0 }, { mode: 'light', runtime: 'workers', threads: 3, workers: 3,
+    replicas: 1, replicasDemoted: false, initThreads: 3, memoryMiB: 3200, disclosure: 0, limits: 0 });
+  assert.match(light.disclosure, /runs 3 workers at about 300 MB each; 1 of them also holds a private full dataset \(about 2\.3 GB\), which all workers rebuild after each seed change\. It needs about 3\.2 GB of RAM in total and no isolation headers\./);
+  assert.equal(plan({ ...base, mode: 'light' }, nav(10, { platform: 'MacIntel', userAgent: 'Version/18 Safari/605' })).workers, 5);
+  assert.equal(plan({ ...base, mode: 'light', replicas: 2, workload: 10 }, nav(12)).replicas, 1, 'replicas never exceed workers');
+  assert.equal(plan({ ...base, mode: 'light', workload: 1 }, nav(12)).workers, 0);
+  assert.throws(() => plan({ pool: 'pool.example' }), /wallet/);
+  assert.throws(() => plan({ ...base, replicas: 1 }), /light/);
+  assert.equal(h.downloads.length + h.workers.length + h.sockets.length + h.scripts.length + h.timers.size, 0);
+  const api = h.create({ mode: 'light', replicas: 1, workload: 25 });
+  const same = plan({ ...base, mode: 'light', replicas: 1, workload: 25 });
+  assert.deepEqual({ ...api.state.engine }, { mode: same.mode, runtime: same.runtime, workers: same.workers,
+    replicas: same.replicas, replicasActive: 0, memoryMiB: same.memoryMiB });
+  let consent; api.on('consent-request', detail => { consent = detail; });
+  api.requestConsent(); assert.equal(consent.disclosure, same.disclosure);
+  api.destroy();
+});
+test('diagnose(mode) reports both modes; light needs only Worker and WebAssembly', () => {
+  const h = harness({ isolated: false, secure: false, sharedMemory: false });
+  const full = h.win.RandomXEmbed.diagnose();
+  assert.deepEqual(Array.from(full.issues, issue => issue.code), ['INSECURE_CONTEXT', 'CROSS_ORIGIN_ISOLATION']);
+  assert.deepEqual({ ...full.modes }, { full: false, light: true });
+  assert.ok(full.issues[1].hints.includes("Or set mode: 'light', which needs no isolation headers."));
+  assert.equal(JSON.stringify(h.win.RandomXEmbed.diagnose('full')), JSON.stringify(full));
+  const light = h.win.RandomXEmbed.diagnose('light');
+  assert.equal(light.supported, true); assert.equal(light.issues.length, 0);
+  assert.deepEqual({ ...light.modes }, { full: false, light: true }); assert.equal(light.checks.crossOriginIsolated, false);
+  assert.throws(() => h.win.RandomXEmbed.diagnose('auto'), /full or light/);
+  const none = harness({ workers: false });
+  const report = none.win.RandomXEmbed.diagnose('light');
+  assert.deepEqual(Array.from(report.issues, issue => issue.code), ['ENGINE_UNSUPPORTED']);
+  assert.equal(report.supported, false); assert.deepEqual({ ...report.modes }, { full: false, light: false });
+  assert.match(report.issues[0].hints[0], /Web Workers and WebAssembly/);
+  const offline = none.create({ mode: 'light' });
+  assert.equal(offline.state.error.code, 'DEPLOYMENT_UNSUPPORTED'); assert.equal(offline.state.error.message, 'This page cannot run the mining engine.');
+  offline.destroy();
+  assert.deepEqual({ ...harness().win.RandomXEmbed.diagnose().modes }, { full: true, light: true });
+  const denied = harness({ isolated: false, permissionsPolicy: { features: () => ['cross-origin-isolated'], allowsFeature: () => false } });
+  const fullApi = denied.create();
+  assert.equal(fullApi.state.error.code, 'DEPLOYMENT_UNSUPPORTED');
+  assert.equal(fullApi.state.error.hints.filter(hint => /mode: 'light'/.test(hint)).length, 1, 'the light pointer appears once');
+  const lightApi = denied.create({ mode: 'light' });
+  assert.equal(lightApi.state.error, null); assert.equal(lightApi.diagnostics.supported, true);
+  assert.equal(denied.downloads.length + denied.workers.length, 0);
+  fullApi.destroy(); lightApi.destroy();
+});
+test('tuning reaches every engine init; full mode initializes with initThreads', async () => {
+  const h = harness();
+  const tuning = { profile: 'x86', jit: false, lightMlp: 2, kernelK: 4, experiment: 'fuse_n=3,,no_supjit' };
+  const { api, root, consent } = await approve(h, { initThreads: 8, tuning });
+  assert.match(consent.disclosure, /Dataset initialization uses 8 threads\./);
+  assert.deepEqual({ ...root.sent[0] }, { type: 'init', fullMemory: true, datasetThreads: 6, datasetInitThreads: 8,
+    enableJit: false, jitProfile: 'x86', jitExperiment: 'light_mlp=2,kernel_k=4,fuse_n=3,no_supjit' });
+  root.message({ type: 'ready' }); h.sockets[0].open(); h.sockets[0].message({ id: 1, result: { id: 'miner', job } });
+  assert.equal(api.state.status, 'Building dataset (8 initialization threads)…');
+  root.message({ type: 'dataset_progress', done: 1, total: 4 });
+  assert.equal(api.state.status, 'Building dataset: 25% (8 threads)'); assert.equal(api.state.progress, 0.25);
+  root.message({ type: 'mode', mode: 'full' }); assert.equal(api.state.engine.replicasActive, 0);
+  assert.deepEqual({ ...api.state.engine }, { mode: 'full', runtime: 'pthreads', workers: 1, replicas: 0, replicasActive: 0, memoryMiB: 2560 });
+  api.destroy();
+  const l = harness({ isolated: false, navigator: nav(4) });
+  const light = await approve(l, { mode: 'light', tuning: { kernelK: 1 } });
+  assert.deepEqual(l.workers.map(worker => [worker.sent[0].enableJit, worker.sent[0].jitProfile, worker.sent[0].jitExperiment]),
+    [[true, 'auto', 'kernel_k=1'], [true, 'auto', 'kernel_k=1']]);
+  light.api.destroy();
+});
+test('status lines count a single worker or thread in the singular', async () => {
+  const l = harness({ isolated: false, navigator: nav(6) });
+  const light = await approve(l, { mode: 'light', maxThreads: 1 });
+  assert.equal(l.workers.length, 1); assert.match(light.consent.disclosure, /Light mode runs 1 worker at about 300 MB\. /);
+  l.workers[0].message({ type: 'ready' }); l.sockets[0].open(); l.sockets[0].message({ id: 1, result: { id: 'miner', job } });
+  assert.equal(light.api.state.status, 'Initializing light-mode caches (1 worker)…');
+  light.api.destroy();
+  const h = harness(); const { api, root } = await approve(h, { initThreads: 1 });
+  root.message({ type: 'ready' }); h.sockets[0].open(); h.sockets[0].message({ id: 1, result: { id: 'miner', job } });
+  assert.equal(api.state.status, 'Building dataset (1 initialization thread)…');
+  root.message({ type: 'dataset_progress', done: 2, total: 5 });
+  assert.equal(api.state.status, 'Building dataset: 40% (1 thread)');
+  api.destroy();
+});
+test('script attributes configure light mode, replicas and thread limits without starting anything', () => {
+  const dataset = { wallet: 'attr-wallet', pool: 'pool.example', headless: 'true', mode: 'light',
+    maxThreads: '3', replicas: '1', initThreads: '16' };
+  const h = harness({ isolated: false, script: { src: 'http://localhost/dist/embed.js', nonce: '', dataset,
+    hasAttribute: name => name === 'data-wallet' } });
+  assert.equal(h.ready.length, 1); const [api] = h.ready;
+  assert.equal(api.config.mode, 'light'); assert.equal(api.config.maxThreads, 3);
+  assert.equal(api.config.replicas, 1); assert.equal(api.config.initThreads, 16);
+  assert.equal(api.config.assetBase, 'http://localhost/dist/');
+  assert.equal(api.state.engine.workers, 3); assert.equal(api.state.engine.replicas, 1); assert.equal(api.state.error, null);
+  assert.equal(h.downloads.length + h.workers.length + h.sockets.length + h.scripts.length, 0);
+  api.destroy();
+});
+
 // Execute the real worker's range allocator and mining loop with a small
 // engine boundary. Actual WASM pthreads are covered by embed-browser.cjs.
 // slot/slots are the NoSabPool init fields (one slot: the whole space).
@@ -720,4 +1091,22 @@ test('embed asset bootstraps select the worker build without a query string', ()
   vm.runInContext(readFileSync(require.resolve('../public/worker.js'), 'utf8'),
     vm.createContext({ importScripts: url => imports.push(url), self: { location: { search: '?v=abc&build=st' } } }));
   assert.deepEqual(imports, ['randomx_st.js?v=abc']);
+});
+test('a blob-bootstrapped st worker loads its WASM and fb_full.js from the asset base', async () => {
+  const imports = [], posted = [];
+  let engine;
+  const context = vm.createContext({ console, setTimeout, URL, postMessage: msg => posted.push(msg),
+    self: { location: {}, __randomxAssets: { baseURL: 'https://cdn.example/rx/', glueURL: 'blob:glue', build: 'st' } },
+    importScripts(url) {
+      imports.push(url);
+      if (url.endsWith('fb_full.js')) context.RxFbFull = { FbWorker: class { constructor(host) { context.fbHost = host; } } };
+    },
+    createRandomX: async options => { engine = options; return { cwrap: () => () => 0, _malloc: () => 0 }; } });
+  vm.runInContext(readFileSync(require.resolve('../public/worker.js'), 'utf8'), context);
+  await vm.runInContext("init({ fullMemory: false, enableJit: false, fbRole: 'full', nonceSlot: 1, nonceSlots: 3 })", context);
+  assert.equal(engine.locateFile('randomx_st.wasm'), 'https://cdn.example/rx/randomx_st.wasm');
+  assert.equal(engine.mainScriptUrlOrBlob, 'blob:glue');
+  assert.deepEqual(imports, ['blob:glue', 'https://cdn.example/rx/fb_full.js']);
+  assert.equal(context.fbHost.full, true); assert.equal(vm.runInContext('`${nonceSlot}/${nonceSlots}`', context), '1/3');
+  assert.equal(posted.at(-1).type, 'ready');
 });

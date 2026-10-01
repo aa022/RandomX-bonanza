@@ -96,3 +96,18 @@ Measured 2026-10-01 with item pairing (`light_mlp=2`, x86 default), one 15 s run
 - **`public/fb_full.js`:** `FbCoordinator` and `FbWorker`, shared by the browser and Node.
 - **`public/coi-sw.js`** and the inline script in **`public/index.html`**: `?coi=1`/`?coi=0` (§2a).
 - **`wasm/build.sh`:** the second emcc run for `randomx_st`, and `ST_BUILD=0` to skip it.
+
+## 8. The embed (`RandomXEmbed`, 0.3.0)
+The embed's `mode: 'light'` is this path: a `NoSabPool` port (`workerPool` in `public/embed.js`) with the same `randomx_st` workers, nonce slots and `FbCoordinator`. It runs whether or not the page is isolated; the embed never picks it by itself (`full` on a non-isolated page fails with the header hints and a pointer to `light`). `RandomXEmbed.plan(config)` shows the workers and RAM a configuration resolves to, without starting anything.
+
+| Demo URL | Embed option |
+|---|---|
+| no-SAB path (`?sab=0`, or not isolated) | `mode: 'light'` |
+| `?threads=N` | `workload` (% of cores, default 50, 80% cap, ARM 50%), bounded by `maxThreads: N` |
+| `?fb_full=K` | `replicas: K` (0–2); dropped when `navigator.deviceMemory` reports under 8 |
+| `?jit_profile=…` | `tuning.profile` |
+| `?jit_exp=light_mlp=N` / `kernel_k=N` | `tuning.lightMlp` / `tuning.kernelK` |
+| other `?jit_exp=` tokens | `tuning.experiment`: hash-safe tokens only; `reuse`/`reuse2` throw |
+| `?nojit=1` | `tuning.jit: false` |
+| `?init_threads=N` (SAB full mode) | `initThreads: N` (full mode only) |
+| `?coi=1` | none yet (`coi-sw.js` is not in `dist/`) |

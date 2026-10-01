@@ -56,7 +56,7 @@ from the `embed-v0.2.0-demo` delivery branch.
 
 ## jsDelivr embed
 
-    make embed       # → dist/ with embed, worker, runtime, WASM and licenses
+    make embed       # → dist/ with embed, workers, both runtimes, fb_full.js and licenses
     make test-embed  # consent, core limits, lifecycle and reconnect tests
     npm pack         # build + distributable npm archive; does not publish
 
@@ -64,8 +64,11 @@ from the `embed-v0.2.0-demo` delivery branch.
 release/tag to serve it through jsDelivr's GitHub endpoint, or publish the
 npm package to use the npm endpoint. The URLs below are deployment examples;
 this build does not create a GitHub tag or publish an npm version. Pin an
-exact release or commit and keep all engine files together. `manifest.json`
-records file sizes, SHA-256 hashes and script integrity values.
+exact release or commit and keep all engine files together: `embed.js`,
+`embed-worker.js`, `worker.js`, `randomx.js`/`.wasm` (full mode),
+`randomx_st.js`/`.wasm` (light mode) and `fb_full.js` (light-mode replicas).
+`manifest.json` records file sizes, SHA-256 hashes and script integrity values.
+Options and API members marked (0.3.0) need a 0.3.0 or later pin.
 
 ```html
 <script
@@ -85,14 +88,15 @@ consent statement, Start/Stop controls and a collapsed view with Stop still
 available. Shadow DOM isolates its styling. No mining engine, dataset or
 pool connection is loaded before consent. Consent is session-only, never
 stored. Stop, navigation and destruction terminate
-the engine and **every pthread**, including during dataset initialization.
+the engine and **every pthread or light-mode worker**, including during dataset initialization.
 Approved mining continues across tab switches, including initialization and
 reconnects. Browsers may throttle or suspend background tabs; uninterrupted
 background execution cannot be guaranteed. Returning after navigation requires consent again.
 
 Configuration accepts the same keys through `RandomXEmbed.create({...})`;
-script attributes use kebab-case (for example `data-worker-name`).
-Set `data-auto="false"` when creating instances yourself.
+script attributes use kebab-case (for example `data-worker-name`,
+`data-max-threads`, `data-replicas`, `data-init-threads`); `tuning` is API
+only. Set `data-auto="false"` when creating instances yourself.
 
 | Setting | Meaning |
 | --- | --- |
@@ -103,7 +107,11 @@ Set `data-auto="false"` when creating instances yourself.
 | `keepalive` | `auto` (default) negotiates `keepalived`; `required` sends it every 15 seconds after login even without extension flags |
 | `workerName` | Pool worker name, default `embed` |
 | `workload` | Percentage of reported CPU cores, including decimals; default 50, maximum 80 |
-| `mode` | `full` (default, about 2.5 GiB RAM), or `light` (about 256 MiB, one mining thread) |
+| `mode` | `full` (default): the pthread engine on one shared dataset, about 2.5 GiB RAM, needs cross-origin isolation. `light` (0.3.0 semantics): one `randomx_st` worker per mining thread, about 300 MB each, **no isolation headers**. Omitted or `''` means `full`; any other value throws |
+| `maxThreads` | (0.3.0) Absolute ceiling on mining threads, and so on light workers and their RAM; integer 1–32 |
+| `replicas` | (0.3.0) Light only, 0–2, default 0: workers that also mine on a private full dataset, about 2.3 GB each |
+| `initThreads` | (0.3.0) Full only: dataset initialization threads, 1–32, default 32; light mode ignores it |
+| `tuning` | (0.3.0) API-only engine knobs `{profile, jit, lightMlp, kernelK, experiment}`; see below |
 | `headless` | `true` creates only the API; it appends no widget |
 | `quickstart` | `true` requests consent on the first trusted click or non-navigation key interaction |
 | `container` | Element or CSS selector for the built-in widget; default `document.body` |
@@ -111,7 +119,7 @@ Set `data-auto="false"` when creating instances yourself.
 | `nonce` | CSP nonce for the widget's injected stylesheet |
 
 Mining threads are `floor(reported cores × workload / 100)`, bounded by
-80% of the reported cores and 32 mining threads. The default is **50%** on
+80% of the reported cores, 32 mining threads and `maxThreads`. The default is **50%** on
 all platforms, including ARM and Safari. API values from 80–100 are clamped
 to 80%; ARM sessions are further capped at 50% of reported cores. There
 is no efficiency-core configuration. The form accepts 0–80%; runtime
@@ -120,9 +128,32 @@ too small to allow one thread cannot start. The widget shows the effective
 CPU percentage and resulting thread count. Changing workload stops the session and requires
 consent again. Only one embed instance on a page may mine at a time.
 
-**Dataset initialization always uses 32 threads**, independent of mining
-workload and platform. This temporary load is disclosed in both the widget
-and consent event. Light mode has no full dataset to initialize.
+**Full-mode dataset initialization uses `initThreads` threads** (default 32),
+independent of mining workload and platform. This temporary load is disclosed
+in both the widget and consent event.
+
+**Light mode** runs one `randomx_st` worker per mining thread. Each has its
+own 256 MiB cache (about 300 MB) and a disjoint slice of the nonce space. It
+uses no SharedArrayBuffer, so it needs only Worker and WebAssembly support and
+runs on pages without COOP/COEP. RAM is about `workers × 300 MB + replicas ×
+2.3 GB`, as the disclosure states; `maxThreads` bounds it. With `replicas`,
+workers `0..replicas-1` also mine on a private full dataset that all workers
+build together after each seed change, while the light workers keep mining.
+A replica that cannot allocate its dataset stays light. Replicas are dropped
+where `navigator.deviceMemory` reports under 8 (it caps at 8; Firefox omits it).
+Light mode trades hashrate per thread for running anywhere; see
+[NOSAB_KNOBS.md](NOSAB_KNOBS.md).
+
+`tuning` is for engine experiments; normal deployments leave it unset.
+`profile` (`auto`, `arm`, `x86`) picks the JIT generator profile; `jit: false`
+uses the portable interpreter (debugging only, far slower); `lightMlp` (0–2)
+and `kernelK` (1–4) match the `light_mlp` and `kernel_k` knobs. `experiment`
+is a comma list of at most 256 characters of hash-safe `jit_exp` tokens:
+`no_threaded`, `no_inline_fprc`, `no_regs_mem`, `no_split_id`, `no_fuse`,
+`no_inline_round`, `no_supjit`, `unroll2`, or `fuse_n`, `triples_n`,
+`unroll2`, `shared_code`, `aes_simd`, `aes_relaxed`, `light_mlp`, `kernel_k`
+with `=N`. Any other token throws, including the timing-only `reuse` and
+`reuse2`, which produce wrong hashes on purpose.
 
 ### Headless API and custom DOM
 
@@ -162,6 +193,19 @@ Other API members: `state` (snapshot, including `error`), `diagnostics`, `limits
 functions. Document events are `randomx:state`, `randomx:error` and `randomx:consent-request`;
 their details contain `instance` so handlers can identify their embed.
 Attribute-based startup also emits `randomx:ready` on `window` with the instance.
+
+(0.3.0) `state.engine` is `{mode, runtime: 'pthreads' | 'workers', workers,
+replicas, replicasActive, memoryMiB}`; a running session keeps the plan it
+started with, and `replicasActive` counts replicas mining on their dataset.
+
+(0.3.0) `RandomXEmbed.plan(config, nav = navigator)` validates a configuration
+like `create()` and returns the resolved `{mode, runtime, threads, workers,
+replicas, replicasDemoted, initThreads, memoryMiB, disclosure, limits}`
+without an instance, DOM, engine or network; `create()` uses the same math.
+Pass `nav` (`hardwareConcurrency`, `platform`, `userAgent`, `architecture`,
+`deviceMemory`) to plan for another device. Chromium reports the CPU
+architecture asynchronously just after the script loads; until then a Mac
+counts as ARM (50% cap).
 
 ### Quickstart and deployer-owned consent
 
@@ -258,10 +302,10 @@ to 4096 UTF-8 bytes. Client JSON-RPC request IDs are integers, with login ID
 `1` and increasing submit/keepalive IDs from `2`; nothing else is sent before
 the login reply.
 
-Reconnects retain the worker, shared memory and current seed's dataset/VM
-(or cache in light mode). Jobs with the same RandomX seed hash reuse these
-resources, including after a new login. A new
-seed requires rebuilding the dataset; Stop, workload changes, navigation and
+Reconnects retain the workers, shared memory and current seed's dataset/VM
+(in light mode, every worker's cache and any replica dataset). Jobs with the same RandomX
+seed hash reuse these resources, including after a new login. A new
+seed requires rebuilding the dataset (light: the caches and replicas); Stop, workload changes, navigation and
 engine errors end the session and release its workers.
 
 The operator-provided public donation endpoint uses these options:
@@ -289,7 +333,7 @@ For the VPS bridge and Netlify/jsDelivr demo, see the detailed
 Configure the page, asset server and pool proxy separately. jsDelivr serves
 the distribution; this project's bridge supplies the TCP pool connection.
 
-The embedding **HTML page** needs HTTPS and these response headers:
+In full mode, the embedding **HTML page** needs HTTPS and these response headers:
 
 ```http
 Cross-Origin-Opener-Policy: same-origin
@@ -302,6 +346,8 @@ host page. Ensure `Permissions-Policy` allows `cross-origin-isolated`.
 COEP also affects other external resources: scripts, images and fonts need
 CORS or an appropriate CORP policy. [MDN: cross-origin isolation](https://developer.mozilla.org/en-US/docs/Web/API/Window/crossOriginIsolated),
 [MDN: COEP resource rules](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cross-Origin-Embedder-Policy).
+**Light mode needs none of these headers**; the asset, CSP and proxy rules
+below still apply.
 
 For **your own cross-origin asset server**, serve the complete distribution
 with these response headers:
@@ -331,6 +377,10 @@ its script nonce/hash. For the widget stylesheet, pass `nonce` to `create`
 and authorize that nonce in `style-src`; headless mode injects no styles.
 Browsers requiring broader WASM permission may need `'unsafe-eval'`.
 Blob workers run in the page's origin and load assets from the selected CDN.
+Light mode needs the same directives. With `replicas`, the page also loads
+`fb_full.js` from the asset origin as a classic `<script>` (crossorigin
+anonymous, carrying the configured `nonce`), so `script-src` must allow the
+asset origin or that nonce; a block fails at stage `assets`.
 
 Use **WSS for the proxy** on HTTPS pages. Forward HTTP WebSocket upgrades
 to the bridge and allow the embedding site's `Origin` in any proxy origin
@@ -338,7 +388,7 @@ policy. WebSockets do not use HTTP CORS preflight; adding an
 `Access-Control-Allow-Origin` header does not configure that policy.
 Expect an HTTP `101` upgrade response. [MDN: WebSocket handshakes](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers).
 
-Check the **embedding page's console** before starting:
+For full mode, check the **embedding page's console** before starting:
 
 ```js
 window.isSecureContext === true
@@ -364,7 +414,8 @@ ordinary connection failures retain the existing reconnect behavior.
 Headless integrations can inspect or render the same diagnostics:
 
 ```js
-console.log(RandomXEmbed.diagnose()); // { supported, checks, issues }; no engine/network probes
+console.log(RandomXEmbed.diagnose()); // full mode: { supported, checks, issues, modes }; no engine/network probes
+console.log(RandomXEmbed.diagnose('light').supported); // (0.3.0) light needs only Worker and WebAssembly
 const renderError = error => {
   if (error) console.error(error.code, error.message, error.hints, error.checks);
 };
@@ -372,6 +423,10 @@ renderError(miner.diagnostics.error); // includes errors detected during create(
 miner.on('error', renderError);
 // Or bindControls({ ..., diagnostics: '#rx-diagnostics' }) for plain text output.
 ```
+
+`modes` is `{full, light}`: whether each mode can start here. Full-mode
+isolation issues add one hint pointing to `mode: 'light'`. Instances report
+for their own mode.
 
 Reports use `DEPLOYMENT_UNSUPPORTED`, `ASSET_DOWNLOAD_FAILED`,
 `ENGINE_WORKER_FAILED`, `CSP_BLOCKED`, `START_UNAVAILABLE`, `LOGIN_REJECTED`,
@@ -413,7 +468,9 @@ PUPPETEER_MODULE=/path/to/puppeteer-core node tests/embed-browser.cjs
 It uses a local fake pool, verifies real 32-thread full-dataset initialization,
 shares, automatic NiceHash negotiation and reconnects without a dataset
 rebuild, a generated headless quickstart snippet and cross-origin asset
-loading. It never mines to an external pool.
+loading. Light-mode runs cover a page without COOP/COEP, disjoint nonce slots
+per worker, reconnects that keep every worker and cache, Stop, and one
+replica; submitted shares are re-hashed in Node. It never mines to an external pool.
 
 ## Browser support
 
