@@ -87,9 +87,11 @@ Options and API members marked (0.3.0) need a 0.3.0 or later pin.
 ```
 
 This appends a widget to the document body after DOM readiness. It has
-demo-style colors, a progress bar, hashrate, share counts, workload control,
-consent statement, Start/Stop controls and a collapsed view with Stop still
-available. Shadow DOM isolates its styling. No mining engine, dataset or
+the randomx.cc miner widget's look (light, or dark with the visitor's
+preference; IBM Plex Mono where the page loads that font), a progress bar,
+hashrate, share counts, workload control, consent statement, Start/Stop
+controls and a collapsed view with Stop still available. Shadow DOM isolates
+its styling. No mining engine, dataset or
 pool connection is loaded before consent. Consent is session-only, never
 stored. Stop, navigation and destruction terminate
 the engine and **every pthread or light-mode worker**, including during dataset initialization.
@@ -403,6 +405,8 @@ connect-src 'self' https://cdn.jsdelivr.net wss://YOUR_PROXY;
 Retain the site's other directives. Authorize inline initialization with
 its script nonce/hash. For the widget stylesheet, pass `nonce` to `create`
 and authorize that nonce in `style-src`; headless mode injects no styles.
+The widget's noise texture is a `data:` image: without `img-src data:` the
+browser drops only the texture.
 Browsers requiring broader WASM permission may need `'unsafe-eval'`.
 Blob workers run in the page's origin and load assets from the selected CDN.
 Light mode needs the same directives. With `replicas`, the page also loads

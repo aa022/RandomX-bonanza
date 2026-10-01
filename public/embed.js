@@ -370,25 +370,64 @@
       '\n\nBrowser checks: ' + JSON.stringify(error.checks);
   }
 
+  // The randomx.cc miner widget's look (its #widget: --w-* tokens, type scale,
+  // rules, bracketed buttons, log box), in px so the host page's root font size
+  // cannot rescale it. IBM Plex Mono renders where the host page loads it (as
+  // randomx.cc does); elsewhere the stack falls back. The noise texture is a
+  // data: image and purely decorative: a host CSP that blocks data: images
+  // drops the texture and nothing else.
+  const noise = `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.4' numOctaves='1' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.18'/></svg>")`;
   const css = `
-    :host{all:initial;display:block;color-scheme:light dark;font:13px 'SF Mono',Menlo,monospace;color:#1a1815}
-    *{box-sizing:border-box} .widget{max-width:600px;border:1px solid #1a1815;background:#fefefc;color:#1a1815;
-    font-variant-numeric:tabular-nums;box-shadow:5px 5px 0 #ffcfde} header{padding:12px 16px;border-bottom:1px solid #a8a59c;
-    letter-spacing:.22em;font-size:11px;text-transform:uppercase;display:flex;justify-content:space-between;gap:12px}
-    .body{padding:16px}p{line-height:1.65;margin:0 0 12px} .details{font-size:11px;overflow-wrap:anywhere;color:#4a4640}
-    .stats{display:grid;grid-template-columns:100px 1fr;gap:8px;margin:14px 0} .stats span:nth-child(odd){color:#4a4640}
-    .init{display:grid;grid-template-columns:100px minmax(0,1fr) auto;gap:8px;margin:12px 0}.init[hidden]{display:none}
-    .init span:first-child{color:#4a4640}.bar{letter-spacing:.08em;color:#ff3b8a;overflow:hidden;white-space:nowrap}label{display:block;line-height:1.6}
-    .consent{margin:14px 0}input[type=range]{width:100%;accent-color:#ff3b8a} input[type=checkbox]{accent-color:#ff3b8a}
-    button{font:inherit;cursor:pointer;border:1px solid #6e6b62;background:transparent;color:inherit;padding:8px 12px}
-    button:hover{color:#ff3b8a}button:disabled{opacity:.45;cursor:default}button:focus-visible,input:focus-visible{outline:2px solid #ff3b8a;outline-offset:3px}
-    .controls{display:flex;gap:10px;margin-top:14px}.status{font-size:11px;min-height:2.5em;margin-top:14px;overflow-wrap:anywhere}
-    .diagnostics{font-size:11px;margin-top:12px;border-top:1px solid #a8a59c;padding-top:10px}
-    .diagnostics summary{cursor:pointer}.diagnostics pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6}
-    .mini{border:0;padding:0;font-size:11px}.collapsed .body{display:none}.summary{padding:12px 16px;display:flex;gap:14px;align-items:center}
-    .summary[hidden]{display:none}.summary .rate{flex:1}.summary button{font-size:11px;padding:5px 8px}
-    @media(prefers-color-scheme:dark){.widget{background:#1a1815;color:#f2ede4;border-color:#888579;box-shadow:5px 5px 0 #4b2839}
-    .details,.stats span:nth-child(odd),.init span:first-child{color:#c0b9aa}}
+    :host{all:initial;display:block;color-scheme:light dark}
+    *{box-sizing:border-box} p{margin:0}
+    .widget{--w-bg:#fefefc;--w-rule:#a8a59c;--w-ink:#1a1815;--w-ink-dim:#4a4640;--w-ink-faint:#888579;--w-amber:#ff3b8a;
+    --w-amber-bright:#ff6da6;--w-stone-border:#6e6b62;--w-log-bg:#f4f4f2;--w-log-ink:#1a1815;--w-frame:#000;
+    max-width:600px;font:16px/normal 'IBM Plex Mono','SF Mono',Menlo,'Cascadia Mono','Roboto Mono',monospace;color:var(--w-ink);
+    background:var(--w-bg) ${noise} repeat;background-size:220px 220px;background-blend-mode:multiply;
+    border:1px solid var(--w-frame);font-variant-numeric:tabular-nums}
+    header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:11.2px 17.6px 9.6px;border-bottom:1px solid var(--w-rule)}
+    .title{font-size:11.2px;letter-spacing:.12em} .mini{background:transparent;border:0;padding:0;color:var(--w-ink-dim);font:inherit;
+    font-size:11.5px;letter-spacing:.15em;line-height:1;cursor:pointer} .mini:hover{color:var(--w-amber)}
+    .body{padding:16.8px 17.6px 18.4px}.collapsed .body{display:none}
+    .lead,.stats span:nth-child(odd),.init span:first-child,.cpu span{font-size:9.9px;color:var(--w-ink-dim);text-transform:uppercase;letter-spacing:.15em}
+    .lead,.init span:first-child,.cpu span{display:block;margin-bottom:3.5px} .details{font-size:11.2px;line-height:1.6;color:var(--w-ink-dim);overflow-wrap:anywhere}
+    .stats{display:grid;grid-template-columns:128px minmax(0,1fr);gap:12px 9.6px;align-items:baseline;margin:15.2px 0;padding:11.7px 0;
+    border-top:1px solid var(--w-rule);border-bottom:1px solid var(--w-rule)} .stats span{padding:3.5px 0}
+    .stats span:nth-child(even),.summary .rate{font-size:14.7px;letter-spacing:.02em;overflow-wrap:anywhere}
+    .init{display:grid;grid-template-columns:minmax(0,max-content) auto;justify-content:start;column-gap:.7em;align-items:baseline;margin-bottom:12px}
+    .init[hidden]{display:none}.init span:first-child{grid-column:1/-1}
+    .bar,.pct,output{font-size:14.1px;letter-spacing:.06em;white-space:nowrap}.bar{color:var(--w-amber);overflow:hidden}
+    .cpu{display:block;padding-bottom:15.2px;border-bottom:1px solid var(--w-rule);margin-bottom:15.2px} output{display:block;letter-spacing:.02em}
+    input[type=range]{display:block;width:100%;margin:8px 0 0;accent-color:var(--w-amber)}
+    .consent{display:flex;gap:9.6px;align-items:flex-start;margin-bottom:15.2px;font-size:11.2px;line-height:1.6;cursor:pointer}
+    input[type=checkbox]{flex:none;margin:3px 0 0;accent-color:var(--w-amber);cursor:pointer}
+    .controls{display:flex;flex-wrap:wrap;gap:25.6px}
+    .controls button,.summary button{background:transparent;color:var(--w-ink);border:0;padding:0;font:inherit;font-size:13.1px;
+    letter-spacing:.24em;text-transform:uppercase;line-height:1.2;cursor:pointer}
+    .controls button::before,.summary button::before{content:"[";color:var(--w-ink-faint);margin-right:.55em}
+    .controls button::after,.summary button::after{content:"]";color:var(--w-ink-faint);margin-left:.55em}
+    .controls button:enabled:hover,.summary button:enabled:hover{color:var(--w-amber-bright)}
+    button:enabled:hover::before,button:enabled:hover::after{color:var(--w-amber)}
+    .controls button:disabled,.summary button:disabled{color:var(--w-ink-faint);cursor:default}
+    button:focus-visible,input:focus-visible,summary:focus-visible{outline:1px solid var(--w-amber);outline-offset:4px}
+    .status,.diagnostics pre{font-size:11.2px;line-height:1.42;color:var(--w-log-ink);overflow-wrap:anywhere;padding:12px 14.4px;
+    background:var(--w-log-bg) ${noise} repeat;background-size:220px 220px;background-blend-mode:multiply;border:1px solid var(--w-stone-border)}
+    .status{margin-top:15.2px;min-height:calc(2.84em + 26px)}
+    .diagnostics{margin-top:12px}.diagnostics summary{list-style:none;cursor:pointer;font-size:9.9px;color:var(--w-amber);
+    text-transform:uppercase;letter-spacing:.15em}.diagnostics summary::-webkit-details-marker{display:none}
+    .diagnostics summary::before{content:"▸";margin-right:.6em}.diagnostics[open] summary::before{content:"▾"}
+    .diagnostics pre{font-family:inherit;white-space:pre-wrap;margin:8px 0 0}
+    .summary{display:flex;gap:16px;align-items:baseline;padding:12px 17.6px}.summary[hidden]{display:none}.summary .rate{flex:1;min-width:0}
+    @media(max-width:1280px),(max-height:820px){header{padding:8.8px 14.4px 8px}.title{font-size:9.6px;letter-spacing:.1em}.mini{font-size:9.9px}
+    .body{padding:12.8px 14.4px 14.4px}.summary{padding:9.6px 14.4px}.stats{grid-template-columns:96px minmax(0,1fr);gap:8.8px 8px;margin:10.4px 0;padding:7.8px 0}
+    .stats span{padding:2.6px 0}.lead,.stats span:nth-child(odd),.init span:first-child,.cpu span{font-size:8.6px}
+    .lead,.init span:first-child,.cpu span{margin-bottom:2.6px;letter-spacing:.13em}.stats span:nth-child(even),.summary .rate{font-size:12.8px}
+    .init{margin-bottom:8.8px}.bar,.pct,output{font-size:12.2px;letter-spacing:.04em}output{letter-spacing:.02em}
+    .cpu{padding-bottom:10.4px;margin-bottom:10.4px}.consent{margin-bottom:10.4px}.status{margin-top:10.4px}.controls{gap:19.2px}
+    .controls button,.summary button{font-size:11.5px;letter-spacing:.2em}}
+    @media(prefers-color-scheme:dark){.widget{--w-bg:#1a1815;--w-rule:#4a4640;--w-ink:#f2ede4;--w-ink-dim:#c0b9aa;
+    --w-log-bg:#211e1a;--w-log-ink:#f2ede4;--w-frame:#888579}
+    .widget,.status,.diagnostics pre{background-blend-mode:screen}}
   `;
 
   function create(input = {}) {
@@ -873,12 +912,12 @@
       root.appendChild(style);
       const panel = document.createElement('section');
       panel.className = 'widget'; panel.setAttribute('aria-label', 'Monero mining controls');
-      panel.innerHTML = `<header><span>randomx bonanza · ${VERSION}</span><button class="mini" aria-expanded="true">[−]</button></header>
-        <div class="body"><p>Monero mining</p><p class="details"></p>
+      panel.innerHTML = `<header><span class="title">randomx bonanza · v${VERSION}</span><button class="mini" aria-expanded="true">[ − ]</button></header>
+        <div class="body"><p class="lead">Monero mining</p><p class="details"></p>
         <div class="stats"><span>Hashrate</span><span class="rate">0 H/s</span><span>Shares</span><span class="shares">0 / 0</span>
         <span>Threads</span><span class="engine"></span><span>RAM</span><span class="ram"></span></div>
         <div class="init"><span>Dataset init</span><span class="bar" aria-hidden="true">${'▱'.repeat(24)}</span><span class="pct">0%</span></div>
-        <label>CPU: <output></output><input class="workload" type="range" min="0" max="${MAX_WORKLOAD}" step="1" aria-label="CPU percentage"></label>
+        <label class="cpu"><span>CPU</span><output></output><input class="workload" type="range" min="0" max="${MAX_WORKLOAD}" step="1" aria-label="CPU percentage"></label>
         ${config.quickstart ? '' : '<label class="consent"><input type="checkbox"> I understand and agree to use my device for this session.</label>'}
         <div class="controls"><button class="start">Start</button><button class="stop" disabled>Stop</button></div>
         <div class="status" role="status" aria-live="polite"></div>
@@ -891,7 +930,7 @@
       $('.mini').addEventListener('click', () => {
         const collapsed = panel.classList.toggle('collapsed');
         $('.summary').hidden = !collapsed;
-        $('.mini').textContent = collapsed ? '[+]' : '[−]';
+        $('.mini').textContent = collapsed ? '[ + ]' : '[ − ]';
         $('.mini').setAttribute('aria-expanded', String(!collapsed));
       });
       $('.summary .stop').addEventListener('click', () => stop());
