@@ -174,16 +174,15 @@ visitor device (README "Light mode").
 - `replicas: 'auto'` (new default) picks 0–2 by `light workers + 2.25 ×
   replicas` within the budget; fixed counts fall back to what fits. The old
   "drop below 8 GB" rule is gone.
-- Replica builds use `initThreads` (default 32, the user's choice) threads:
-  the pool plus temporary helper workers (`seed` message in `worker.js`,
-  `FbCoordinator.lost()` requeues a failed helper's chunks). Helpers take
-  ~300 MB each while the build runs; `plan().peakMemoryMiB` and the
-  disclosure state the peak, which is above the RAM budget by design.
+- Replica builds run on the mining workers only, within the same CPU and
+  RAM caps (32 build threads, tried first, cost ~300 MB per extra worker and
+  made the machine unusable: dropped). Every worker builds its cache and the
+  datasets before anyone mines; jobs wait for the build, per seed.
 - The ARM 50% workload cap is gone; `optimizeArm` (full mode only, default
   off) counts half the reported cores on ARM devices. A session approved
   before Chromium's architecture hint never runs more threads than approved.
-- The 2.25 weight and the build-helper speedup are x86 (5600X) figures; they
-  need the idle-machine bench pass on the M4.
+- The 2.25 weight is an x86 (5600X) figure; it needs the idle-machine bench
+  pass on the M4 (0/1/2 replicas), along with the build time per worker count.
 
 ## Configurator, 2026-10-01
 

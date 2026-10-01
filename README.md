@@ -118,7 +118,7 @@ only. Set `data-auto="false"` when creating instances yourself.
 | `memory` | (0.3.0) Light only: RAM budget as a percentage of the RAM the browser reports; default 50, maximum 80 |
 | `memoryCap` | (0.3.0) Light only: RAM budget in GB where the browser reports none (Firefox, Safari, insecure pages); default 2 |
 | `replicas` | (0.3.0) Light only: `'auto'` (default) or a fixed 0–2. Workers that also mine on a private full dataset, about 2.3 GB each; `'auto'` picks the best count for the RAM budget |
-| `initThreads` | (0.3.0) Dataset build threads, 1–32, default 32: full mode's initialization pthreads; in light mode the replica build (the workers plus temporary helpers) |
+| `initThreads` | (0.3.0) Full only: dataset initialization threads, 1–32, default 32. Light mode builds its replicas on its own workers |
 | `tuning` | (0.3.0) API-only engine knobs `{profile, jit, lightMlp, kernelK, experiment}`; see below |
 | `headless` | `true` creates only the API; it appends no widget |
 | `quickstart` | `true` requests consent on the first trusted click or non-navigation key interaction |
@@ -157,14 +157,13 @@ rest on each visitor's device:
   back to the most that fits;
 - RAM while mining is about `workers × 300 MB + replicas × 2.3 GB`, as the disclosure states.
 
-Workers `0..replicas-1` also mine on a private full dataset. It is built after
-each seed change by `initThreads` threads (default 32): the pool's workers
-plus temporary helper workers that exist only during the build, each with its
-own cache (about 300 MB), so the build briefly needs up to
-`peakMemoryMiB` (the disclosure states it). The light workers keep mining
-meanwhile, a helper that fails only leaves the build, and a replica that
-cannot allocate its dataset stays light. Light mode trades hashrate per thread
-for running anywhere; see [NOSAB_KNOBS.md](NOSAB_KNOBS.md).
+Workers `0..replicas-1` also mine on a private full dataset. The workers
+themselves build it, so the build stays within the same CPU workload and RAM
+budget: on each seed (at the start, then every few days) every worker builds
+its cache and computes dataset chunks, and nobody mines until the datasets are
+done; then every worker gets the job. A replica that cannot allocate its
+dataset stays light. Light mode trades hashrate per thread for running
+anywhere; see [NOSAB_KNOBS.md](NOSAB_KNOBS.md).
 
 `tuning` is for engine experiments; normal deployments leave it unset.
 `profile` (`auto`, `arm`, `x86`) picks the JIT generator profile; `jit: false`
@@ -217,15 +216,16 @@ their details contain `instance` so handlers can identify their embed.
 Attribute-based startup also emits `randomx:ready` on `window` with the instance.
 
 (0.3.0) `state.engine` is `{mode, runtime: 'pthreads' | 'workers', workers,
-replicas, replicasActive, helpers, memoryMiB, peakMemoryMiB, memoryBudgetMiB,
-memorySource}`; a running session keeps the plan it started with, and
-`replicasActive` counts replicas mining on their dataset.
+replicas, replicasActive, memoryMiB, memoryBudgetMiB, memorySource}`; a running
+session keeps the plan it started with, and `replicasActive` counts replicas
+mining on their dataset.
 
 (0.3.0) `RandomXEmbed.plan(config, nav = navigator)` validates a configuration
 like `create()` and returns the resolved `{mode, runtime, threads,
-wantedThreads, workers, replicas, helpers, initThreads, memoryMiB,
-peakMemoryMiB, memoryBudgetMiB, memorySource: 'reported' | 'cap' | null,
-disclosure, limits}` without an instance, DOM, engine or network; `create()`
+wantedThreads, workers, replicas, initThreads, memoryMiB, memoryBudgetMiB,
+memorySource: 'reported' | 'cap' | null, disclosure, limits}` (light
+`initThreads` is the build's worker count) without an instance, DOM, engine or
+network; `create()`
 uses the same math. `limits` adds `reportedCores`, `arm` and `armOptimized`.
 Pass `nav` (`hardwareConcurrency`, `platform`, `userAgent`, `architecture`,
 `deviceMemory`) to plan for another device. Chromium reports the CPU

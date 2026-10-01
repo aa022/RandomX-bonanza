@@ -122,8 +122,8 @@
             <p class="note">Gives up to two workers a private copy of the full dataset (about 2.3 GB each), which mines
               roughly 2.25 times as fast as a light worker. The embed works out the best mix of light workers and
               full-dataset ones within the RAM budget on each visitor's device, and uses none where it doesn't pay.
-              The datasets are built at the start and after each seed change (about every three days) on 32 threads
-              for a few seconds; the extra build threads take about 0.3 GB each while that runs.</p>
+              The workers build the datasets themselves, within the same CPU and RAM limits, before they start
+              mining, and again after each seed change (about every three days).</p>
           </div>
 
           <div class="estimate" aria-live="polite">

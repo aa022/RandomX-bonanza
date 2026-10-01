@@ -174,7 +174,7 @@ function forceNonceBoundary(page) {
 // records each engine worker the embed constructs or terminates, with the
 // cache builds, mode reports and shares that the worker pool aggregates away.
 const lightPage = options => `<!doctype html><html><body><script>
-  window.rx = { names: [], terminated: 0, caches: 0, modes: [], shares: [], statuses: new Set() };
+  window.rx = { names: [], terminated: 0, caches: 0, modes: [], shares: [], statuses: new Set(), early: 0 };
   window.Worker = class extends Worker {
     constructor(url, options) {
       super(url, options);
@@ -183,6 +183,9 @@ const lightPage = options => `<!doctype html><html><body><script>
       this.addEventListener('message', ({ data }) => {
         if (data.type === 'status' && data.message === 'Initializing cache...') rx.caches++;
         else if (data.type === 'mode') rx.modes.push({ worker: i, mode: mode = data.mode });
+        // Hashing before a replica build is done (the embed holds jobs until then).
+        else if (data.type === 'hashrate' && data.rate > 0 && window.rxMiner && rxMiner.state.engine.replicas &&
+          !rxMiner.state.engine.replicasActive) rx.early++;
         else if (data.type === 'share') rx.shares.push({ worker: i, full: mode === 'full', job_id: data.job_id,
           nonce: data.nonce, result: data.result });
       });
@@ -411,7 +414,7 @@ async function waitUntil(check, timeout = 30000) {
     forceFixedNonce = false;
     console.log('PASS: wrong donation wallet is displayed as a terminal login error, with no upstream mining or retry');
     // Light mode (0.3.0): a randomx_st worker pool through the reference bridge to the fixture pool.
-    // replicas: 0 unless a run asks: Chrome may report enough RAM for 'auto' to add replicas and their build helpers.
+    // replicas: 0 unless a run asks: Chrome may report enough RAM for 'auto' to add replicas.
     const lightConfig = { wallet: 'fixture-wallet', pool: '127.0.0.1', port: poolPort, proxy: `ws://localhost:${proxyPort}`, mode: 'light', replicas: 0 };
     const sharesOf = {};
     const openLight = async (pathname, options) => {
@@ -444,7 +447,7 @@ async function waitUntil(check, timeout = 30000) {
     assert.equal(openChecks.full.supported, false); assert.deepEqual(openChecks.full.modes, { full: false, light: true });
     assert.equal(openChecks.light.supported, true); assert.deepEqual(openChecks.light.issues, []); assert.equal(openChecks.error, null);
     assert.deepEqual([openChecks.engine.mode, openChecks.engine.runtime, openChecks.engine.workers, openChecks.engine.replicas,
-      openChecks.engine.helpers, openChecks.engine.memoryMiB], ['light', 'workers', 3, 0, 0, 900]);
+      openChecks.engine.memoryMiB], ['light', 'workers', 3, 0, 900]);
     assert.match(openChecks.disclosure, /as 3 light-mode workers at about 300 MB each\. Mining needs about 0\.9 GB of RAM\./);
     assert.doesNotMatch(openChecks.disclosure, /isolation headers/);
     // Full mode on the same page stops at preflight and points at light mode.
@@ -504,13 +507,12 @@ async function waitUntil(check, timeout = 30000) {
     forceFixedNonce = false;
     console.log('PASS: light mode on a crossOriginIsolated page runs the same randomx_st pool (2 workers, no pthreads) with accepted NiceHash shares');
     lightServed = served.length;
-    // initThreads 4: the 3 workers plus one temporary build helper (32, the default, would be ~9.6 GB here).
-    const replica = await openLight('/open', { maxThreads: 3, replicas: 1, initThreads: 4, memoryCap: 8 });
+    const replica = await openLight('/open', { maxThreads: 3, replicas: 1, memoryCap: 8 });
     const replicaPlan = await replica.evaluate(() => ({ engine: rxMiner.state.engine, deviceMemory: navigator.deviceMemory,
       disclosure: document.querySelector('.randomx-embed').shadowRoot.querySelector('.details').textContent }));
-    assert.deepEqual([replicaPlan.engine.workers, replicaPlan.engine.replicas, replicaPlan.engine.helpers, replicaPlan.engine.memoryMiB,
-      replicaPlan.engine.peakMemoryMiB], [3, 1, 1, 3200, 3500], 'a replica is planned (navigator.deviceMemory ' + replicaPlan.deviceMemory + ')');
-    assert.match(replicaPlan.disclosure, /1 of them also holds a private full dataset .*briefly uses 4 threads .*Mining needs about 3\.2 GB of RAM/);
+    assert.deepEqual([replicaPlan.engine.workers, replicaPlan.engine.replicas, replicaPlan.engine.memoryMiB], [3, 1, 3200],
+      'a replica is planned (navigator.deviceMemory ' + replicaPlan.deviceMemory + ')');
+    assert.match(replicaPlan.disclosure, /1 of them also holds a private full dataset .*which the workers build before mining starts.*Mining needs about 3\.2 GB of RAM/);
     await replica.click(shadow + 'input[type=checkbox]'); await replica.click(shadow + '.start');
     // All three workers build worker 0's private 2 GiB dataset: generous on a loaded host.
     await replica.waitForFunction(() => rxMiner.state.engine.replicasActive === 1, { timeout: 600000, polling: 1000 });
@@ -522,14 +524,15 @@ async function waitUntil(check, timeout = 30000) {
     assert.equal(await replica.evaluate(() => typeof RxFbFull.FbCoordinator), 'function');
     assert.ok(served.slice(lightServed).includes('/fb_full.js'));
     assert.deepEqual(light.modes.filter(report => report.mode === 'full').map(report => report.worker), [0], 'worker 0 alone mines on a replica');
-    assert.ok(light.statuses.includes('Replica datasets ready: 1 of 1 mining in full mode'));
-    assert.equal(light.progress, 1); assert.equal(light.caches, 4, '3 workers and the build helper');
-    const helper = await replica.evaluate(() => ({ names: rx.names, terminated: rx.terminated }));
-    assert.deepEqual(helper.names, ['rx-st-0', 'rx-st-1', 'rx-st-2', 'rx-build-0']);
-    assert.equal(helper.terminated, 1, 'the helper left once the build was done');
+    assert.ok(light.statuses.includes('Full dataset ready: 1 of 1 mining in full mode'));
+    assert.ok([...light.statuses].some(status => /^Building the full dataset: \d+% \(3 workers\)$/.test(status)));
+    assert.equal(light.progress, 1); assert.equal(light.caches, 3);
+    const built = await replica.evaluate(() => ({ names: rx.names, early: rx.early }));
+    assert.deepEqual(built.names, ['rx-st-0', 'rx-st-1', 'rx-st-2'], 'the workers build the dataset themselves');
+    assert.equal(built.early, 0, 'no worker hashed before the full dataset was built');
     assert.ok(light.shares.every(share => nonceSlot(share.nonce, 3, false) === share.worker));
-    sharesOf.replica = (await stopLight(replica, 4)).shares;
-    console.log('PASS: light mode with replicas: 1 loads fb_full.js, builds worker 0\'s full dataset (replicasActive 1) and keeps accepted shares flowing');
+    sharesOf.replica = (await stopLight(replica, 3)).shares;
+    console.log('PASS: light mode with replicas: 1 loads fb_full.js, builds worker 0\'s full dataset on the 3 workers before any mining, then mines with accepted shares');
     // Isolation failures are full-mode preflight errors (light mode needs no
     // isolation headers); the CSP cases run in both modes.
     const policyCases = [['isolation', 'full'], ['permission', 'full'],

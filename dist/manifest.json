@@ -2,9 +2,9 @@
   "version": "0.3.0",
   "files": {
     "embed.js": {
-      "bytes": 62758,
-      "sha256": "abde5d5c2c00a5629f4f6f1f06054402260fc7e93b977cc081cdd6d919350ae8",
-      "integrity": "sha384-08TkfXZ5jfGLJ3KxzRVEpdoceVscuOuXV4QrdzzUN2Mw4QiLWmqcrIi3wbLMsGaA"
+      "bytes": 61716,
+      "sha256": "725c3d90215f9b7dc376d20fe7baa2d0c8481e8130f69e6d74527baa1c7308c3",
+      "integrity": "sha384-aVqc0k7S1DdCvLJcsT9eRfqVfRz2NgX0+JvfDC5OghwtYqZtRUemRXH+koshMLt9"
     },
     "embed-worker.js": {
       "bytes": 1060,
@@ -12,9 +12,9 @@
       "integrity": "sha384-2UUOIXagM1z1jBUYqsIsaMYhHera2ukz81muIr/EjWtdyuRYWOCACYsKENpljEj9"
     },
     "worker.js": {
-      "bytes": 37621,
-      "sha256": "b060bc4b6112a58a0efb1873c2275e460323b571550c4d4bf50e8195f053bb0b",
-      "integrity": "sha384-MkyuFMTXOqgRtMgo1NJgVLD8AqtMYlDf95CiXDSe63+cGz/p69QZ8+kooZUVaVfa"
+      "bytes": 37615,
+      "sha256": "9cdda2f22b8c0d5448d1dc29a1ca0d8d2c6231c1a77e9fa27fea4d7c3721ee94",
+      "integrity": "sha384-uaHA5Iyu3p97QVJdsGiSjcE8dC4V/cM07m27Giryi32n1bnyPejPMt8SuKUnqD8M"
     },
     "randomx.js": {
       "bytes": 50922,
@@ -37,9 +37,9 @@
       "integrity": "sha384-lGG11o+zkpoIlLVQHU1+HHTwjgCEGw0Lnof0R6AGYgHNaWI87i/pPYP5zu/l91CC"
     },
     "fb_full.js": {
-      "bytes": 12436,
-      "sha256": "ffa8b9bf9efbcfe3050fa3e93f4b0618b2c2422933640b81d1e1e02c4d333e8d",
-      "integrity": "sha384-4WEQaJRkWBEJTuM6+LBlnzJBGvLcG24TJp9tlIp3Y7s+WFJpGgazbadZ5EAHKyvp"
+      "bytes": 11842,
+      "sha256": "ac158b70d700f0185ae119e7d61a52da7af6da4f22dc78244533a8c33c06a408",
+      "integrity": "sha384-1OIEujRBhz7NJJLt+ALVvUQOsslpq7omKIDV1fNKAETISKBowvMIxwC68LOWyR3A"
     }
   }
 }

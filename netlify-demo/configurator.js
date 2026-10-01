@@ -110,8 +110,7 @@ document.addEventListener('randomx:consent-request', function (event) {
         ['Full-dataset', p.replicas ? `${p.replicas} (${config.replicas === 'auto' ? 'best mix for this budget' : 'fixed'})` :
           config.replicas === 'auto' ? '0: none pays off within this budget' : 'off'],
         ['RAM', `about ${gb(p.memoryMiB)} while mining`]);
-      if (p.replicas) rows.push(['Dataset build', `${plural(p.initThreads, 'thread')} (${p.helpers} temporary), ` +
-        `up to about ${gb(p.peakMemoryMiB)} for a few seconds`]);
+      if (p.replicas) rows.push(['Dataset build', `on the ${plural(p.workers, 'worker')}, before mining starts and after each seed change`]);
     } else {
       rows.push(['Dataset build', `${p.initThreads} threads, at the start and after each seed change`], ['RAM', 'about 2.5 GiB']);
     }

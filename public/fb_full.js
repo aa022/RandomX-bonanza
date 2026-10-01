@@ -161,7 +161,6 @@
       this.queue = [];
       this.busy = new Array(this.n).fill(0);
       this.bad = new Set();                      // failed a compute (no cache): skip until fb_cache
-      this.at = new Map();                       // chunk -> worker computing it
       this.flight = 0;
       this.writesLeft = new Map();
       this.have = new Map();
@@ -182,7 +181,6 @@
           this._start();
           break;
         case 'fb_chunk':
-          this.at.delete(msg.chunk);
           this.busy[i]--;
           if (msg.fail) {
             this.bad.add(i);
@@ -219,21 +217,6 @@
       }
       this._pump();
       return true;
-    }
-
-    // Worker i is gone (a build helper that failed or was terminated): its
-    // compute chunks go back to the queue and it gets no more this epoch.
-    lost(i) {
-      if (!this.known) return;
-      this.known[i] = null;
-      for (const [chunk, w] of this.at) {
-        if (w !== i) continue;
-        this.at.delete(chunk);
-        this.busy[i]--;
-        this.flight--;
-        this.queue.unshift(chunk);
-      }
-      this._pump();
     }
 
     _start() {
@@ -290,7 +273,6 @@
         const own = this.targets.includes(w);
         this.busy[w]++;
         this.flight++;
-        this.at.set(chunk, w);
         this.o.send(w, {
           type: 'fb_compute', seed: this.seed, chunk, start,
           count: Math.min(CHUNK_ITEMS, this.items - start),

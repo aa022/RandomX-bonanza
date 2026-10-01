@@ -611,7 +611,7 @@ test('light mode runs a randomx_st worker pool on a non-isolated page, one nonce
   const h = harness({ isolated: false, sharedMemory: false });
   const api = h.create({ mode: 'light' });
   assert.equal(api.state.error, null); assert.notEqual(api.state.phase, 'error');
-  assert.deepEqual({ ...api.state.engine }, { mode: 'light', runtime: 'workers', workers: 6, replicas: 0, replicasActive: 0, helpers: 0, memoryMiB: 1800, peakMemoryMiB: 1800, memoryBudgetMiB: 2048, memorySource: 'cap' });
+  assert.deepEqual({ ...api.state.engine }, { mode: 'light', runtime: 'workers', workers: 6, replicas: 0, replicasActive: 0, memoryMiB: 1800, memoryBudgetMiB: 2048, memorySource: 'cap' });
   assert.ok(Object.isFrozen(api.state.engine));
   let consent; api.on('consent-request', detail => { consent = detail; });
   api.requestConsent();
@@ -723,13 +723,13 @@ test('pool workers cannot create pthreads; their policy reports identify the cau
 });
 test('replicas load fb_full.js once, take the first worker roles and build through the page coordinator', async () => {
   const h = harness({ isolated: false, navigator: nav(6, { deviceMemory: 16 }) });
-  const api = h.create({ mode: 'light', replicas: 2, initThreads: 3, nonce: 'page-nonce' });
+  const api = h.create({ mode: 'light', replicas: 2, nonce: 'page-nonce' });
   const statuses = statusesOf(api);
   assert.deepEqual({ ...api.state.engine }, { mode: 'light', runtime: 'workers', workers: 3, replicas: 2, replicasActive: 0,
-    helpers: 0, memoryMiB: 5500, peakMemoryMiB: 5500, memoryBudgetMiB: 8192, memorySource: 'reported' });
+    memoryMiB: 5500, memoryBudgetMiB: 8192, memorySource: 'reported' });
   let consent; api.on('consent-request', detail => { consent = detail; });
   api.requestConsent(); assert.equal(h.scripts.length + h.downloads.length + h.workers.length, 0, 'nothing loads before consent');
-  assert.match(consent.disclosure, /as 3 light-mode workers at about 300 MB each; 2 of them also hold a private full dataset \(about 2\.3 GB each\)\. Building them, at the start and after each seed change \(every few days\), briefly uses 3 threads and up to about 5\.5 GB of RAM\. Mining needs about 5\.5 GB of RAM\./);
+  assert.match(consent.disclosure, /as 3 light-mode workers at about 300 MB each; 2 of them also hold a private full dataset \(about 2\.3 GB each\), which the workers build before mining starts and again after each seed change \(every few days\)\. Mining needs about 5\.5 GB of RAM\./);
   consent.accept(); await flush();
   assert.equal(h.scripts.length, 1);
   const [element] = h.scripts;
@@ -741,13 +741,19 @@ test('replicas load fb_full.js once, take the first worker roles and build throu
   pool.forEach(worker => worker.message({ type: 'ready' })); const ws = h.sockets[0]; ws.open();
   ws.message({ id: 1, result: { id: 'miner', job } });
   const seed = job.seed_hash, items = 2 * 65536, sent = (worker, type) => worker.sent.filter(m => m.type === type);
+  // Build first: every worker gets the seed (a cache), no job, until the datasets are done.
+  assert.deepEqual(pool.map(worker => sent(worker, 'seed').map(m => m.seed_hash)), [[seed], [seed], [seed]]);
+  assert.ok(pool.every(worker => !sent(worker, 'job').length));
+  assert.equal(api.state.status, 'Building the full datasets on 3 workers before mining…');
   pool.forEach((worker, i) => {
     worker.message({ type: 'mode', mode: 'light' });
     worker.message({ type: 'fb_cache', seed, full: i < 2, items });
   });
-  assert.equal(api.state.progress, 0);
+  assert.equal(api.state.progress, 0); assert.equal(api.state.phase, 'initializing', 'cache reports do not start mining');
+  assert.equal(api.state.status, 'Building the full datasets: 0% (3 workers)');
   assert.deepEqual(pool.map(worker => sent(worker, 'fb_compute').map(m => m.chunk)), [[0], [1], []]);
-  pool[0].message({ type: 'hashrate', rate: 40 }); assert.equal(api.state.phase, 'mining', 'light workers mine while replicas build');
+  ws.message({ jsonrpc: '2.0', method: 'job', params: { ...job, job_id: 'job2' } });
+  assert.ok(pool.every(worker => !sent(worker, 'job').length), 'a same-seed job waits for the build too');
   pool[0].message({ type: 'fb_chunk', seed, chunk: 0, own: true, buf: new ArrayBuffer(8) });
   assert.deepEqual(sent(pool[1], 'fb_write').map(m => m.chunk), [0]);
   pool[1].message({ type: 'fb_written', seed, chunk: 0 });
@@ -755,11 +761,19 @@ test('replicas load fb_full.js once, take the first worker roles and build throu
   pool[0].message({ type: 'fb_written', seed, chunk: 1 });
   assert.equal(sent(pool[0], 'fb_finalize').length, 1); assert.equal(sent(pool[1], 'fb_finalize').length, 1);
   pool[0].message({ type: 'mode', mode: 'full' }); pool[0].message({ type: 'fb_final', seed, ok: true });
-  assert.equal(api.state.engine.replicasActive, 1);
+  assert.equal(api.state.engine.replicasActive, 0, 'the split is reported once the build is done');
+  assert.ok(pool.every(worker => !sent(worker, 'job').length));
   pool[1].message({ type: 'mode', mode: 'full' }); pool[1].message({ type: 'fb_final', seed, ok: true });
   assert.equal(api.state.engine.replicasActive, 2); assert.equal(api.state.progress, 1);
-  assert.equal(api.state.status, 'Replica datasets ready: 2 of 2 mining in full mode');
-  assert.ok(!statuses.some(status => /Building dataset|fb_/.test(status)), 'replica progress never takes over the status line');
+  assert.equal(api.state.status, 'Full datasets ready: 2 of 2 mining in full mode');
+  // Done: every worker gets the latest job and mines.
+  assert.deepEqual(pool.map(worker => sent(worker, 'job').map(m => m.job_id)), [['job2'], ['job2'], ['job2']]);
+  pool[2].message({ type: 'hashrate', rate: 40 }); assert.equal(api.state.phase, 'mining');
+  // A new seed stops everyone for the next build.
+  ws.message({ jsonrpc: '2.0', method: 'job', params: { ...job, job_id: 'job3', seed_hash: '11'.repeat(32) } });
+  assert.ok(pool.every(worker => worker.sent.slice(-2).map(m => m.type).join() === 'stop,seed'));
+  assert.equal(api.state.hashrate, 0); assert.match(api.state.status, /Building the full datasets on 3 workers/);
+  assert.ok(!statuses.some(status => /Building dataset|fb_/.test(status)), 'light texts only');
   api.stop(); assert.ok(pool.every(worker => worker.terminated)); assert.equal(api.state.engine.replicasActive, 0);
   api.requestConsent(); consent.accept(); await flush();
   assert.equal(h.scripts.length, 1, 'window.RxFbFull is reused'); assert.equal(h.workers.length, 6);
@@ -791,6 +805,24 @@ test('fixed replica counts fall back to what the RAM budget holds; a failed fb_f
   assert.equal(failed.api.state.error.code, 'CSP_BLOCKED'); assert.equal(failed.api.state.error.directive, 'script-src-elem');
   failed.api.destroy();
 });
+test('a build no replica can join releases the waiting job at once; a reconnect during a build waits for it', async () => {
+  const h = harness({ isolated: false, navigator: nav(4, { deviceMemory: 16 }) });
+  const { api } = await approve(h, { mode: 'light', replicas: 1 });
+  const pool = h.workers.slice(); assert.equal(pool.length, 2);
+  pool.forEach(worker => worker.message({ type: 'ready' })); h.sockets[0].open();
+  h.sockets[0].message({ id: 1, result: { id: 'miner', job } });
+  const seed = job.seed_hash, sent = (worker, type) => worker.sent.filter(m => m.type === type);
+  // A reconnect mid-build: the new login's job waits as well.
+  h.sockets[0].close(1012, 'restart'); h.runTimer(1000); h.sockets[1].open();
+  h.sockets[1].message({ id: 1, result: { id: 'miner2', job: { ...job, job_id: 'relogin' } } });
+  assert.ok(pool.every(worker => !sent(worker, 'job').length));
+  assert.ok(pool.every(worker => sent(worker, 'seed').length === 1), 'same seed: no second build');
+  // Worker 0 could not allocate its dataset: no replica, so the job goes out now.
+  pool[0].message({ type: 'mode', mode: 'light' }); pool[0].message({ type: 'fb_cache', seed, full: false, items: 65536 });
+  assert.deepEqual(pool.map(worker => sent(worker, 'job').map(m => m.job_id)), [['relogin'], ['relogin']]);
+  assert.equal(api.state.engine.replicasActive, 0); assert.equal(api.state.status, 'No full dataset could be allocated: mining in light mode');
+  api.destroy();
+});
 test('auto replicas maximize light-worker equivalents within the RAM budget', async () => {
   const h = harness({ isolated: false });
   const plan = (extra, n) => h.win.RandomXEmbed.plan({ wallet: 'w', pool: 'p', mode: 'light', ...extra }, n);
@@ -809,8 +841,8 @@ test('auto replicas maximize light-worker equivalents within the RAM budget', as
   const tight = plan({ workload: 80 }, nav(32, { deviceMemory: 2 }));
   assert.deepEqual([tight.wantedThreads, tight.threads, tight.memoryBudgetMiB], [25, 3, 1024]);
   assert.match(tight.disclosure, /\(9\.4%\), limited by memory, as 3 light-mode workers/);
-  const auto = plan({ workload: 25 }, nav(12, { deviceMemory: 8 }));
-  assert.deepEqual([auto.helpers, auto.initThreads, auto.peakMemoryMiB], [29, 32, 3200 + 29 * 300]);
+  const auto = plan({ workload: 25, initThreads: 32 }, nav(12, { deviceMemory: 8 }));
+  assert.equal(auto.initThreads, 3, 'the workers build the replicas: no threads beyond the workload and budget');
   // Below one worker: Start explains which memory limit is too small.
   const tiny = harness({ isolated: false, navigator: nav(4, { deviceMemory: 0.5 }) });
   const { api } = await approve(tiny, { mode: 'light' });
@@ -819,53 +851,6 @@ test('auto replicas maximize light-worker equivalents within the RAM budget', as
   const none = harness({ isolated: false, navigator: nav(4) });
   const n = await approve(none, { mode: 'light', memoryCap: 0.25 });
   assert.match(n.api.state.error.message, /memory cap \(0\.25 GB, used where the browser reports no RAM\)/); n.api.destroy();
-});
-test('replica builds recruit helpers up to initThreads per seed; helpers never mine and leave after the build', async () => {
-  const h = harness({ isolated: false, navigator: nav(6, { deviceMemory: 16 }) });
-  const { api } = await approve(h, { mode: 'light', replicas: 1, initThreads: 5 });
-  assert.deepEqual([api.state.engine.workers, api.state.engine.replicas, api.state.engine.helpers], [3, 1, 2]);
-  assert.equal(api.state.engine.peakMemoryMiB, 3200 + 600);
-  const pool = h.workers.slice(); assert.equal(pool.length, 3, 'helpers wait for a seed');
-  pool.forEach(worker => worker.message({ type: 'ready' })); const ws = h.sockets[0]; ws.open();
-  ws.message({ id: 1, result: { id: 'miner', job } });
-  const seed = job.seed_hash, items = 6 * 65536, sent = (worker, type) => worker.sent.filter(m => m.type === type);
-  const helpers = h.workers.slice(3); assert.equal(helpers.length, 2);
-  assert.deepEqual(helpers.map(worker => worker.options.name), ['rx-build-0', 'rx-build-1']);
-  assert.ok(helpers.every(worker => worker.url === pool[0].url));
-  assert.deepEqual(helpers.map(worker => [worker.sent[0].type, worker.sent[0].helper, worker.sent[0].fbRole, worker.sent[0].nonceSlots]),
-    [['init', true, 'light', 1], ['init', true, 'light', 1]]);
-  assert.deepEqual(helpers.map(worker => ({ ...worker.sent[1] })), [{ type: 'seed', seed_hash: seed }, { type: 'seed', seed_hash: seed }]);
-  assert.ok(helpers.every(worker => !sent(worker, 'job').length), 'helpers never get a job');
-  // Everyone has a cache; the replica (worker 0) reports last, which starts the build.
-  [pool[1], pool[2], ...helpers].forEach(worker => worker.message({ type: 'fb_cache', seed, full: false, items }));
-  pool[0].message({ type: 'fb_cache', seed, full: true, items });
-  assert.deepEqual([...pool, ...helpers].map(worker => sent(worker, 'fb_compute').map(m => m.chunk)), [[0, 5], [1], [2], [3], [4]]);
-  // A helper that fails leaves the build; its chunk goes to the least busy worker and mining is unaffected.
-  helpers[1].message({ type: 'error', message: 'Failed to allocate cache' });
-  assert.equal(helpers[1].terminated, true); assert.equal(api.state.error, null); assert.equal(api.state.running, true);
-  assert.deepEqual(sent(pool[1], 'fb_compute').map(m => m.chunk), [1, 4]);
-  helpers[1].message({ type: 'fb_chunk', seed, chunk: 4, own: false, buf: new ArrayBuffer(8) }); // late: ignored
-  const finish = (worker, chunk) => {
-    worker.message({ type: 'fb_chunk', seed, chunk, own: worker === pool[0], buf: new ArrayBuffer(8) });
-    if (worker !== pool[0]) pool[0].message({ type: 'fb_written', seed, chunk });
-  };
-  finish(pool[0], 0); finish(pool[0], 5); finish(pool[1], 1); finish(pool[1], 4); finish(pool[2], 2);
-  assert.equal(helpers[0].terminated, false, 'helpers stay until the build is done');
-  finish(helpers[0], 3);
-  assert.equal(sent(pool[0], 'fb_finalize').length, 1);
-  pool[0].message({ type: 'mode', mode: 'full' }); pool[0].message({ type: 'fb_final', seed, ok: true });
-  assert.equal(helpers[0].terminated, true); assert.equal(api.state.engine.replicasActive, 1);
-  assert.ok(pool.every(worker => !worker.terminated));
-  // Same seed: no new build. A new seed recruits fresh helpers.
-  ws.message({ jsonrpc: '2.0', method: 'job', params: { ...job, job_id: 'job2' } });
-  assert.equal(h.workers.length, 5);
-  ws.message({ jsonrpc: '2.0', method: 'job', params: { ...job, job_id: 'job3', seed_hash: '11'.repeat(32) } });
-  assert.equal(h.workers.length, 7); assert.equal(h.workers[5].sent[1].seed_hash, '11'.repeat(32));
-  // A helper's policy report still reaches the page; Stop ends helpers with the pool.
-  h.workers[6].message({ type: 'rx:policy-error', effectiveDirective: 'worker-src', blockedURI: 'blob', disposition: 'enforce' });
-  assert.equal(api.state.error && api.state.error.code, 'CSP_BLOCKED');
-  assert.ok(h.workers.every(worker => worker.terminated));
-  api.destroy();
 });
 test('mode, replica, thread and tuning options are validated strictly and frozen into config', () => {
   const h = harness();
@@ -927,16 +912,14 @@ test('plan() resolves threads, memory and disclosure without an instance, engine
   const full = plan(base, nav(12));
   assert.ok(Object.isFrozen(full));
   assert.deepEqual({ ...full, disclosure: 0, limits: 0 }, { mode: 'full', runtime: 'pthreads', threads: 6, wantedThreads: 6, workers: 1,
-    replicas: 0, helpers: 0, initThreads: 32, memoryMiB: 2560, peakMemoryMiB: 2560, memoryBudgetMiB: null, memorySource: null,
-    disclosure: 0, limits: 0 });
+    replicas: 0, initThreads: 32, memoryMiB: 2560, memoryBudgetMiB: null, memorySource: null, disclosure: 0, limits: 0 });
   assert.match(full.disclosure, /Dataset initialization uses 32 threads\. Full mode needs about 2\.5 GiB of RAM\./);
   assert.equal(full.limits.maxThreads, 9); assert.equal(full.limits.cores, 12);
   assert.match(plan({ ...base, initThreads: 1 }, nav(12)).disclosure, /initialization uses 1 thread\./);
   const light = plan({ ...base, mode: 'light', replicas: 1, workload: 25 }, nav(12, { deviceMemory: 8 }));
   assert.deepEqual({ ...light, disclosure: 0, limits: 0 }, { mode: 'light', runtime: 'workers', threads: 3, wantedThreads: 3, workers: 3,
-    replicas: 1, helpers: 29, initThreads: 32, memoryMiB: 3200, peakMemoryMiB: 11900, memoryBudgetMiB: 4096, memorySource: 'reported',
-    disclosure: 0, limits: 0 });
-  assert.match(light.disclosure, /as 3 light-mode workers at about 300 MB each; 1 of them also holds a private full dataset \(about 2\.3 GB\)\. Building it, at the start and after each seed change \(every few days\), briefly uses 32 threads and up to about 11\.9 GB of RAM\. Mining needs about 3\.2 GB of RAM\./);
+    replicas: 1, initThreads: 3, memoryMiB: 3200, memoryBudgetMiB: 4096, memorySource: 'reported', disclosure: 0, limits: 0 });
+  assert.match(light.disclosure, /as 3 light-mode workers at about 300 MB each; 1 of them also holds a private full dataset \(about 2\.3 GB\), which the workers build before mining starts and again after each seed change \(every few days\)\. Mining needs about 3\.2 GB of RAM\./);
   assert.equal(plan({ ...base, mode: 'light' }, nav(10, { platform: 'MacIntel', userAgent: 'Version/18 Safari/605' })).workers, 5);
   assert.equal(plan({ ...base, mode: 'light', replicas: 2, workload: 10, memoryCap: 16 }, nav(12)).replicas, 1, 'replicas never exceed workers');
   assert.equal(plan({ ...base, mode: 'light', workload: 1 }, nav(12)).workers, 0);
@@ -947,8 +930,8 @@ test('plan() resolves threads, memory and disclosure without an instance, engine
   const same = plan({ ...base, mode: 'light', replicas: 1, workload: 25, memoryCap: 4 });
   assert.equal(same.replicas, 1);
   assert.deepEqual({ ...api.state.engine }, { mode: same.mode, runtime: same.runtime, workers: same.workers,
-    replicas: same.replicas, replicasActive: 0, helpers: same.helpers, memoryMiB: same.memoryMiB,
-    peakMemoryMiB: same.peakMemoryMiB, memoryBudgetMiB: same.memoryBudgetMiB, memorySource: same.memorySource });
+    replicas: same.replicas, replicasActive: 0, memoryMiB: same.memoryMiB,
+    memoryBudgetMiB: same.memoryBudgetMiB, memorySource: same.memorySource });
   let consent; api.on('consent-request', detail => { consent = detail; });
   api.requestConsent(); assert.equal(consent.disclosure, same.disclosure);
   api.destroy();
@@ -995,7 +978,7 @@ test('tuning reaches every engine init; full mode initializes with initThreads',
   assert.equal(api.state.status, 'Building dataset: 25% (8 threads)'); assert.equal(api.state.progress, 0.25);
   root.message({ type: 'mode', mode: 'full' }); assert.equal(api.state.engine.replicasActive, 0);
   assert.deepEqual({ ...api.state.engine }, { mode: 'full', runtime: 'pthreads', workers: 1, replicas: 0, replicasActive: 0,
-    helpers: 0, memoryMiB: 2560, peakMemoryMiB: 2560, memoryBudgetMiB: null, memorySource: null });
+    memoryMiB: 2560, memoryBudgetMiB: null, memorySource: null });
   api.destroy();
   const l = harness({ isolated: false, navigator: nav(4) });
   const light = await approve(l, { mode: 'light', tuning: { kernelK: 1 } });
