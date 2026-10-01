@@ -19,6 +19,12 @@
   const HEADERS = ['Cross-Origin-Opener-Policy: same-origin', 'Cross-Origin-Embedder-Policy: require-corp',
     'Permissions-Policy: cross-origin-isolated=(self)'];
   const pairs = HEADERS.map(line => line.split(': '));
+  // The demo bridge (any proxy.randomx.cc URL) is not a public proxy: embeds
+  // pointed at it mine to the donation wallet, whatever wallet they carry.
+  const DEMO_BRIDGE = /^wss?:\/\/proxy\.randomx\.cc(?::\d+)?(?:\/|$)/i;
+  const DEMO_NOTE = `<!-- wss://proxy.randomx.cc/embed-ws is the randomx.cc demo bridge, not a public wss proxy:
+embeds pointed at it mine to the randomx.cc donation wallet, whatever wallet they are configured with.
+Point "proxy" at your own bridge to mine to your wallet. -->`;
   $('embedVersion').textContent = 'embed ' + RandomXEmbed.version;
   $('headerBlock').textContent = HEADERS.join('\n');
   $('hostNetlify').textContent = '/*\n' + HEADERS.map(line => '  ' + line).join('\n');
@@ -56,7 +62,7 @@
     let src;
     try { src = new URL(field('scriptURL').value.trim()); } catch (_) { throw new Error('Script URL must be absolute: https://…/dist/embed.js'); }
     if (!['http:', 'https:'].includes(src.protocol) || src.username || src.password) throw new Error('Use an HTTP(S) embed script URL');
-    const lines = [];
+    const lines = DEMO_BRIDGE.test(config.proxy) ? [DEMO_NOTE] : [];
     if (config.mode === 'full') {
       lines.push(`<!-- RandomX embed, full mode. The HTML response of this page must send
   ${HEADERS.join('\n  ')}
@@ -126,6 +132,7 @@ document.addEventListener('randomx:consent-request', function (event) {
   function render() {
     const mode = field('mode').value;
     form.querySelectorAll('[data-only]').forEach(el => { el.hidden = el.dataset.only !== mode; });
+    $('demoBridgeNote').hidden = !DEMO_BRIDGE.test(field('proxy').value.trim());
     try {
       // Only the fields of the shown mode count.
       const invalid = [...form.querySelectorAll('input:invalid, select:invalid')].find(el => !el.closest('[hidden]'));

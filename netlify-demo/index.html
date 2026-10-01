@@ -44,7 +44,9 @@
           <label>TCP port<input name="port" type="number" min="1" max="65535" required value="3333"></label>
           <label class="wide">WebSocket bridge
             <input name="proxy" required spellcheck="false" placeholder="wss://your-bridge.example" value="wss://proxy.randomx.cc/embed-ws">
-            <small>Relays the pool's JSON-RPC to the browser. HTTPS pages need <code>wss://</code>.</small></label>
+            <small>Relays the pool's JSON-RPC to the browser. HTTPS pages need <code>wss://</code>.</small>
+            <small class="caution" id="demoBridgeNote">Demo bridge, not a public wss proxy: embeds pointed at it mine to the
+              randomx.cc donation wallet, whatever wallet is set. Use your own bridge to mine to yours.</small></label>
         </div>
         <details>
           <summary>Advanced</summary>

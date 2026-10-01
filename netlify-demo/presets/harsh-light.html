@@ -29,8 +29,9 @@
     </nav>
     <h1>Harsh light</h1>
     <p class="lede">Light mode on 80 % of the cores within 80 % of the reported RAM, or 12 GB where none is reported. Full-dataset boost on, as in mild light, with the most room for full-dataset workers. Runs on any page; expect a busy machine.</p>
-    <p class="note">The widget is live: after you agree and press Start, this device mines for the demo's donation wallet
-      through the public relay. Stop, or leaving the page, ends it.</p>
+    <p class="note">The widget is live: after you agree and press Start, this device mines to the randomx.cc donation
+      wallet through the demo bridge, <code>wss://proxy.randomx.cc/embed-ws</code>. It is not a public wss proxy: embeds
+      pointed at it mine to the donation wallet, whatever wallet they are configured with. Stop, or leaving the page, ends it.</p>
     <p id="loadError" class="alert" role="alert" hidden></p>
     <div id="randomx-miner"></div>
 

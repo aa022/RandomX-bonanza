@@ -29,8 +29,9 @@
     </nav>
     <h1>Mild light</h1>
     <p class="lede">Light mode on 50 % of the cores within 50 % of the reported RAM, or 8 GB where none is reported. Full-dataset boost on: the embed gives up to two workers a private full dataset where the budget holds it, and builds it on the workers before they mine. Runs on any page.</p>
-    <p class="note">The widget is live: after you agree and press Start, this device mines for the demo's donation wallet
-      through the public relay. Stop, or leaving the page, ends it.</p>
+    <p class="note">The widget is live: after you agree and press Start, this device mines to the randomx.cc donation
+      wallet through the demo bridge, <code>wss://proxy.randomx.cc/embed-ws</code>. It is not a public wss proxy: embeds
+      pointed at it mine to the donation wallet, whatever wallet they are configured with. Stop, or leaving the page, ends it.</p>
     <p id="loadError" class="alert" role="alert" hidden></p>
     <div id="randomx-miner"></div>
 

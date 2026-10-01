@@ -27,6 +27,8 @@ p { margin: 0 0 12px; }
 .lede { color: var(--dim); max-width: 64ch; }
 .note, small { display: block; color: var(--dim); font-size: 12px; line-height: 1.6; }
 small { margin-top: 4px; }
+small.caution { color: var(--ink); }
+small.caution::before { content: "⚠ "; color: var(--accent-ink); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 [hidden] { display: none !important; }
 

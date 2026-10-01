@@ -5,8 +5,8 @@
   'use strict';
   const $ = id => document.getElementById(id);
   const embedScript = document.querySelector('script[src$="/embed.js"]');
-  // The demo's payout and bridge (as in the configurator): the public relay
-  // accepts only this donation wallet.
+  // The demo's payout and bridge (as in the configurator). The bridge is not a
+  // public proxy: embeds on it mine to this donation wallet.
   const BASE = { wallet: '4AEm9oe64pUY2saKdCQfSrg5Xy5N8TgGcecM8qZhcri1FSWdvJ4mFAzhfS3my4Cca7dNyZea7BRb2KannBpRBY1yGytE5fv',
     pool: 'pool.supportxmr.com', port: 3333, proxy: 'wss://proxy.randomx.cc/embed-ws', workerName: 'netlify-demo' };
   const TAIL = { nonceMode: 'nicehash', keepalive: 'required', container: '#randomx-miner' };
@@ -33,6 +33,9 @@
   const html = text => String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const json = value => JSON.stringify(value, null, 2).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
   const snippet = [
+    `<!-- wss://proxy.randomx.cc/embed-ws is the randomx.cc demo bridge, not a public wss proxy:
+embeds pointed at it mine to the randomx.cc donation wallet, whatever wallet they are configured with.
+Point "proxy" at your own bridge to mine to your wallet. -->`,
     ...(config.mode === 'full' ? [`<!-- RandomX embed, full mode. The HTML response of this page must send
   ${HEADERS.join('\n  ')}
 (allow cross-origin-isolated in an existing Permissions-Policy instead of a second one).
