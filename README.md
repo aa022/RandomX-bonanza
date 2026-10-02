@@ -129,7 +129,7 @@ for ergonomic setup, visit [randomx.cc](https://randomx.cc)
 The script mounts itself when the tag has `data-wallet`. Nothing loads or mines until the user consents.
 
     <script defer crossorigin="anonymous"
-      src="https://cdn.jsdelivr.net/gh/aa022/RandomX-bonanza@aa62a04c61dad19661b69c0c714a26461ec823a6/dist/embed.js"
+      src="https://cdn.jsdelivr.net/gh/aa022/RandomX-bonanza@ababefb18fd35142547fc1e906efd8558a3c12e9/dist/embed.js"
       data-wallet="4..." data-pool="pool.example.com" data-port="3333"
       data-proxy="wss://bridge.example.com" data-mode="light" data-workload="50"></script>
 
