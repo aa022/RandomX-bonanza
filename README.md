@@ -79,7 +79,7 @@ come from xmrig's `master` branch, chosen deliberately over the better performin
       10     4.74 s       947         4081*        23.2 %
       32     4.69 s       993         3904*        25.4 %
 
-* credit where its due, the dev branch of xmrig performs at least 10% better than the numbers listed
+`*` credit where its due, the dev branch of xmrig performs at least 10% better than the numbers listed
 
 In the browser on the same machine (32 threads): Chrome ~850–880 H/s,
 Safari ~800 H/s, Firefox ~700 H/s.
