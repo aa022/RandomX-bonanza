@@ -50,12 +50,7 @@ Desktop.ini
 *.bc
 a.out
 
-# Local working notes; only the named shared project documents are included.
+# Local working notes; only the root README is tracked.
 *.md
-!README.md
-!appendix_handoff.md
-!proxy_handoff.md
-!embed_progress.md
-!NOSAB_KNOBS.md
-!nosab_handoff.md
+!/README.md
 wasm/aes_relaxed/aes_relaxed.wasm

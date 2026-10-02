@@ -1,6 +1,6 @@
-// Local server for netlify-demo/ (the configurator). The page's jsDelivr pin
+// Local server for configurator/. The page's jsDelivr pin
 // is rewritten to /dist/, served from this checkout's dist/ with the CORS and
-// CORP headers jsDelivr sends. netlify-demo/_headers applies to the page as on
+// CORP headers jsDelivr sends. configurator/_headers applies to the page as on
 // Netlify; --no-isolation drops COOP/COEP to test a page without them.
 //   node scripts/serve-demo.mjs [--port 8090] [--no-isolation]
 import { createServer } from 'node:http';
@@ -9,7 +9,7 @@ import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const site = join(root, 'netlify-demo'), dist = join(root, 'dist');
+const site = join(root, 'configurator'), dist = join(root, 'dist');
 const args = process.argv.slice(2);
 const option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 const port = Number(option('--port') || process.env.PORT || 8090);
@@ -66,7 +66,7 @@ createServer((req, res) => {
   createReadStream(target).pipe(res);
 }).listen(port, '127.0.0.1', () => {
   const pin = (readFileSync(join(site, 'index.html'), 'utf8').match(PIN) || ['(no jsDelivr pin found)'])[0];
-  console.log(`[demo] http://localhost:${port}/ serves netlify-demo/ ` +
+  console.log(`[demo] http://localhost:${port}/ serves configurator/ ` +
     (isolation ? 'with _headers (cross-origin isolated)' : 'without COOP/COEP (--no-isolation)'));
   console.log(`[demo] ${pin} → /dist/ from this checkout`);
 });

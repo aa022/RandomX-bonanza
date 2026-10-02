@@ -35,7 +35,7 @@ EXTRA        ?=
 DEMO_PORT    ?= 8090
 DEMO_ARGS    ?=
 
-.PHONY: all help install build embed demo serve bench test test-embed clean fclean re
+.PHONY: all help install build embed demo serve bench bench-light test test-embed clean fclean re
 
 # Target dep graph:
 #   install ──→ deps stamp ──┐
@@ -57,10 +57,11 @@ help:
 	@printf '  build     compile public/randomx{,_st}.{js,wasm}\n'
 	@printf '  embed     build the jsDelivr-ready distribution in dist/\n'
 	@printf '  test-embed  run embed lifecycle and consent checks\n'
-	@printf '  demo      serve the netlify-demo/ configurator with dist/ on http://localhost:$(DEMO_PORT)\n'
+	@printf '  demo      serve the configurator/ page with dist/ on http://localhost:$(DEMO_PORT)\n'
 	@printf '  serve     build + run the proxy on http://localhost:8080\n'
 	@printf '  test      canonical RandomX hash smoke test\n'
 	@printf '  bench     full-memory hashrate sweep (mirrors the webui)\n'
+	@printf '  bench-light  light-mode sweep, incl. full-dataset workers (RAM-capped at 60%%)\n'
 	@printf '  clean     remove build outputs\n'
 	@printf '  fclean    clean + drop .make/ stamps\n'
 	@printf '  re        fclean + build\n'
@@ -134,7 +135,7 @@ embed: build
 test-embed:
 	@node --test tests/embed.test.cjs
 
-# The configurator as Netlify serves it (netlify-demo/_headers), with the
+# The configurator as Netlify serves it (configurator/_headers), with the
 # jsDelivr pin rewritten to this checkout's dist/. No build: dist/ is committed.
 demo:
 	@node scripts/serve-demo.mjs --port $(DEMO_PORT) $(DEMO_ARGS)
@@ -163,10 +164,16 @@ bench: build
 	@node $(BENCH_DIR)/bench_regfile.mjs
 	@printf '\n[bench] full-memory hashrate — sweep %s @ %ss / pass, init=%s threads\n' \
 	        '$(SWEEP)' '$(DURATION)' '$(INIT_THREADS)'
-	@printf '        (~2 GiB RAM; supjit + async dataset init; fresh node process per pass)\n'
+	@printf '        (~2.8 GiB RAM; supjit + async dataset init; fresh node process per pass)\n'
 	@node $(BENCH_DIR)/bench_sweep.mjs \
 	      --sweep $(SWEEP) --init-threads $(INIT_THREADS) --duration $(DURATION) \
 	      --profile '$(PROFILE)' $(if $(EXTRA),--extra '$(EXTRA)')
+
+# Light mode (no SharedArrayBuffer): one randomx_st worker per thread, as the
+# browser's fallback. Fixed passes — the full sweep's thread counts, then 1 and
+# 2 full-dataset workers — skipping any estimated above 60% of system RAM.
+bench-light: build
+	@node $(BENCH_DIR)/bench_light_sweep.mjs
 
 # ─── clean ──────────────────────────────────────────────────────────────
 clean:

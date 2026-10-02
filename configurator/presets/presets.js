@@ -8,7 +8,7 @@
   // The demo's payout and bridge (as in the configurator). The bridge is not a
   // public proxy: embeds on it mine to this donation wallet.
   const BASE = { wallet: '4AEm9oe64pUY2saKdCQfSrg5Xy5N8TgGcecM8qZhcri1FSWdvJ4mFAzhfS3my4Cca7dNyZea7BRb2KannBpRBY1yGytE5fv',
-    pool: 'pool.supportxmr.com', port: 3333, proxy: 'wss://proxy.randomx.cc/embed-ws', workerName: 'netlify-demo' };
+    pool: 'pool.supportxmr.com', port: 3333, proxy: 'wss://proxy.randomx.cc/embed-ws', workerName: 'configurator' };
   const TAIL = { nonceMode: 'nicehash', keepalive: 'required', container: '#randomx-miner' };
   const PRESETS = {
     'full-20': { mode: 'full', workload: 20 },
