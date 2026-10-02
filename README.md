@@ -34,20 +34,16 @@ Install project dependencies (toolchain check only — `ws` is vendored under
     make test        # canonical RandomX hash vs. reference test vector
     make embed       # build + package the jsDelivr embed into dist/
     make test-embed  # embed lifecycle and consent tests
-    make demo        # serve configurator/ against dist/ on http://localhost:8090
     make bench       # full-mode hashrate sweep (see Bench)
     make bench-light # light-mode hashrate sweep (see Bench)
     make clean       # remove build outputs
     make fclean      # clean + drop .make/ stamps
     make re          # fclean + build
 
-Open <http://localhost:8080>, press **Start**. The *Wallet setup* panel
-overrides wallet/pool per session (persisted in `localStorage`).
-
-`make demo` takes `DEMO_PORT=<port>` and `DEMO_ARGS=--no-isolation` (serve
-without COOP/COEP).
 
 ## Browser support
+
+!! careful around firefox, mostly untested
 
 - **Chromium / Firefox** — work out of the box over plain HTTP on localhost,
   since browsers treat `localhost` as a secure context (the proxy still
@@ -58,7 +54,7 @@ without COOP/COEP).
   so the local demo won't run there as shipped. Drop a self-signed cert in
   front of the proxy (e.g. `caddy reverse-proxy --to :8080` or any HTTPS
   fronting of your choice) and Safari works fine — the live preview at
-  <https://randomx.cc/> runs in Safari without issues.
+  <https://randomx.cc/> runs without issues.
 
 ## Bench
 
@@ -70,33 +66,11 @@ without COOP/COEP).
     make bench PROFILE=arm               # JIT generator profile: auto | arm | x86
     make bench-light                     # light-mode sweep (no SharedArrayBuffer), fixed passes
 
-Mirrors the webui worker exactly: threaded-interpreter JIT (inline directed
-rounding, fused-pair superinstructions, registers in linear memory, supjit
-kernel) and async dataset init
-(`rxInitDatasetStart` / `rxInitDatasetProgress` / `rxInitDatasetJoin`).
-Each pass forks a fresh node process so JIT/pthread state cannot leak between
-thread counts. CPU model + core count are detected and printed in the
-summary. Needs ~2.8 GiB RAM.
-
-`make bench-light` runs the browser's light-mode fallback: one worker per
-thread at ~300 MB each, 1/4/10/32 light workers, then 1 and 2 full-dataset
-workers (~2.3 GB more each) alone and alongside light workers up to 4/10/32
-total. Passes estimated above 60% of system RAM are skipped. It takes no
-knobs; same 30 s/pass and summary format as `make bench`.
-
-The standalone scripts also work directly:
-
-    node bench/bench_webui.mjs --threads 32 --duration 30
-    node bench/bench_sweep.mjs --sweep 1,4,32 --duration 30
-    node bench/bench_regfile.mjs                   # JIT codegen micro-bench
-    node bench/nosab_bench.mjs --workers 10 --full 2 --secs 30   # one light-mode pass
-
 ## Efficiency
 
 Apple M4 base · 10 cores · `make bench` (30 s/pass) vs. native
 `xmrig --bench=250K` (fast mode) at the same thread count. The xmrig numbers
-come from xmrig's `master` branch, chosen deliberately over `dev`, which is
-slightly faster on ARM, so the efficiency figures flatter the WASM build.
+come from xmrig's `master` branch, chosen deliberately over the better performing `dev`, to make the number look more interesting.
 
     threads   init     WASM H/s    xmrig H/s    efficiency
     ─────────────────────────────────────────────────────
@@ -118,8 +92,8 @@ Light mode, `make bench-light` vs. `xmrig --bench=250K --randomx-mode=light`
       10     0.88 s       291          546         53.3 %
       32    10.90 s       289          533         54.2 %
 
-With full-dataset workers (`NF+M` = N full-dataset + M light workers). This
-matters because, like the rest of light mode, it needs no SharedArrayBuffer:
+With full-dataset workers (`NF+M` = N full-dataset + M light workers):
+!! this approach is relevant since it doesnt require SharedArrayBuffer
 
     workers   init     WASM H/s    RAM (est.)
     ──────────────────────────────────────────
@@ -134,6 +108,9 @@ matters because, like the rest of light mode, it needs no SharedArrayBuffer:
 ![make bench-light](readme/rxb_bench_light.png)
 ![xmrig --bench=250K](readme/xmrig_bench.png)
 
+Run the same benches on your machine with `make bench` (full mode) and
+`make bench-light` (light mode); see [Bench](#bench).
+
 ## Payload
 
 Total served to the browser per page load: **562 KB**.
@@ -147,7 +124,7 @@ Total served to the browser per page load: **562 KB**.
 ## Configuration
 
 ### Documentation of the elegant control plane of our embed script
-For ergonomic setup, visit [randomx.cc](https://randomx.cc).
+for ergonomic setup, visit [randomx.cc](https://randomx.cc)
 
 The script mounts itself when the tag has `data-wallet`. Nothing loads or mines until the user consents.
 
@@ -231,13 +208,12 @@ Isolation: full mode needs HTTPS (or localhost), COOP `same-origin` + COEP `requ
 
 ## Layout
 
-    Makefile            install / build / serve / bench / test / embed / demo / clean
+    Makefile            install / build / serve / bench / test / embed / clean
     config.js           wallet + pool + port defaults
     proxy/index.js      HTTP + WS + raw-TCP stratum bridge
     public/             browser assets (miner.js, worker.js, embed.js, built randomx{,_st}.{js,wasm})
     dist/               jsDelivr/npm-ready embed distribution
-    configurator/       embed configurator (static, deploys to Netlify as-is)
-    scripts/            package-embed.mjs · serve-demo.mjs
+    scripts/            package-embed.mjs
     tests/              embed tests
     bench/              bench_webui.mjs · bench_sweep.mjs · bench_regfile.mjs · canonical_hash.mjs · …
     readme/             README images
