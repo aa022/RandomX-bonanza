@@ -1,0 +1,45 @@
+{
+  "version": "0.3.0",
+  "files": {
+    "embed.js": {
+      "bytes": 68640,
+      "sha256": "c046d1924c564a29cbb632bfed8275c44580dea5b1fbf206ae36f6623124c63b",
+      "integrity": "sha384-X6NTs7EaHfMA7yUGQgTL70yzj8jDOithBJVtT+Y5Rzyz0TM8Pux53sRgZkBc+/km"
+    },
+    "embed-worker.js": {
+      "bytes": 1060,
+      "sha256": "04ab72411fca9e3267559889b56101618282869fba586f886b762bc3e53fa7bd",
+      "integrity": "sha384-2UUOIXagM1z1jBUYqsIsaMYhHera2ukz81muIr/EjWtdyuRYWOCACYsKENpljEj9"
+    },
+    "worker.js": {
+      "bytes": 37615,
+      "sha256": "9cdda2f22b8c0d5448d1dc29a1ca0d8d2c6231c1a77e9fa27fea4d7c3721ee94",
+      "integrity": "sha384-uaHA5Iyu3p97QVJdsGiSjcE8dC4V/cM07m27Giryi32n1bnyPejPMt8SuKUnqD8M"
+    },
+    "randomx.js": {
+      "bytes": 57780,
+      "sha256": "21d38abd037679a88e77b301b52f59c0de609369934c2fcb2a1c479c5e49d389",
+      "integrity": "sha384-yhDnZoFzjn6loaeQ67EAdUHTNsPcKSJzbrrLCRRL3fm1/xdg1CIClrLI+CRWWUId"
+    },
+    "randomx.wasm": {
+      "bytes": 262937,
+      "sha256": "29aff01b220f3ecc2105e0ff209ef120fb48efffa9e15b347baf6d1e676da9b6",
+      "integrity": "sha384-zFpaUm34OUbAfVKGM8iOvgOXyPEJN25HEZ7Gl7qhOnhhH79UJWk7pxBHRF76KtFL"
+    },
+    "randomx_st.js": {
+      "bytes": 42141,
+      "sha256": "8c066278243e927ead89ce1d1bac3e94ead42fa75f52d3f706e9d5b3135f6599",
+      "integrity": "sha384-qAhy41AQEjK7NGoe2Gx8suzhOSZ7P1mOkFB+wVXQ/J/iUQUokfFSSwXxY9x4rHQf"
+    },
+    "randomx_st.wasm": {
+      "bytes": 247882,
+      "sha256": "bfd29c57deb0aba258d4781a1653de7dc1ceffca00cd9fc2e9dfa08e5c1432fc",
+      "integrity": "sha384-6x40ZIE/nCxNnrgeaNyPOASXoWjQNpQGn9Bf1vST8lIyUOA8SCt7xyqB7kYpfAuo"
+    },
+    "fb_full.js": {
+      "bytes": 11842,
+      "sha256": "ac158b70d700f0185ae119e7d61a52da7af6da4f22dc78244533a8c33c06a408",
+      "integrity": "sha384-1OIEujRBhz7NJJLt+ALVvUQOsslpq7omKIDV1fNKAETISKBowvMIxwC68LOWyR3A"
+    }
+  }
+}

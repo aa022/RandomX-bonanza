@@ -1,0 +1,239 @@
+#!/bin/bash
+set -e
+
+SRCDIR="$(dirname "$0")/src/src"
+OUTDIR="$(dirname "$0")"
+
+SOURCES=(
+  "$SRCDIR/randomx.cpp"
+  "$SRCDIR/vm_interpreted.cpp"
+  "$SRCDIR/vm_interpreted_light.cpp"
+  "$SRCDIR/virtual_machine.cpp"
+  "$SRCDIR/superscalar.cpp"
+  "$SRCDIR/instruction.cpp"
+  "$SRCDIR/instructions_portable.cpp"
+  "$SRCDIR/aes_hash.cpp"
+  "$SRCDIR/soft_aes.cpp"
+  "$SRCDIR/blake2_generator.cpp"
+  "$SRCDIR/blake2/blake2b.c"
+  "$SRCDIR/argon2_core.c"
+  "$SRCDIR/argon2_ref.c"
+  "$SRCDIR/argon2_avx2.c"
+  "$SRCDIR/argon2_ssse3.c"
+  "$SRCDIR/dataset.cpp"
+  "$SRCDIR/allocator.cpp"
+  "$SRCDIR/reciprocal.c"
+  "$SRCDIR/bytecode_machine.cpp"
+  "$SRCDIR/wasm_jit_compiler.cpp"
+  "$SRCDIR/wasm_jit_leb128.c"
+  "$SRCDIR/wasm_jit_decode.c"
+  "$SRCDIR/wasm_jit_inst.c"
+  "$SRCDIR/wasm_jit_gen.c"
+  "$SRCDIR/wasm_jit_threaded.c"
+  "$SRCDIR/wasm_jit_superscalar.cpp"
+  "$SRCDIR/wasm_jit_run.cpp"
+  "$SRCDIR/vm_compiled.cpp"
+  "$SRCDIR/vm_compiled_light.cpp"
+  "$SRCDIR/virtual_memory.c"
+  "$SRCDIR/cpu.cpp"
+)
+
+EXPORTED_FUNCTIONS='[
+  "_randomx_alloc_cache",
+  "_randomx_init_cache",
+  "_randomx_alloc_dataset",
+  "_randomx_init_dataset",
+  "_randomx_dataset_item_count",
+  "_randomx_create_vm",
+  "_randomx_vm_set_cache",
+  "_randomx_vm_set_dataset",
+  "_randomx_calculate_hash",
+  "_randomx_calculate_hash_first",
+  "_randomx_calculate_hash_next",
+  "_randomx_calculate_hash_last",
+  "_randomx_destroy_vm",
+  "_randomx_release_cache",
+  "_randomx_release_dataset",
+  "_randomx_get_flags",
+  "_randomx_get_dataset_memory",
+  "_rxSetJitEnabled",
+  "_rxGetRoundingModePtr",
+  "_rxjit_set_max_memory_pages",
+  "_rxjit_set_feature",
+  "_rxjit_set_profile",
+  "_rxjit_get_profile",
+  "_rxjit_set_fuse_n",
+  "_rxjit_set_triples_n",
+  "_rxjit_set_unroll2",
+  "_rxjit_set_shared_code",
+  "_rxjit_effective_fuse_n",
+  "_rxjit_effective_kind16",
+  "_rxjit_effective_triples_n",
+  "_rxjit_effective_unroll2",
+  "_rxjit_effective_shared_code",
+  "_rxjit_set_aes_simd",
+  "_rxjit_effective_aes_simd",
+  "_rxjit_set_aes_relaxed",
+  "_rxjit_effective_aes_relaxed",
+  "_rxjit_set_light_mlp",
+  "_rxjit_effective_light_mlp",
+  "_rxjit_set_kernel_k",
+  "_rxjit_effective_kernel_k",
+  "_rx_aes_relaxed_calls",
+  "_rx_aes_selftest",
+  "_rx_aes_bench",
+  "_rxjit_test_generate",
+  "_rxjit_test_generate_static",
+  "_rxjit_stat_runs",
+  "_rxjit_stat_light_runs",
+  "_rxjit_stat_fails",
+  "_rxjit_stat_static_init_attempts",
+  "_rxjit_stat_static_init_failures",
+  "_rxjit_stat_static_compile_us",
+  "_rxjit_stat_dyn_compile_us",
+  "_rxjit_stat_run_us",
+  "_rxjit_stat_dispatches",
+  "_rxjit_stat_decoded_programs",
+  "_rxjit_stat_module_hash",
+  "_rxjit_stat_module_hash_same",
+  "_rxjit_stat_module_hash_mismatch",
+  "_rxjit_stat_reset",
+  "_rxjit_record_timing",
+  "_rxjit_err_buf_ptr",
+  "_rxjit_err_buf_size",
+  "_rxjit_set_experiment_reuse_module",
+  "_rxjit_get_experiment_reuse_module",
+  "_rxjit_set_use_threaded_interp",
+  "_rxjit_set_regs_in_memory",
+  "_rxjit_set_split_inner_dispatch",
+  "_rxjit_set_supjit_enabled",
+  "_rxjit_get_supjit_enabled",
+  "_rxjit_stat_threaded_module_size",
+  "_rxjit_threaded_module_ptr",
+  "_rxjit_stat_threaded_entries",
+  "_rxjit_stat_threaded_phase",
+  "_rxjit_record_run_us_sample",
+  "_rxjit_get_samples_ptr",
+  "_rxjit_get_samples_capacity",
+  "_rxjit_get_samples_count",
+  "_rxMulh",
+  "_rxSmulh",
+  "_rxSoftroundAdd",
+  "_rxSoftroundSub",
+  "_rxSoftroundMul",
+  "_rxSoftroundDiv",
+  "_rxSoftroundSqrt",
+  "_rxInitDatasetParallel",
+  "_rxInitDatasetStart",
+  "_rxInitDatasetProgress",
+  "_rxInitDatasetJoin",
+  "_rxInitItemsInto",
+  "_rxMineBatchParallel",
+  "_rxCreateMiningContext",
+  "_rxMineBatchContext",
+  "_rxDestroyMiningContext",
+  "_rxProfileSetEnabled",
+  "_rxProfileReset",
+  "_rxProfileGetInitMs",
+  "_rxProfileGetRunMs",
+  "_rxProfileGetBytecodeMs",
+  "_rxProfileGetFinalMs",
+  "_rxProfileGetHashes",
+  "_malloc",
+  "_free"
+]'
+
+# Relaxed-SIMD AES side module (wasm/aes_relaxed): built with clang-19, embedded
+# in randomx.wasm as bytes (randomx.wasm itself must stay relaxed-free for JSC)
+# and instantiated at runtime (soft_aes.cpp rx_aes_relaxed_hf). Without clang-19
+# the committed header is kept. The header is only rewritten when it changes.
+AESR_DIR="$OUTDIR/aes_relaxed"
+# Two variants: the pthread build imports the SHARED memory (rx_aes_relaxed_blob.h),
+# the single-thread no-SAB build (randomx_st) a plain one (rx_aes_relaxed_blob_st.h).
+# Both define rx_aes_relaxed_blob / rx_aes_relaxed_blob_len; soft_aes.cpp picks one.
+build_aes_relaxed() { # $1 = header name, rest = extra clang flags
+  local hdr="$1"; shift
+  clang-19 --target=wasm32-unknown-unknown -O3 -msimd128 -mrelaxed-simd -mbulk-memory \
+    -ffreestanding -fno-builtin -nostdlib \
+    --ld-path=/usr/bin/wasm-ld-19 -Wl,--no-entry -Wl,--import-memory -Wl,--max-memory=4294967296 \
+    -Wno-unused-command-line-argument "$@" \
+    -o "$AESR_DIR/aes_relaxed.wasm" "$AESR_DIR/aes_relaxed.c"
+  python3 -c 'import sys; b=open(sys.argv[1],"rb").read(); open(sys.argv[2],"w").write("// generated by wasm/build.sh from wasm/aes_relaxed/aes_relaxed.c -- do not edit\n#pragma once\nstatic const unsigned char rx_aes_relaxed_blob[] = {" + ",".join(str(x) for x in b) + "};\nstatic const unsigned rx_aes_relaxed_blob_len = %d;\n" % len(b))' \
+    "$AESR_DIR/aes_relaxed.wasm" "$AESR_DIR/blob.h.tmp"
+  if cmp -s "$AESR_DIR/blob.h.tmp" "$SRCDIR/$hdr"; then rm -f "$AESR_DIR/blob.h.tmp";
+  else mv "$AESR_DIR/blob.h.tmp" "$SRCDIR/$hdr"; fi
+}
+if command -v clang-19 >/dev/null 2>&1 && [ -x /usr/bin/wasm-ld-19 ]; then
+  build_aes_relaxed rx_aes_relaxed_blob.h -matomics -Wl,--shared-memory
+  build_aes_relaxed rx_aes_relaxed_blob_st.h
+else
+  echo "clang-19 / wasm-ld-19 not found: keeping $SRCDIR/rx_aes_relaxed_blob{,_st}.h"
+fi
+
+echo "Building RandomX WASM..."
+MEMORY_FLAGS=(
+  -s ALLOW_MEMORY_GROWTH=1
+  -s MAXIMUM_MEMORY=4294967296
+)
+
+if [ "${FIXED_MEMORY:-0}" = "1" ]; then
+  MEMORY_FLAGS=(
+    -s ALLOW_MEMORY_GROWTH=0
+    -s INITIAL_MEMORY="${INITIAL_MEMORY:-3221225472}"
+    -s MAXIMUM_MEMORY="${MAXIMUM_MEMORY:-3221225472}"
+  )
+  echo "Using fixed shared memory: ${INITIAL_MEMORY:-3221225472} bytes"
+fi
+
+emcc -O3 -flto -DNDEBUG -msimd128 -pthread \
+  -s WASM=1 \
+  -s USE_PTHREADS=1 \
+  -s PTHREAD_POOL_SIZE=32 \
+  "${MEMORY_FLAGS[@]}" \
+  -s SHARED_MEMORY=1 \
+  -s EXPORTED_FUNCTIONS="$EXPORTED_FUNCTIONS" \
+  -s EXPORTED_RUNTIME_METHODS='["cwrap","ccall","HEAPU8","wasmMemory"]' \
+  -s MODULARIZE=1 \
+  -s EXPORT_NAME="createRandomX" \
+  -s ENVIRONMENT='web,worker,node' \
+  -s NO_EXIT_RUNTIME=1 \
+  -s DISABLE_EXCEPTION_CATCHING=0 \
+  -I "$SRCDIR" \
+  -I "$SRCDIR/blake2" \
+  "${SOURCES[@]}" \
+  -o "$OUTDIR/randomx.js"
+
+cp "$OUTDIR/randomx.js" "$OUTDIR/../public/randomx.js"
+cp "$OUTDIR/randomx.wasm" "$OUTDIR/../public/randomx.wasm"
+if [ -f "$OUTDIR/randomx.worker.js" ]; then
+  cp "$OUTDIR/randomx.worker.js" "$OUTDIR/../public/randomx.worker.js"
+fi
+
+# Single-thread no-SAB build (randomx_st): same sources and exports, no pthreads,
+# plain growable memory. Used by the worker when the page is not
+# crossOriginIsolated (or ?sab=0); the generated JIT modules and the relaxed AES
+# blob import a non-shared memory there (RXJIT_MEM_FLAG, rx_aes_relaxed_blob_st.h).
+if [ "${ST_BUILD:-1}" = "1" ]; then
+  echo "Building RandomX WASM (single-thread, no SAB)..."
+  emcc -O3 -flto -DNDEBUG -msimd128 \
+    -s WASM=1 \
+    -s ALLOW_MEMORY_GROWTH=1 \
+    -s MAXIMUM_MEMORY=4294967296 \
+    -s EXPORTED_FUNCTIONS="$EXPORTED_FUNCTIONS" \
+    -s EXPORTED_RUNTIME_METHODS='["cwrap","ccall","HEAPU8","wasmMemory"]' \
+    -s MODULARIZE=1 \
+    -s EXPORT_NAME="createRandomX" \
+    -s ENVIRONMENT='web,worker,node' \
+    -s NO_EXIT_RUNTIME=1 \
+    -s DISABLE_EXCEPTION_CATCHING=0 \
+    -I "$SRCDIR" \
+    -I "$SRCDIR/blake2" \
+    "${SOURCES[@]}" \
+    -o "$OUTDIR/randomx_st.js"
+  cp "$OUTDIR/randomx_st.js" "$OUTDIR/../public/randomx_st.js"
+  cp "$OUTDIR/randomx_st.wasm" "$OUTDIR/../public/randomx_st.wasm"
+fi
+
+echo "Build complete: $OUTDIR/randomx.js + $OUTDIR/randomx.wasm"
+echo "Copied to public/"
+ls -lh "$OUTDIR/randomx.js" "$OUTDIR/randomx.wasm" "$OUTDIR"/randomx.worker.js "$OUTDIR"/randomx_st.{js,wasm} 2>/dev/null || true

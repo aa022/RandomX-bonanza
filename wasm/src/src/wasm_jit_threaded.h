@@ -1,0 +1,105 @@
+// Threaded-interpreter WASM module: ONE resident module per pthread that
+// runs every RandomX program by reading a 256×16-byte decoded-instruction
+// array out of linear memory and dispatching opcodes via a br_table.
+//
+// Per-thread: compile + instantiate ONCE; eliminates per-program new
+// WebAssembly.Module/Instance allocation (proven cause of Safari JSC
+// run-time degradation under the old dynamic-module-per-program design).
+#pragma once
+
+#include <stdint.h>
+#include "wasm_jit_gen.h" // rxjit_vm_state_t
+
+// Per-thread arena: one aligned_alloc(RXJIT_ARENA_ALIGN, RXJIT_ARENA_SIZE)
+// block per pthread holds vm_state and the program slot (M4 cache lines are
+// 128 B, so nothing is shared with other threads' data).
+//   +0     rxjit_vm_state_t (312 B)          vm_state_ptr = blk
+//   +320   rounding-mask table, 4 x 128 B
+//   +832   64 B layout-pad dummy-store area (feature bits 256..1024)
+//   +896   u32 scratchpad base
+//   +960   light mode: 64 B item (step 7)
+//   +1024  program slot: 256 records x 16 B  program_slot_ptr = blk + 1024
+//   +5120  sentinel record #256 (16 B)
+//   +5184  light_mlp 2: 64 B second item (the next iteration's, item_pair)
+#define RXJIT_ARENA_ALIGN     128
+#define RXJIT_ARENA_VM_OFF    0
+#define RXJIT_ARENA_RMASK_OFF 320
+#define RXJIT_ARENA_PAD_OFF   832
+#define RXJIT_ARENA_SPB_OFF   896
+#define RXJIT_ARENA_ITEM_OFF  960 // light mode: the 64-byte item computed per iteration
+#define RXJIT_ARENA_SLOT_OFF  1024
+#define RXJIT_ARENA_SENT_OFF  5120
+#define RXJIT_ARENA_ITEM2_OFF 5184 // light_mlp 2: item(i+1), computed with item(i) on even i
+#define RXJIT_ARENA_SIZE      6144
+#ifdef __cplusplus
+static_assert(RXJIT_ARENA_ITEM2_OFF % 64 == 0 && RXJIT_ARENA_ITEM2_OFF >= RXJIT_ARENA_SENT_OFF + 16 &&
+                  RXJIT_ARENA_ITEM2_OFF + 64 <= RXJIT_ARENA_SIZE,
+              "ITEM2 area");
+#else
+_Static_assert(RXJIT_ARENA_ITEM2_OFF % 64 == 0 && RXJIT_ARENA_ITEM2_OFF >= RXJIT_ARENA_SENT_OFF + 16 &&
+                   RXJIT_ARENA_ITEM2_OFF + 64 <= RXJIT_ARENA_SIZE,
+               "ITEM2 area");
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Generate a complete self-contained WASM module that runs an entire
+// RandomX program against linear memory. All per-thread pointers are baked
+// in as i32.const; per-program state lives in vm_state and program_slot,
+// loaded at main_loop prologue.
+//
+// Arguments:
+//   vm_state_ptr    absolute pointer to the rxjit_vm_state_t in linear mem.
+//   scratchpad_ptr  absolute pointer to the 2 MiB scratchpad base.
+//   dataset_ptr     absolute pointer to the dataset BASE (no offset folded).
+//                   The dataset_offset is loaded per-call from vm_state.
+//   program_slot_ptr absolute pointer to a 4 KiB block in linear memory
+//                   where the C side writes 256 decoded_inst_t records
+//                   before invoking main_loop.
+//   mem_min_pages   shared-memory limits for the import.
+//   mem_max_pages
+//   jit_feature     bitmask of RXJIT_FEATURE_* (FMA/RELAXED_SIMD/etc.)
+//   fuse_n          fused pair kinds (rxjit_fuse_n_for_feature)
+//   triples_n       fused triple kinds, after the pairs (X2)
+//   kind16          record head width (rxjit_kind16); the decoder must be
+//                   called with the same fuse_n, triples_n and kind16
+//   shared_code     no per-thread pointer in the bytes (wasm_jit_profile.h):
+//                   the four pointers are ignored, the module exports a
+//                   mutable i32 global "a" that must be set to the arena
+//                   base (vm_state) before "d" runs, and every address is
+//                   arena-relative (the scratchpad base from +SPB_OFF)
+//   buf             output buffer (caller-owned), rxjit_threaded_buf_need() bytes
+//                   in wasm_jit_run.cpp; ~40 KiB at 200 pairs, far more
+//                   with every pair and triple.
+//
+// Returns number of bytes written into buf. The module exports a single
+// "d" function (takes no arguments, returns nothing) that runs the full
+// 2048-iteration program; everything else is internal.
+uint32_t rxjit_generate_threaded_module(uint32_t vm_state_ptr, uint32_t scratchpad_ptr,
+                                        uint32_t dataset_ptr, uint32_t program_slot_ptr,
+                                        uint32_t mem_min_pages, uint32_t mem_max_pages,
+                                        int jit_feature, int regs_in_memory,
+                                        int split_inner_dispatch, int fuse_n, int triples_n,
+                                        int kind16, int shared_code, uint8_t *buf);
+
+// Light mode: embed this superscalar item function body (see
+// rxjit_emit_superscalar_item_fn) in the next rxjit_generate_threaded_module
+// call(s) on this thread; (NULL, 0) restores the full-mode module. The body is
+// copied at generation time, so it must stay valid until then.
+void rxjit_threaded_set_light_fn(const uint8_t *body, uint32_t len);
+
+// Light mode, with the light fn above (same lifetime): the step-7 memory-level
+// parallelism mode (wasm_jit_profile.h light_mlp) the body was emitted for.
+// 0: item(i32 item, i32 out). 1: the same body, and step 7 also loads the next
+// iteration's first cache line (cache_base + ((ds_ptr + mx/64) & mask) * 64)
+// before the call. 2: the body is item_pair(i32 itemA, i32 itemB, i32 out)
+// (rxjit_emit_superscalar_item_pair_fn with out_delta = ITEM2_OFF - ITEM_OFF),
+// called on even iterations (ic even) for items ma and mx; odd iterations xor
+// the ITEM2 line it left.
+void rxjit_threaded_set_light_mlp(int mode, uint32_t cache_base);
+
+#ifdef __cplusplus
+}
+#endif
