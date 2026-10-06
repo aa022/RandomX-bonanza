@@ -47,8 +47,7 @@ make re          # fclean + build
 
 ## Browser support
 
-> [!WARNING]
-> Firefox is mostly untested.
+Firefox is mostly untested.
 
 - **Chromium / Firefox** — work out of the box over plain HTTP on localhost, since browsers treat `localhost` as a secure context (the proxy still sends the COOP/COEP headers SharedArrayBuffer / wasm pthreads need). Served without those headers, the miner falls back to single-thread light-mode workers (see `?sab=0`).
 - **Safari** — refuses `SharedArrayBuffer` outside HTTPS even on localhost, so the local demo won't run there as shipped. Put an HTTPS proxy in front (e.g. `caddy reverse-proxy --to :8080`) and Safari works fine — the live preview at <https://randomx.cc/> runs without issues.
@@ -90,9 +89,7 @@ Light mode, `make bench-light` vs. `xmrig --bench=250K --randomx-mode=light` (xm
 | 32 | 10.90 s | 289 | 533 | 54.2 % |
 
 With full-dataset workers (`NF+M` = N full-dataset + M light workers):
-
-> [!NOTE]
-> This approach is relevant since it doesn't require SharedArrayBuffer.
+This approach is relevant since it doesn't require SharedArrayBuffer.
 
 | workers | init | WASM H/s | RAM (est.) |
 |:--|--:|--:|--:|
