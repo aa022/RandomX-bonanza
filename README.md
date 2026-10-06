@@ -89,7 +89,6 @@ Light mode, `make bench-light` vs. `xmrig --bench=250K --randomx-mode=light` (xm
 | 32 | 10.90 s | 289 | 533 | 54.2 % |
 
 With full-dataset workers (`NF+M` = N full-dataset + M light workers):
-This approach is relevant since it doesn't require SharedArrayBuffer.
 
 | workers | init | WASM H/s | RAM (est.) |
 |:--|--:|--:|--:|
@@ -99,6 +98,9 @@ This approach is relevant since it doesn't require SharedArrayBuffer.
 | 2F | 19.13 s | 337 | ~5.1 GiB |
 | 2F+2 | 11.75 s | 417 | ~5.7 GiB |
 | 2F+8 | 7.02 s | 427 | ~7.4 GiB |
+
+This approach is relevant since it doesn't require SharedArrayBuffer.
+
 
 ![make bench](readme/rxb_bench_full.png)
 ![make bench-light](readme/rxb_bench_light.png)
